@@ -16,6 +16,17 @@
 #gesture-touch-container {
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
+    /* Prevent rubber-band overscroll from pushing the scrollbar thumb
+       below the container's bottom edge and behind the nav bar. */
+    overscroll-behavior-y: contain;
+}
+
+/* Inset the scrollbar track so the thumb never touches the nav bar edge.
+   The track starts 2 px below the top of the container and ends 6 px above
+   the bottom (= the nav bar boundary), giving clear visual separation. */
+#gesture-touch-container::-webkit-scrollbar-track {
+    margin-top: 2px;
+    margin-bottom: 6px;
 }
 
 /* Cards inside the list must also declare pan-y so that touches starting
