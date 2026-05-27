@@ -1,4 +1,4 @@
-const APP_VERSION = "v5.0.11";
+const APP_VERSION = "v5.0.10";
 const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ2NjeKudS93yv8-DYSYnBxaFS5_I1TWily79rOkMdGTu5IA/exec"; 
 const BACKEND_URL = API_URL;
 
@@ -17,8 +17,7 @@ if (currentMapStyleKey === 'street') {
     localStorage.setItem('compass_map_style', 'terrain');
 }
 
-// Default Platform Fallback: Lisbon Center Coordinates
-let userLat = 38.7223; let userLon = -9.1393;
+let userLat = 38.7223; let userLon = -9.1393; // Lisbon city-centre — global cold-boot fallback
 let cachedHardwareString = "Unknown Device Model";
 let gpsStatusCachedBool = false; 
 let activeTabID = 'map';
@@ -49,7 +48,6 @@ let noteGestureStartX = 0;
 let noteGestureStartY = 0;
 let formPriorityState = "Normal";
 
-// Global Layout Feature Flags
 const ENABLE_MAP_ROTATION = false;
 
 function parseReadableDeviceHardware() {
@@ -373,38 +371,37 @@ function killLiveSpeechBubbleHUDState() {
 
 function toggleCityDropdownOverlayMenu(event) {
     event.stopPropagation();
-    closeAllActiveHUDDropdownOverlays();
+    killLiveSpeechBubbleHUDState();
+    
+    const deck = document.getElementById('mapLayerStyleDropdownDeck');
+    if (deck) deck.classList.add('hidden');
 
     const box = document.getElementById('cityHUDDropdownPopupBox');
     const backdrop = document.getElementById('dropdownBlurBackdrop');
-    if (box && backdrop) {
-        box.classList.remove('hidden');
-        backdrop.classList.remove('hidden');
-        calculateSmartCityDefaultFilters();
-    }
+    document.getElementById('filterCategoryDropdownPopupBox').classList.add('hidden');
+    if (!box.classList.contains('hidden')) { box.classList.add('hidden'); backdrop.classList.add('hidden'); } 
+    else { box.classList.remove('hidden'); backdrop.classList.remove('hidden'); calculateSmartCityDefaultFilters(); }
 }
 
 function toggleFilterDropdownOverlayMenu(event) {
     if (activeTabID === 'itinerary') return;
     event.stopPropagation();
-    closeAllActiveHUDDropdownOverlays();
+    killLiveSpeechBubbleHUDState();
+    
+    const deck = document.getElementById('mapLayerStyleDropdownDeck');
+    if (deck) deck.classList.add('hidden');
 
     const box = document.getElementById('filterCategoryDropdownPopupBox');
     const backdrop = document.getElementById('dropdownBlurBackdrop');
-    if (box && backdrop) {
-        box.classList.remove('hidden');
-        backdrop.classList.remove('hidden');
-        buildDynamicShoppingCheckboxList();
-    }
+    document.getElementById('cityHUDDropdownPopupBox').classList.add('hidden');
+    if (!box.classList.contains('hidden')) { box.classList.add('hidden'); backdrop.classList.add('hidden'); } 
+    else { box.classList.remove('hidden'); backdrop.classList.remove('hidden'); buildDynamicShoppingCheckboxList(); }
 }
 
 function closeAllActiveHUDDropdownOverlays() {
-    const cityBox = document.getElementById('cityHUDDropdownPopupBox');
-    const filterBox = document.getElementById('filterCategoryDropdownPopupBox');
-    const backdrop = document.getElementById('dropdownBlurBackdrop');
-    if (cityBox) cityBox.classList.add('hidden');
-    if (filterBox) filterBox.classList.add('hidden');
-    if (backdrop) backdrop.classList.add('hidden');
+    document.getElementById('cityHUDDropdownPopupBox').classList.add('hidden');
+    document.getElementById('filterCategoryDropdownPopupBox').classList.add('hidden');
+    document.getElementById('dropdownBlurBackdrop').classList.add('hidden');
 }
 
 function toggleQuickAddModal(show) { document.getElementById('quickAddModal').classList.toggle('hidden', !show); }
@@ -768,6 +765,11 @@ function renderList() {
                             <span class="text-[8px] font-black uppercase tracking-widest text-slate-500 block mb-0.5">Schedule</span>
                             <div class="bg-slate-950/50 border border-slate-950 p-2.5 rounded-xl font-mono text-[10px] text-slate-400 space-y-0.5">${hoursHTMLTokens}</div>
                         </div>
+                        ${(spot.booking_requirement && spot.booking_requirement !== "N/A" && spot.booking_requirement.toLowerCase() !== "none") ? `
+                        <div class="p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-xl">
+                            <span class="text-[8px] font-black uppercase tracking-widest text-amber-400 block">Alert</span>
+                            <span class="text-slate-300 leading-relaxed block mt-0.5">${spot.booking_requirement}</span>
+                        </div>` : ''}
                     </div>
                     <div class="flex gap-2 justify-end pt-2 border-t border-slate-950 shrink-0 items-center">
                         <button onclick="handleManualInlineCardFlipExecution(event, '${uniqueCardContainerId}', 'backward')" class="text-slate-400 bg-slate-950 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
@@ -833,52 +835,223 @@ function updateNetworkStatusHUD() {
     }
 }
 
-function triggerCuteSpeechBubbleHUD(message, elementTarget, event) {
-    if(event) event.stopPropagation();
-    const bubble = document.getElementById('globalToastSpeechBubbleHUD');
-    const textNode = document.getElementById('speechBubbleTextContainer');
-    const pointer = document.getElementById('bubblePointerNode');
-    if(!bubble || !textNode || !pointer) return;
-
-    if(speechBubbleHideTimer) clearTimeout(speechBubbleHideTimer);
-    textNode.innerText = message;
-
-    const bounds = elementTarget.getBoundingClientRect();
-    const bubbleWidth = 240; 
-    const screenWidth = window.innerWidth;
-    const padOffset = 16; 
-
-    let targetLeftPosition = bounds.left + (bounds.width / 2) - (bubbleWidth / 2);
-
-    if (targetLeftPosition < padOffset) targetLeftPosition = padOffset;
-    if (targetLeftPosition + bubbleWidth > screenWidth - padOffset) {
-        targetLeftPosition = screenWidth - bubbleWidth - padOffset;
-    }
-
-    const customPointerOffset = (bounds.left + (bounds.width / 2)) - targetLeftPosition;
-    pointer.style.left = `${customPointerOffset}px`;
-    bubble.style.left = `${targetLeftPosition}px`;
-    bubble.style.top = `${bounds.top + window.scrollY - 66}px`;
-
-    bubble.classList.remove('hidden');
-}
-
 async function commitProfileRename() {
     const renameField = document.getElementById('settingsRenameField');
     if (!renameField || !renameField.value.trim()) {
         alert("Please enter a valid profile name.");
         return;
     }
+    
+    const oldName = currentUser || "Global Traveller";
     const newName = renameField.value.trim();
+    
+    if (oldName === newName) {
+        alert("The new profile name matches your current label.");
+        return;
+    }
+
+    if (!confirm(`Are you sure you want to change your profile identity from "${oldName}" to "${newName}"?`)) return;
+
+    try {
+        await fetch(BACKEND_URL, {
+            method: 'POST',
+            mode: 'cors',
+            body: JSON.stringify({
+                action: 'log_name_change',
+                user: newName,
+                oldName: oldName,
+                deviceMeta: cachedHardwareString
+            })
+        });
+    } catch (err) {
+        console.error("Failed to log name change to cloud logs:", err);
+    }
+
     localStorage.setItem('compass_user', newName);
     currentUser = newName;
     renameField.value = '';
+    
+    alert(`Identity profile updated to: ${newName}. Syncing resources...`);
     toggleSettingsMenu(false);
     syncData(true);
 }
 
+async function triggerSecureServerHistoryPurgeVault() {
+    const adminPassword = prompt("🚨 SECURE AREA PROTOCOL:\n\nEnter the Master Admin Password to proceed with live server database log purges:");
+    if (adminPassword === null) return; 
+    if (!adminPassword.trim()) {
+        alert("Password cannot be blank.");
+        return;
+    }
+
+    try {
+        const response = await fetch(BACKEND_URL, {
+            method: 'POST',
+            mode: 'cors',
+            body: JSON.stringify({
+                action: 'purge_server_history',
+                user: currentUser || "System Admin",
+                password: adminPassword.trim()
+            })
+        });
+        
+        const outcome = await response.json();
+        if (outcome.result === "success") {
+            alert("🚨 CRITICAL SUCCESS:\n\nGoogle Sheets historical server records and log metrics have been fully scrubbed.");
+            toggleSettingsMenu(false);
+            syncData(true);
+        } else if (outcome.result === "auth_failed") {
+            alert("❌ AUTHENTICATION FAILED:\n\nInvalid Admin Password provided.");
+        } else {
+            alert("Error: " + (outcome.error || "Unknown response received from cloud ecosystem."));
+        }
+    } catch (err) {
+        console.error("Purge failure:", err);
+        alert("Communication crash. Verify your web app script setup properties.");
+    }
+}
+
 function clearDeviceSessionAndLogout() {
-    if (!confirm("Are you sure you want to clear your offline registry cache layers?")) return;
+    if (!confirm("Are you sure you want to drop your active profile context? This resets your local offline registry cache layers completely.")) return;
     localStorage.clear();
+    alert("Local application sandbox cache destroyed cleanly.");
     window.location.reload();
 }
+
+// ----------------- APP INITIALIZATION (MASTER BOOTLOADER) -----------------
+window.onload = function() {
+    // NOTE: Do NOT write any default zoom/lat/lng here — doing so would wipe the
+    // user's last active view on every reload. The priority resolver in map.js
+    // reads and validates those values independently.
+
+    cachedHardwareString = parseReadableDeviceHardware();
+    document.getElementById('meta-id').innerText = `Device ID: ${deviceId}`;
+    document.getElementById('meta-hardware').innerText = `Model: ${cachedHardwareString}`;
+    document.getElementById('meta-version').innerText = `Version: ${APP_VERSION}`;
+    
+    if (typeof initLeafletMapEngineCanvas === 'function') initLeafletMapEngineCanvas();
+
+    // Auto-start GPS stream if permission was already granted on a previous visit.
+    // This avoids triggering the browser permission prompt on first load for new users
+    // while giving returning users seamless live-tracking from the first frame.
+    if (navigator.permissions) {
+        navigator.permissions.query({ name: 'geolocation' }).then(result => {
+            if (result.state === 'granted' && typeof startLiveHardwareGPSTracking === 'function') {
+                startLiveHardwareGPSTracking();
+            }
+        }).catch(() => { /* permissions API unsupported — GPS stays opt-in */ });
+    }
+
+    // Safety net: if the tile-load event never fires (offline / map init error),
+    // force-dismiss the calibration screen after 10 s so the app is never locked.
+    setTimeout(() => {
+        const loader = document.getElementById('mapCanvasWarmupLoader');
+        if (loader && loader.style.display !== 'none') {
+            loader.style.pointerEvents = 'none';
+            loader.style.touchAction   = 'auto';
+            loader.style.transition    = 'opacity 0.45s ease';
+            loader.style.opacity       = '0';
+            setTimeout(() => { loader.style.display = 'none'; }, 500);
+        }
+    }, 10000);
+
+    // ── Minimize / Maximize (Page Visibility) handler ────────────────────────
+    // window.onload does NOT re-fire on background → foreground transitions, so
+    // the calibration curtain is never re-shown. This handler silently refreshes
+    // map geometry and ensures the GPS stream is still running after a resume.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') return;
+
+        // Dismiss loader immediately if it somehow survived into the background
+        const loader = document.getElementById('mapCanvasWarmupLoader');
+        if (loader && loader.style.display !== 'none') {
+            loader.style.display       = 'none';
+            loader.style.pointerEvents = 'none';
+        }
+
+        // Re-fit map to its container (browser may have resized it while hidden)
+        if (leafletMapInstance) {
+            window.requestAnimationFrame(() => leafletMapInstance.invalidateSize({ animate: false }));
+        }
+
+        // Resume GPS stream if it was running before and has since stalled
+        if (gpsStatusCachedBool && liveGpsWatchId === null && typeof startLiveHardwareGPSTracking === 'function') {
+            startLiveHardwareGPSTracking();
+        }
+    });
+    populateUserDropdown(); 
+    syncPriorityFilterViewModeUI();
+    
+    document.getElementById('trayFlipToBackBtn').addEventListener('click', (e) => { 
+        e.stopPropagation(); 
+        document.getElementById('mapDetailTrayHUD').classList.add('flipped'); 
+        if (typeof assembleTrayInlineAssignorRow === 'function') assembleTrayInlineAssignorRow(); 
+    });
+    document.getElementById('trayFlipToFrontBtn').addEventListener('click', (e) => { 
+        e.stopPropagation(); 
+        document.getElementById('mapDetailTrayHUD').classList.remove('flipped'); 
+    });
+    
+    const trayNode = document.getElementById('mapDetailTrayHUD');
+    if(trayNode && typeof L !== 'undefined') {
+        L.DomEvent.disableClickPropagation(trayNode);
+        L.DomEvent.on(trayNode, 'contextmenu', L.DomEvent.stopPropagation);
+    }
+    
+    document.getElementById('dropdownBlurBackdrop').addEventListener('click', () => {
+        closeAllActiveHUDDropdownOverlays();
+        toggleSettingsMenu(false);
+        if(typeof dismissMapDetailTrayHUDCard === 'function') dismissMapDetailTrayHUDCard();
+        if(typeof toggleItineraryCreationDrawerForm === 'function') toggleItineraryCreationDrawerForm(false);
+    });
+
+    if (travelSpots.length > 0) {
+        calculateSmartCityDefaultFilters();
+        renderList();
+        
+        if (typeof triggerOptimalLandingViewportRecalculation === 'function') {
+            triggerOptimalLandingViewportRecalculation();
+        }
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') {
+            plotDynamicMarkersOnCanvasMap();
+        }
+        if (typeof buildItinerarySubMenuChecklist === 'function') {
+            buildItinerarySubMenuChecklist();
+        }
+        
+        const masterListViewInit = document.getElementById('itineraryMasterListView');
+        if (masterListViewInit) masterListViewInit.classList.remove('hidden');
+        
+        if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
+    }
+    
+    if (!currentUser) {
+        document.getElementById('userModal').classList.remove('hidden');
+    } else {
+        initializeSessionDashboard();
+    }
+    document.addEventListener('click', (event) => {
+         if (event.target.closest('button[onclick*="nukeAllSavedData"]') || event.target.closest('#itineraryCreationDrawerModal')) {
+             return;
+         }
+
+         if (!event.target.closest('#cityHUDDropdownPopupBox') && 
+             !event.target.closest('#filterCategoryDropdownPopupBox') && 
+             !event.target.closest('#cityFilterHUDTriggerBtn') && 
+             !event.target.closest('#filterMenuTriggerBtn')) {
+             closeAllActiveHUDDropdownOverlays();
+         }
+         
+         if (!event.target.closest('#mapLayerStyleDropdownDeck') && !event.target.closest('button[onclick*="mapLayerStyleDropdownDeck"]')) {
+             const deck = document.getElementById('mapLayerStyleDropdownDeck');
+             if (deck) deck.classList.add('hidden');
+         }
+         
+         const settingsMenu = document.getElementById('settingsDrawer');
+         if (settingsMenu && !settingsMenu.classList.contains('hidden')) {
+             if (!event.target.closest('#settingsDrawerContentBody') && !event.target.closest('button[onclick="toggleSettingsMenu(true)"]')) {
+                 toggleSettingsMenu(false);
+             }
+         }
+     });
+};

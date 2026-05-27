@@ -1,6 +1,29 @@
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
+/* ── Scroll reliability fixes ───────────────────────────────────────────────
+   1. touch-action: pan-y on the main list container tells the browser to
+      always allow vertical scrolling, bypassing any non-passive inline
+      ontouchmove handlers on child elements (spot-card note paragraphs).
+   2. -webkit-overflow-scrolling: touch enables native momentum scrolling on
+      iOS for all overflow-y-auto regions.
+   3. The note overlay scroll box gets the same treatment so tap-hold expanded
+      notes are also scrollable.
+────────────────────────────────────────────────────────────────────────── */
+#gesture-touch-container {
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+}
+
+#noteExpandedOverlayScrollBox,
+#itineraryMasterListScroll,
+#itineraryTimelineScrollContainer,
+#settingsDrawerContentBody,
+#checkboxScrollRegionContainer,
+#cityHUDChecklistContainer {
+    -webkit-overflow-scrolling: touch;
+}
+
 * {
     -webkit-tap-highlight-color: transparent;
     -webkit-touch-callout: none;
@@ -115,6 +138,25 @@ body {
 /* V5 Itinerary Matrix Styles */
 .itin-done-text { text-decoration: line-through; opacity: 0.5; transition: all 0.3s ease; }
 .itin-done-card { filter: grayscale(100%) opacity(0.7); transition: all 0.3s ease; border-color: transparent !important; }
+
+/* Recenter button press — subtle scale-down feedback, always plays on tap */
+.recenter-button-press {
+    animation: recenterPressEffect 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+@keyframes recenterPressEffect {
+    0%   { transform: scale(1); }
+    28%  { transform: scale(0.92); }
+    100% { transform: scale(1); }
+}
+
+/* Compass spin — only plays when actually moving to a new location */
+.compass-spin-active {
+    animation: compassSpinToNorth 0.65s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+@keyframes compassSpinToNorth {
+    0%   { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
 
 /* Real-Life Action Magnifying Glass Lens Scale Animation */
 .lens-zoom-animation {

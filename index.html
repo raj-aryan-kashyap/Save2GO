@@ -26,6 +26,22 @@
 </head>
 <body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col overflow-hidden selection:bg-transparent select-none">
 
+    <!-- Full-screen launch loader — lives at body root so no parent can clip or block it -->
+    <div id="mapCanvasWarmupLoader" style="position:fixed;inset:0;z-index:99999;background:rgba(2,6,23,0.97);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;pointer-events:all;touch-action:none;">
+        <div style="position:relative;width:96px;height:96px;display:flex;align-items:center;justify-content:center;">
+            <div style="position:absolute;inset:0;border-radius:50%;border:4px solid rgba(236,72,153,0.1);border-top-color:#ec4899;animation:spin 1s linear infinite;"></div>
+            <i class="fa-solid fa-earth-americas" style="font-size:2.25rem;background:linear-gradient(135deg,#ec4899,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;filter:drop-shadow(0 0 15px rgba(236,72,153,0.4));"></i>
+        </div>
+        <div style="text-align:center;">
+            <h3 style="font-size:0.75rem;font-weight:900;text-transform:uppercase;letter-spacing:0.25em;background:linear-gradient(to right,#f472b6,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin:0 0 4px;">Calibrating Canvas</h3>
+            <p style="font-size:9px;font-family:monospace;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;animation:pulse 1.5s ease-in-out infinite;margin:0;">Mapping Regional Tiles...</p>
+        </div>
+    </div>
+    <style>
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+    </style>
+
     <div id="dropdownBlurBackdrop" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[500] hidden transition-all duration-300"></div>
 
     <div id="globalToastSpeechBubbleHUD" class="fixed z-[99999] pointer-events-none hidden max-w-[240px] w-full filter drop-shadow-xl h-0 w-0 overflow-visible">
@@ -131,17 +147,6 @@
     <div class="flex-1 relative w-full h-full overflow-hidden z-10">
         
         <div id="view-map" class="view-panel active-view">
-            <div id="mapCanvasWarmupLoader" class="absolute inset-0 bg-slate-950/95 z-[450] flex flex-col items-center justify-center gap-5 transition-opacity duration-500 pointer-events-auto">
-                <div class="relative w-24 h-24 flex items-center justify-center">
-                    <div class="absolute inset-0 border-4 border-pink-500/10 border-t-pink-500 rounded-full animate-spin"></div>
-                    <i class="fa-solid fa-earth-americas text-4xl text-transparent bg-clip-text bg-gradient-to-tr from-pink-500 to-violet-500 filter drop-shadow-[0_0_15px_rgba(236,72,153,0.4)]"></i>
-                </div>
-                <div class="text-center space-y-1">
-                    <h3 class="text-xs font-black uppercase tracking-[0.25em] text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-purple-400">Calibrating Canvas</h3>
-                    <p class="text-[9px] font-mono text-slate-500 font-bold uppercase tracking-wider animate-pulse">Mapping Regional Tiles...</p>
-                </div>
-            </div>
-
             <div id="map-render-element" class="w-full h-full bg-slate-950 absolute inset-0 z-10"></div>
             
             <div class="absolute top-28 left-4 z-[400] pointer-events-none select-none">
@@ -265,7 +270,7 @@
             </div>
         </div>
 
-        <div id="view-list" class="view-panel w-full bg-slate-950 flex flex-col">
+        <div id="view-list" class="view-panel w-full bg-slate-950 flex flex-col overflow-hidden">
             
             <div class="w-full px-4 bg-slate-950 shrink-0 z-20 relative">
                 <div class="max-w-md mx-auto bg-slate-900/90 backdrop-blur-xl border-x border-b border-slate-800/80 px-3.5 py-1 rounded-b-xl flex justify-between items-center h-7 shadow-md -mt-[1px]">
