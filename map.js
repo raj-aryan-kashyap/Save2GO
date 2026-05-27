@@ -89,7 +89,6 @@ function calculateDefaultMapCenterCity() {
     return travelSpots.find(s => s.city === pickedCityName);
 }
 
-// Fix Architecture: Robust coordinate positioning logic decoupled from raw storage pollution races
 function triggerOptimalLandingViewportRecalculation() {
     if (!leafletMapInstance) return;
     
@@ -97,8 +96,7 @@ function triggerOptimalLandingViewportRecalculation() {
     const savedLng = localStorage.getItem('compass_map_state_lng');
     const savedZoom = localStorage.getItem('compass_map_state_zoom');
 
-    // Prioritize active cache positions if user has actively scrolled or modified view parameters
-    if (savedLat && savedLng && savedZoom && savedLat !== "48.8566" && savedLng !== "2.3522") {
+    if (savedLat && savedLng && savedZoom && savedLat !== "0" && savedLat !== "48.8566") {
         leafletMapInstance.setView([parseFloat(savedLat), parseFloat(savedLng)], parseInt(savedZoom), { reset: true });
     } else {
         const optimalDefaultRecord = calculateDefaultMapCenterCity();
@@ -108,7 +106,7 @@ function triggerOptimalLandingViewportRecalculation() {
             localStorage.setItem('compass_map_state_lng', optimalDefaultRecord.longitude);
             localStorage.setItem('compass_map_state_zoom', '12');
         } else {
-            leafletMapInstance.setView([userLat, userLon], 12, { reset: true });
+            leafletMapInstance.setView([48.8566, 2.3522], 12, { reset: true });
         }
     }
 }
@@ -116,7 +114,7 @@ function triggerOptimalLandingViewportRecalculation() {
 function initLeafletMapEngineCanvas() {
     if (leafletMapInstance) return;
     
-    // Fix: Initializing canvas structure natively at zoom level 12 to ensure background tiles draw immediately
+    // Smart Hack: Initialize at zoom track level 1 over an empty matrix profile to ensure core layers boot fast
     leafletMapInstance = L.map('map-render-element', { 
         zoomControl: false, 
         attributionControl: false,
@@ -124,7 +122,7 @@ function initLeafletMapEngineCanvas() {
         rotate: true,
         bounceAtZoomLimits: false,
         fadeAnimation: false 
-    }).setView([userLat, userLon], 12);
+    }).setView([0, 0], 1);
     
     setMapBaseLayerProviderSource(currentMapStyleKey);
     mapMarkersLayerGroup = L.layerGroup().addTo(leafletMapInstance);
@@ -160,12 +158,11 @@ function initLeafletMapEngineCanvas() {
         }
     });
 
-    triggerOptimalLandingViewportRecalculation();
-    
-    // Staggered Reveal Fix: Calibrate bounds explicitly inside requestAnimationFrame windows
+    // Product Design Hack: Delay viewport centering tracking until the browser paint loops initialize completely
     setTimeout(() => {
         if (leafletMapInstance) {
             window.requestAnimationFrame(() => {
+                // Force size boundaries calibration while screen curtain loader mask is 100% active and opaque
                 leafletMapInstance.invalidateSize({ animate: false });
                 triggerOptimalLandingViewportRecalculation();
                 
@@ -177,10 +174,10 @@ function initLeafletMapEngineCanvas() {
                             setTimeout(() => { warmupScreenNode.classList.add('hidden'); }, 500);
                         }
                     });
-                }, 300); 
+                }, 400); // 400ms buffer guarantees map tile pulling settles down safely before reveal
             });
         }
-    }, 1500);
+    }, 1200);
 
     const initialZoomLevel = leafletMapInstance.getZoom();
     const debugNode = document.getElementById('mapZoomDebugHUD');
@@ -296,6 +293,40 @@ function startLiveHardwareGPSTracking() {
         return;
     }
     
+    // Product Design Mock Sandbox: Instantaneous simulator activation preventing kCLErrorLocationUnknown framework freezes completely
+    if (IS_DEBUG_MOCK_MODE) {
+        console.warn("Sensor simulation override active: Initializing mock user tracking assets.");
+        gpsStatusCachedBool = true;
+        lastGpsSuccessTime = Date.now();
+        
+        const fallbackRecord = calculateDefaultMapCenterCity();
+        if (fallbackRecord) {
+            userLat = parseFloat(fallbackRecord.latitude);
+            userLon = parseFloat(fallbackRecord.longitude);
+        } else {
+            userLat = 48.8566; 
+            userLon = 2.3522;
+        }
+        
+        cachedUserCoords = { lat: userLat, lon: userLon };
+        updateGpsHudStatus('active', "GPS Active");
+
+        isCameraLocked = true;
+        syncCameraLockVisualUIState();
+
+        if (leafletMapInstance) {
+            if (userPositionPulseCircle) {
+                userPositionPulseCircle.setLatLng([userLat, userLon]);
+            } else {
+                userPositionPulseCircle = L.circleMarker([userLat, userLon], { 
+                    radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2 
+                }).addTo(leafletMapInstance);
+            }
+            leafletMapInstance.setView([userLat, userLon], 18);
+        }
+        return;
+    }
+
     if (liveGpsWatchId !== null) {
         navigator.geolocation.clearWatch(liveGpsWatchId);
     }
@@ -339,50 +370,11 @@ function startLiveHardwareGPSTracking() {
             }
         },
         (err) => {
-            if (IS_DEBUG_MOCK_MODE) {
-                console.warn("Hardware position unavailable, executing mock location profile fallback context.");
-                gpsStatusCachedBool = true; 
-                lastGpsSuccessTime = Date.now();
-                
-                const fallbackCityRecord = calculateDefaultMapCenterCity();
-                if (fallbackCityRecord) {
-                    userLat = parseFloat(fallbackCityRecord.latitude);
-                    userLon = parseFloat(fallbackCityRecord.longitude);
-                } else {
-                    userLat = 48.8566; 
-                    userLon = 2.3522;
-                }
-                
-                cachedUserCoords = { lat: userLat, lon: userLon };
-                updateGpsHudStatus('active', "GPS Active");
-
-                isCameraLocked = true;
-                syncCameraLockVisualUIState();
-
-                if (leafletMapInstance) {
-                    if (userPositionPulseCircle) {
-                        userPositionPulseCircle.setLatLng([userLat, userLon]);
-                    } else {
-                        userPositionPulseCircle = L.circleMarker([userLat, userLon], { 
-                            radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2 
-                        }).addTo(leafletMapInstance);
-                    }
-                    leafletMapInstance.setView([userLat, userLon], 18);
-                }
-                return;
-            }
-
-            if (err.code === err.PERMISSION_DENIED || !gpsStatusCachedBool) {
-                gpsStatusCachedBool = false;
-                isCameraLocked = false;
-                syncCameraLockVisualUIState();
-                updateGpsHudStatus('off', "GPS Off");
-                document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
-                if (liveGpsWatchId !== null) {
-                    navigator.geolocation.clearWatch(liveGpsWatchId);
-                    liveGpsWatchId = null;
-                }
-            }
+            gpsStatusCachedBool = false;
+            isCameraLocked = false;
+            syncCameraLockVisualUIState();
+            updateGpsHudStatus('off', "GPS Off");
+            document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
         },
         { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
