@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Save2Go V5.0.0</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link class="map-core-css" rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
+    
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%23ec4899'/><stop offset='100%25' stop-color='%238b5cf6'/></linearGradient></defs><path fill='url(%23g)' d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z'/></svg>">
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link class="manifest-ref" rel="manifest" href="manifest.json">
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js');
+        }
+    </script>
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col overflow-hidden selection:bg-transparent select-none">
+
+    <div id="dropdownBlurBackdrop" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[500] hidden transition-all duration-300"></div>
+
+    <div id="globalToastSpeechBubbleHUD" class="fixed z-[99999] pointer-events-none hidden max-w-[240px] w-full filter drop-shadow-xl h-0 w-0 overflow-visible">
+        <div class="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-700 text-slate-200 text-[11px] font-bold p-3 rounded-2xl text-center relative shadow-2xl leading-relaxed w-[240px]">
+            <span id="speechBubbleTextContainer">Message context</span>
+            <div id="bubblePointerNode" class="absolute -bottom-1.5 w-3 h-3 bg-slate-950 border-r border-b border-slate-700 rotate-45"></div>
+        </div>
+    </div>
+
+    <div id="noteExpandedOverlayHUD" class="fixed inset-0 bg-slate-950/70 backdrop-blur-md z-[99999] flex items-center justify-center p-6 hidden transition-all duration-200">
+        <div id="noteExpandedOverlayCard" class="w-full max-w-sm bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 rounded-2xl p-5 shadow-2xl flex flex-col gap-3">
+            <div class="flex justify-between items-center border-b border-slate-800/60 pb-2">
+                <span class="text-[10px] uppercase font-black tracking-widest text-pink-500">Expanded View</span>
+                <button onclick="manuallyCloseNoteOverlayHUD()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="noteExpandedOverlayScrollBox" class="max-h-[50vh] overflow-y-auto subtle-scrollbar pr-1">
+                <p id="noteExpandedOverlayText" class="text-xs text-slate-200 leading-relaxed font-medium whitespace-pre-wrap select-text"></p>
+            </div>
+        </div>
+    </div>
+
+    <div id="gpsInstructionsOverlayModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-center justify-center p-6 hidden">
+        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
+            <div class="text-3xl text-red-500"><i class="fa-solid fa-location-crosshairs"></i></div>
+            <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider mt-2">Location Error</h3>
+            <p class="text-xs text-slate-400 leading-relaxed font-medium">
+                Your device location setting is turned off or blocked. Please enable device location inside your phone settings dashboard and try again.
+            </p>
+            <button onclick="document.getElementById('gpsInstructionsOverlayModal').classList.add('hidden')" class="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 font-bold text-xs uppercase tracking-wider rounded-xl text-white">Got It</button>
+        </div>
+    </div>
+
+    <div id="masterGlobalControlHeaderDeck" class="fixed top-0 left-0 right-0 h-[108px] bg-slate-900/90 backdrop-blur-xl border-b border-slate-800/80 px-4 pt-4 shadow-xl z-50 rounded-b-2xl overflow-hidden">
+        <div class="flex justify-between items-center mb-1">
+            <div class="flex flex-col items-start pl-1">
+                <h1 class="text-lg font-black flex items-center gap-2 select-none">
+                    <i class="fa-solid fa-map-pin text-xl bg-clip-text text-transparent bg-gradient-to-tr from-pink-500 to-violet-500 filter drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)] rotate-12 transform origin-bottom-left"></i>
+                    <span class="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500 tracking-tight">Save2Go</span>
+                </h1>
+                <div class="flex items-center gap-1.5 mt-0.5 pl-0.5">
+                    <span id="networkIndicator" class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                    <span id="syncText" class="text-[9px] font-mono text-slate-500 whitespace-nowrap">Cache Loading...</span>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="gpsBadgeButton" onclick="handleGpsBadgeClickAction(event);" class="h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-red-500/10 border-red-500/20 text-red-400 cursor-pointer relative z-[60] transition-colors">
+                    <span id="gpsIconFrame" class="text-[11px] flex items-center justify-center"><i class="fa-solid fa-location-crosshairs text-red-400"></i></span>
+                    <span id="gpsBadgeText">GPS Off</span>
+                </button>
+                <button id="manualSyncCloudBtn" onclick="syncData(true)" class="p-2 rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs transition-transform duration-200 active:scale-95 relative z-[60]">
+                    <div id="syncButtonIconFrame" class="inline-block"><i class="fa-solid fa-arrows-rotate"></i></div>
+                </button>
+                <button onclick="toggleSettingsMenu(true)" class="p-2 w-8 h-8 flex items-center justify-center rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs relative z-[60]">
+                    <i class="fa-solid fa-gear"></i>
+                </button>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-12 gap-2 items-center relative">
+            <div id="priorityFilterContainer" class="col-span-5 bg-slate-950 p-1 rounded-xl border border-slate-800/80 flex h-[38px] relative overflow-hidden transition-all duration-200">
+                <button onclick="setPriorityFilterState(false)" id="toggleOptionShowAll" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10">Show All</button>
+                <button onclick="setPriorityFilterState(true)" id="toggleOptionStarred" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500">Starred</button>
+            </div>
+            <div class="col-span-4 relative">
+                <button id="cityFilterHUDTriggerBtn" onclick="toggleCityDropdownOverlayMenu(event)" class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 truncate shadow-inner transition-all duration-200">
+                    <span id="cityHUDTriggerText" class="truncate">All Cities</span><span>▼</span>
+                </button>
+            </div>
+            <div class="col-span-3 relative">
+                <button id="filterMenuTriggerBtn" onclick="toggleFilterDropdownOverlayMenu(event)" class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 shadow-inner transition-all duration-200">
+                    <span>Type</span><span>▼</span><span id="activeFilterBadgeCount" class="hidden px-1.5 py-0.5 bg-pink-600 text-white font-black text-[9px] rounded-full">0</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="fixed top-[116px] left-0 right-0 px-4 pointer-events-none z-[600]">
+        <div class="max-w-md mx-auto relative w-full h-0">
+            <div id="cityHUDDropdownPopupBox" class="absolute left-4 w-52 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-2 hidden pointer-events-auto flex flex-col max-h-80 overflow-hidden">
+                <div id="cityHUDChecklistContainer" class="space-y-1 text-xs text-slate-300 font-semibold overflow-y-auto subtle-scrollbar flex-1 max-h-64 pb-1 pr-1"></div>
+                <div class="pt-2 pb-1 mt-1.5 border-t border-slate-850 bg-slate-900 text-center shrink-0">
+                    <button onclick="clearAllSelectedCityCheckboxes()" class="w-11/12 mx-auto py-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-lg text-[10px] font-black uppercase tracking-wider active:bg-rose-500/20 transition-all">Clear Filter</button>
+                </div>
+            </div>
+
+            <div id="filterCategoryDropdownPopupBox" class="absolute right-4 w-52 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-2 hidden pointer-events-auto flex flex-col max-h-80 overflow-hidden">
+                <div class="border-b border-slate-800 pb-1.5 mb-1.5 shrink-0">
+                    <button onclick="toggleItineraryChildDropdownMenu(event)" class="w-full text-left text-[11px] font-black text-pink-400 flex items-center justify-between py-1 px-1.5 rounded bg-pink-500/5 hover:bg-pink-500/10 border border-pink-500/10">
+                        <span><i class="fa-solid fa-route mr-1.5"></i> Itinerary Quick Drop</span>
+                        <span id="itinChildCaretNode">▶</span>
+                    </button>
+                    <div id="itineraryChildSelectorMenuBucket" class="hidden mt-1.5 pl-1 space-y-1 max-h-32 overflow-y-auto subtle-scrollbar border-l border-slate-800"></div>
+                </div>
+                <div class="overflow-y-auto subtle-scrollbar flex-1 max-h-64 pb-1 pr-1 space-y-1 text-xs text-slate-300 font-semibold" id="checkboxScrollRegionContainer"></div>
+                <div class="sticky bottom-0 bg-slate-900 pt-2 border-t border-slate-850 shrink-0 space-y-2 text-center pb-1" id="stickyDropdownFreezePanel">
+                    <div id="hideCompletedTargetRowContainer"></div>
+                    <button onclick="clearAllFilterCheckboxes()" class="w-11/12 mx-auto py-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-lg text-[10px] font-black uppercase tracking-wider active:bg-rose-500/20 transition-all block">Clear Filter</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex-1 relative w-full h-full overflow-hidden z-10">
+        
+        <div id="view-map" class="view-panel active-view">
+            <div id="mapCanvasWarmupLoader" class="absolute inset-0 bg-slate-950/95 z-[450] flex flex-col items-center justify-center gap-5 transition-opacity duration-500 pointer-events-auto">
+                <div class="relative w-24 h-24 flex items-center justify-center">
+                    <div class="absolute inset-0 border-4 border-pink-500/10 border-t-pink-500 rounded-full animate-spin"></div>
+                    <i class="fa-solid fa-earth-americas text-4xl text-transparent bg-clip-text bg-gradient-to-tr from-pink-500 to-violet-500 filter drop-shadow-[0_0_15px_rgba(236,72,153,0.4)]"></i>
+                </div>
+                <div class="text-center space-y-1">
+                    <h3 class="text-xs font-black uppercase tracking-[0.25em] text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-purple-400">Calibrating Canvas</h3>
+                    <p class="text-[9px] font-mono text-slate-500 font-bold uppercase tracking-wider animate-pulse">Mapping Regional Tiles...</p>
+                </div>
+            </div>
+
+            <div id="map-render-element" class="w-full h-full bg-slate-950 absolute inset-0 z-10"></div>
+            
+            <div class="absolute top-28 left-4 z-[400] pointer-events-none select-none">
+                <span id="mapZoomDebugHUD" class="text-[10px] font-mono font-bold text-slate-500/80 tracking-wide">Zoom: 18</span>
+            </div>
+
+            <div class="absolute top-28 right-4 z-[400] flex flex-col items-end gap-1.5 pointer-events-none w-full max-w-[280px]">
+                <button onclick="document.getElementById('mapLayerStyleDropdownDeck').classList.toggle('hidden'); event.stopPropagation();" class="px-3 py-2 bg-slate-900/95 border border-slate-800 text-[10px] font-black uppercase tracking-wider rounded-xl shadow-2xl text-slate-300 flex items-center gap-1.5 active:bg-slate-800 pointer-events-auto">
+                    <span id="activeLayerDisplayLabel">Style: Dark</span><span>▼</span>
+                </button>
+                
+                <div id="mapLayerStyleDropdownDeck" class="hidden w-full bg-slate-900/95 border border-slate-800 rounded-2xl shadow-2xl p-3 grid grid-cols-4 gap-2 pointer-events-auto transition-all duration-200">
+                    <button onclick="setMapBaseLayerProviderSource('dark')" id="styleCard-dark" class="flex flex-col items-center gap-1 p-1 bg-slate-900 rounded-xl border-2 border-pink-500 shadow-lg">
+                        <div class="w-10 h-10 rounded-lg bg-slate-900 flex items-center justify-center text-lg"><i class="fa-solid fa-moon text-slate-200"></i></div>
+                        <span class="text-[8px] font-bold tracking-tight text-slate-400">Dark</span>
+                    </button>
+                    <button onclick="setMapBaseLayerProviderSource('light')" id="styleCard-light" class="flex flex-col items-center gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800">
+                        <div class="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center text-lg"><i class="fa-solid fa-sun text-amber-500"></i></div>
+                        <span class="text-[8px] font-bold tracking-tight text-slate-400">Light</span>
+                    </button>
+                    <button onclick="setMapBaseLayerProviderSource('terrain')" id="styleCard-terrain" class="flex flex-col items-center gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800">
+                        <div class="w-10 h-10 rounded-lg bg-emerald-950 flex items-center justify-center text-lg"><i class="fa-solid fa-mountain text-emerald-500"></i></div>
+                        <span class="text-[8px] font-bold tracking-tight text-slate-400">Terrain</span>
+                    </button>
+                    <button onclick="setMapBaseLayerProviderSource('satellite')" id="styleCard-satellite" class="flex flex-col items-center gap-1 p-1 bg-slate-950 rounded-xl border border-slate-800 text-blue-400">
+                        <div class="w-10 h-10 rounded-lg bg-blue-950 flex items-center justify-center text-base"><i class="fa-solid fa-location-dot"></i></div>
+                        <span class="text-[8px] font-bold tracking-tight text-slate-400">Sat</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="mapNavigationShortcutsStack" class="absolute top-1/2 right-4 -translate-y-1/2 z-[400] flex flex-col gap-2.5 pointer-events-auto">
+                <button id="shortcutMagnifyingButton" onclick="snapMapViewportToSelectedCityBounds(event)" class="w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 text-[17px]">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                </button>
+                <button id="hardwareCompassRecenterButtonNode" onclick="triggerRecenterToGpsHardwareAction(event)" class="w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 overflow-hidden relative text-[19px]">
+                    <i id="innerCompassEmojiSpinnerSpan" class="fa-solid fa-compass inline-block transform transition-transform duration-300 ease-out"></i>
+                </button>
+            </div>
+            
+            <div id="mapDetailTrayHUD" class="fixed top-1/2 left-4 right-4 -translate-y-1/2 flip-perspective-container bg-transparent z-[999] hidden max-w-md mx-auto h-[480px] pointer-events-auto transition-transform">
+                <div class="flip-card-inner-rotator w-full h-full">
+                    
+                    <div class="flip-card-front-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+                        <div class="flex justify-between items-start gap-2 shrink-0">
+                            <div>
+                                <div class="flex items-center gap-1.5 flex-wrap">
+                                    <span id="trayCityBadge" class="text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
+                                    <span id="trayStarredBadge" class="hidden text-[9px] font-black text-amber-400"><i class="fa-solid fa-star mr-1"></i>Starred</span>
+                                    <span id="trayBookedBadge" class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
+                                </div>
+                                <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate max-w-[220px]">Spot Name</h3>
+                            </div>
+                            <div class="flex items-center gap-1.5 shrink-0">
+                                <span id="trayDistanceBadge" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400">0m</span>
+                                <button onclick="dismissMapDetailTrayHUDCard()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                        </div>
+                        
+                        <div class="flex-1 my-3 bg-slate-950/40 border border-slate-900/60 p-3 rounded-xl overflow-hidden">
+                            <p id="traySpotNotes" class="text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)"></p>
+                        </div>
+                        
+                        <div class="flex flex-col gap-2 shrink-0">
+                            <div class="flex gap-2">
+                                <a id="trayOpenReferenceBtn" href="#" target="_blank" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
+                                <button id="trayActionBtn" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 gap-1.5"><i class="fa-solid fa-map text-sm"></i> Directions</button>
+                            </div>
+                            <div id="trayTicketRow" class="hidden">
+                                <a id="trayTicketBtn" href="#" target="_blank" class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>
+                            </div>
+                            
+                            <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center">
+                                <button id="trayFlipToBackBtn" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
+                                    <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
+                                </button>
+                                <button id="trayDoneToggleBtn" class="text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800"><i class="fa-solid fa-check mr-1"></i> Mark Done</button>
+                                <button id="trayStarToggleBtn" class="text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800"><i class="fa-solid fa-star mr-1"></i> Star</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flip-card-back-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+                        <div class="flex border-b border-slate-800/60 pb-2 shrink-0 items-center justify-between">
+                            <h4 class="text-xs font-black uppercase tracking-wider text-slate-300">Extra Info</h4>
+                        </div>
+
+                        <div class="flex-1 overflow-y-auto subtle-scrollbar space-y-4 pt-3 pr-0.5">
+                            <p id="trayBackLongDescription" class="text-xs text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-100/10 leading-relaxed font-medium">Loading descriptive logs...</p>
+
+                            <div class="space-y-1.5">
+                                    <span class="text-[9px] font-black tracking-widest text-pink-500 block">Itinerary Mapping Tracker</span>
+                                <div id="trayInlineItineraryAssignorRow" class="bg-slate-950 border border-slate-850 p-2 rounded-xl flex items-center justify-between gap-2 text-[10px]">
+                                    <span class="font-bold text-slate-400 uppercase tracking-wider">Map to Schedule:</span>
+                                    <div class="flex gap-1" id="trayItineraryBtnDeck"></div>
+                                </div>
+                            </div>
+
+                            <div class="space-y-1.5">
+                                    <span class="text-[9px] font-black tracking-widest text-slate-500 block">Schedule</span>
+                                <div id="trayBackHoursGrid" class="bg-slate-955/50 border border-slate-100/10 p-2.5 rounded-xl grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-400"></div>
+                            </div>
+
+                            <div id="trayBackBookingWarningCard" class="p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl flex items-start gap-2.5 hidden">
+                                <span class="text-base mt-0.5"><i class="fa-solid fa-calendar-exclamation text-amber-500"></i></span>
+                                <div class="space-y-0.5">
+                                        <h5 class="text-[10px] font-black text-amber-400 tracking-wide">Alert</h5>
+                                    <p id="trayBackBookingValueText" class="text-xs text-slate-300 whitespace-pre-wrap font-medium"></p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center shrink-0">
+                            <button id="trayFlipToFrontBtn" class="text-slate-400 bg-slate-950 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-slate-900">
+                                <i class="fa-solid fa-arrow-left mr-1.5"></i> Back
+                            </button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <div id="view-list" class="view-panel w-full bg-slate-950 flex flex-col">
+            
+            <div class="w-full px-4 bg-slate-950 shrink-0 z-20 relative">
+                <div class="max-w-md mx-auto bg-slate-900/90 backdrop-blur-xl border-x border-b border-slate-800/80 px-3.5 py-1 rounded-b-xl flex justify-between items-center h-7 shadow-md -mt-[1px]">
+                    <span class="text-[9px] uppercase font-black tracking-widest text-slate-400">Summary</span>
+                    <span id="vaultDensityHUDLabelCounter" class="text-[10px] font-mono font-bold px-2 py-0.5 bg-pink-500/10 text-pink-400 border border-pink-500/20 rounded-md">Showing 0 / 0 Spots</span>
+                </div>
+            </div>
+
+            <div id="gesture-touch-container" class="flex-1 min-h-0 overflow-y-auto w-full subtle-scrollbar px-4 pt-2 flex flex-col gap-2 select-none">
+                <div id="pullToRefreshIndicatorHUD" class="w-full h-0 overflow-hidden flex items-center justify-center text-[11px] font-black tracking-wider text-slate-600 transition-all duration-200 bg-slate-950 shrink-0">
+                    <span class="animate-pulse">Refresh...</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="view-itinerary" class="view-panel w-full bg-slate-950 flex flex-col h-full overflow-hidden relative">
+            
+            <div id="itineraryMasterListView" class="flex flex-col h-full w-full absolute inset-0 z-10 bg-slate-950">
+                <div class="px-4 py-3 bg-slate-900/60 backdrop-blur border-b border-slate-800 shrink-0 flex items-center justify-between">
+                    <h2 class="text-xs font-black uppercase tracking-widest text-slate-300">Your Itinerary</h2>
+                    <button onclick="openItineraryCreationDrawerForm()" class="px-4 py-2 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-[10px] font-black uppercase text-white shadow-lg shadow-pink-600/20 active:scale-95 transition-transform flex items-center gap-1.5">
+                        <i class="fa-solid fa-plus"></i> New Itinerary
+                    </button>
+                </div>
+                <div id="itineraryMasterListScroll" class="flex-1 overflow-y-auto subtle-scrollbar px-4 pt-4 pb-24 space-y-3">
+                    </div>
+            </div>
+
+            <div id="itineraryDetailView" class="flex flex-col h-full w-full absolute inset-0 z-20 hidden bg-slate-950">
+                <div class="px-4 py-3 bg-slate-900/95 backdrop-blur-xl border-b border-slate-800 shrink-0 flex flex-col gap-3">
+                    <div class="flex items-center justify-between">
+                        <button onclick="closeItineraryDetailView()" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300"><i class="fa-solid fa-arrow-left"></i></button>
+                        <h2 id="detailItineraryTitle" class="text-[13px] font-black text-slate-200 truncate"></h2>
+                        <div class="flex items-center gap-2">
+                            <button onclick="openEditItineraryModal(activeItineraryId)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300">
+                                <i class="fa-solid fa-pencil text-[10px]"></i>
+                            </button>
+                            <button onclick="promptDeleteItinerary()" class="w-8 h-8 flex items-center justify-center bg-red-950/30 text-red-400 rounded-full">
+                                <i class="fa-solid fa-trash text-[10px]"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="flex items-center justify-between bg-slate-950 p-1.5 rounded-xl border border-slate-800">
+                        <button onclick="navigateItineraryDay(-1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-left text-xs text-slate-400"></i></button>
+                        <div class="flex flex-col items-center">
+                            <span id="detailDayLabel" class="text-[11px] font-black text-pink-400 uppercase">Day 1</span>
+                        </div>
+                        <button onclick="navigateItineraryDay(1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-right text-xs text-slate-400"></i></button>
+                    </div>
+
+                    <div class="flex gap-2 justify-center">
+                        <button onclick="promptRecalculateItinerary()" class="flex-1 py-2 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center justify-center gap-1.5 active:bg-amber-500/20 transition-colors"><i class="fa-solid fa-rotate-right"></i> Recalculate</button>
+                        <button onclick="openInlineUnscheduledSpotDrawer()" class="flex-1 py-2 bg-slate-800 text-slate-300 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center justify-center gap-1.5 active:bg-slate-700 transition-colors"><i class="fa-solid fa-plus"></i> Add Spot</button>
+                    </div>
+                </div>
+                
+                <div id="itineraryTimelineScrollContainer" class="flex-1 overflow-y-auto subtle-scrollbar px-4 pt-4 pb-32 space-y-3 relative bg-slate-950">
+                    </div>
+            </div>
+            
+        </div>
+    </div>
+
+    <div id="masterGlobalNavigationBarDeck" class="fixed bottom-0 left-0 right-0 h-[76px] bg-slate-900/90 backdrop-blur-xl border-t border-slate-800/80 px-6 py-4 flex justify-around items-center shrink-0 z-[490] rounded-t-2xl shadow-2xl">
+        <button onclick="switchMasterMenuDashboardTab('map')" id="nav-tab-map" class="nav-tab-transition flex flex-col items-center gap-0.5 text-pink-500 scale-110 font-black tracking-wide translate-y-[-2px] brightness-125">
+            <i class="fa-solid fa-location-dot text-[19px] mb-1"></i><span class="text-[10px]">Map</span>
+        </button>
+        <button onclick="switchMasterMenuDashboardTab('list')" id="nav-tab-list" class="nav-tab-transition flex flex-col items-center gap-0.5 text-slate-500 opacity-50 scale-100 font-medium">
+            <i class="fa-solid fa-folder text-[19px] mb-1"></i><span class="text-[10px]">Saved Spots</span>
+        </button>
+        <button onclick="switchMasterMenuDashboardTab('itinerary')" id="nav-tab-itinerary" class="nav-tab-transition flex flex-col items-center gap-0.5 text-slate-500 opacity-50 scale-100 font-medium">
+            <i class="fa-solid fa-calendar-days text-[19px] mb-1"></i><span class="text-[10px]">Itinerary</span>
+        </button>
+    </div>
+
+    <button id="globalFloatingActionPlusButton" onclick="toggleQuickAddModal(true)" class="fixed bottom-24 left-4 w-12 h-12 bg-gradient-to-tr from-pink-500 to-violet-600 rounded-full flex items-center justify-center text-white shadow-2xl shadow-pink-500/20 z-[450] border border-white/10 text-lg">
+        <i class="fa-solid fa-plus"></i>
+    </button>
+
+    <div id="quickAddModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-end hidden transition-all duration-300">
+        <div class="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl relative">
+            <div class="flex justify-between items-center pb-2 border-b border-slate-800">
+                <h3 class="text-base font-black flex items-center gap-2">
+                    <i class="fa-solid fa-map-pin text-xl bg-clip-text text-transparent bg-gradient-to-tr from-pink-500 to-violet-500 filter drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)] rotate-12 transform origin-bottom-left"></i>
+                    <span class="text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-violet-400">Add New Spot</span>
+                </h3>
+                <button onclick="toggleQuickAddModal(false)" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="space-y-3 text-xs w-full">
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">Reference Link</label>
+                    <input type="url" id="new-url" placeholder="https://instagram.com/..." class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">Maps Link</label>
+                    <input type="url" id="new-maps-url" placeholder="http://maps.google.com/?q=..." class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none">
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">City</label>
+                        <input type="text" id="new-city" placeholder="e.g., Paris" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">Category</label>
+                        <input type="text" id="new-category" placeholder="e.g., Food Spot" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">Spot Name</label>
+                    <input type="text" id="new-keyword" placeholder="e.g., Hidden Arch Viewpoint" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 uppercase tracking-wider">Notes</label>
+                    <textarea id="new-notes" rows="3" placeholder="Optimal angles, suggestions..." class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none"></textarea>
+                </div>
+                <div class="flex items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-800 mt-2">
+                    <span class="font-bold text-slate-400 uppercase tracking-wider">Prioritize?</span>
+                    <button onclick="toggleFormPriorityState()" id="form-priority-btn" class="px-4 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 font-bold">Normal</button>
+                </div>
+                <button onclick="submitNewSpotToCloud()" id="form-submit-btn" class="w-full mt-4 bg-gradient-to-r from-pink-600 to-purple-600 text-center font-black py-3.5 rounded-xl text-white shadow-lg text-sm">
+                    <i class="fa-solid fa-floppy-disk mr-2"></i> Save
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="settingsDrawer" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[999] hidden flex justify-end">
+        <div id="settingsDrawerContentBody" class="w-72 bg-slate-900 h-full border-l border-slate-800 p-6 flex flex-col justify-between shadow-2xl overflow-y-auto no-scrollbar pb-24">
+            <div class="space-y-6">
+                <div class="flex justify-between items-center pb-3 border-b border-slate-800">
+                    <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider">Settings</h3>
+                    <button onclick="toggleSettingsMenu(false)" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="space-y-2">
+                    <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Change My Profile Name</label>
+                    <input type="text" id="settingsRenameField" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none">
+                    <button onclick="commitProfileRename()" class="w-full py-2 bg-slate-800 rounded-lg text-[11px] font-bold">Update Profile Label</button>
+                </div>
+                <hr class="border-slate-800">
+                <div id="settingsSwitchUserSection" class="space-y-2">
+                    <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Select Active User</label>
+                    <select id="settingsSwitchUserDropdown" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-300 focus:outline-none block appearance-none h-11 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_12px_center] bg-no-repeat pr-8"></select>
+                    <button id="settingsSwitchUserBtn" onclick="switchUserSessionViaSettings()" class="w-full py-2 bg-gradient-to-r from-violet-600 to-pink-600 rounded-lg text-[11px] font-bold text-white">Swap Active User</button>
+                </div>
+                <hr class="border-slate-800">
+                <div class="space-y-2">
+                    <button onclick="triggerClearItineraryData()" class="w-full py-3 bg-red-500/10 border border-red-500/30 text-red-500 text-xs font-black uppercase tracking-widest rounded-xl mt-4 hover:bg-red-500/20 transition-colors flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-trash-can"></i> Clear Itinerary Data
+                    </button>
+                    <button onclick="triggerSecureServerHistoryPurgeVault()" class="w-full py-2 bg-red-950/20 text-red-400 border border-red-900/40 text-[11px] font-bold rounded-lg">Purge Cloud Logs</button>
+                    <button onclick="clearDeviceSessionAndLogout()" class="w-full mt-2 py-2 bg-slate-950 border border-slate-800 text-slate-400 text-[11px] font-bold rounded-lg">Logout Session</button>
+                    
+                    <div id="tileCacheLoaderProgressHUDBox" class="hidden w-full p-3 bg-slate-950 rounded-xl border border-slate-800 flex flex-col gap-1.5 text-[10px] font-bold mt-3">
+                        <div class="flex justify-between items-center text-slate-400">
+                            <span id="tileCacheHUDLabelText" class="truncate max-w-[75%]">Analyzing locations...</span>
+                            <span id="tileCacheHUDPercentageText" class="font-mono text-pink-500">0%</span>
+                        </div>
+                        <div class="w-full h-1 bg-slate-900 rounded-full overflow-hidden">
+                            <div id="tileCacheHUDProgressBarFill" class="w-0 h-full bg-gradient-to-r from-pink-500 to-purple-500 transition-all duration-300"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="deviceMetaText" class="text-[9px] text-center text-slate-500 font-mono space-y-0.5">
+                <div id="meta-version" class="text-[9px] font-bold">Version: Loading...</div>
+                <div id="meta-id">Device ID: Loading...</div>
+                <div id="meta-hardware" class="text-[8px]">Specs: Detecting...</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="userModal" class="fixed inset-0 bg-slate-950 z-[9999] flex flex-col justify-center items-center p-6 hidden">
+        <div class="text-center w-full max-w-xs space-y-6">
+            <div class="text-6xl filter drop-shadow-[0_0_15px_rgba(244,63,94,0.2)]"><i class="fa-solid fa-earth-americas text-pink-500"></i></div>
+            <div class="space-y-1">
+                <h2 class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-violet-400">Save2Go</h2>
+                <p class="text-xs text-slate-400 font-semibold tracking-wide">Who is holding the map right now?</p>
+            </div>
+            
+            <div class="space-y-3 pt-2 text-left">
+                <div id="loginDropdownContainer">
+                    <select id="user-dropdown-select" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 font-medium text-xs focus:outline-none block appearance-none h-12 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_16px_center] bg-no-repeat pr-10"></select>
+                </div>
+                <div id="loginDividerLine" class="relative flex items-center justify-center my-2">
+                    <span class="absolute px-2 bg-slate-950 text-[10px] text-slate-600 font-bold uppercase">Or Register New</span>
+                </div>
+                <div>
+                    <input type="text" id="customUsernameInput" placeholder="Type name..." class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 placeholder-slate-600 text-xs focus:outline-none">
+                </div>
+                <button onclick="handleInitialLoginSubmit()" id="beginSessionBtn" class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 text-center font-black py-3.5 rounded-xl text-white text-xs uppercase tracking-wider">
+                    Begin
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="itineraryWizardModalTray" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="flex justify-between items-center pb-2 border-b border-slate-800">
+                <h3 class="text-xs font-black tracking-wide text-pink-400 flex items-center gap-1">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Sequence Matrix Wizard
+                </h3>
+                <button onclick="toggleItineraryWizardModalTray(false)" class="w-6 h-6 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-relaxed font-medium">
+                Select items from your synchronized repository to populate the daily execution matrix route.
+            </p>
+            <div id="wizardBlueprintSlotsContainer" class="space-y-2 overflow-y-auto subtle-scrollbar flex-1 pr-1 py-1"></div>
+            <button onclick="saveGeneratedWizardSequenceToActiveDay()" class="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 font-bold text-xs uppercase tracking-wider rounded-xl text-white shadow-lg shadow-pink-600/20"><i class="fa-solid fa-floppy-disk mr-1.5"></i> Compile Sequence</button>
+        </div>
+    </div>
+
+    <div id="itineraryCreationDrawerModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[999] flex items-end hidden transition-all duration-300">
+        <div class="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl relative">
+            <div class="flex justify-between items-center pb-2 border-b border-slate-800">
+                <h3 class="text-sm font-black flex items-center gap-2 text-pink-400">
+                    <i class="fa-solid fa-route"></i> Build Your Itinerary
+                </h3>
+                <button onclick="toggleItineraryCreationDrawerForm(false)" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="space-y-3 text-xs w-full">
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Name</label>
+                    <input type="text" id="itin-new-name" oninput="validateItineraryForm()" placeholder="e.g., Paris Exploration" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none text-xs font-semibold">
+                </div>
+
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Pacing</label>
+                    <div class="bg-slate-950 p-1 rounded-xl border border-slate-800/80 flex h-[38px] relative overflow-hidden transition-all duration-200">
+                        <button onclick="setItinPacingMode('max')" id="itinPacingToggleMax" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10 flex items-center justify-center gap-1.5 transition-colors"><i class="fa-solid fa-rocket"></i> Max</button>
+                        <button onclick="setItinPacingMode('relaxed')" id="itinPacingToggleRelaxed" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500 flex items-center justify-center gap-1.5 transition-colors bg-transparent"><i class="fa-solid fa-mug-hot"></i> Relaxed</button>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="block text-slate-400 font-bold tracking-wide text-[10px]">Schedule</label>
+                        </div>
+                        <div onclick="openMultiDatePickerModal()" class="w-full bg-slate-950 px-2.5 rounded-xl border border-slate-800 text-slate-200 flex flex-col justify-center h-[38px] cursor-pointer shadow-inner">
+                            <span id="itin-date-display" class="text-[11px] font-mono font-semibold text-slate-300">Select Dates</span>
+                        </div>
+                        <span id="itin-date-meta" class="text-[8px] font-black text-amber-500 hidden mt-1.5 flex items-center gap-1">
+                            <i class="fa-solid fa-triangle-exclamation"></i> Non Sequential Days
+                        </span>
+                    </div>
+                    <div>
+                        <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">City</label>
+                        <select id="itin-new-city" onchange="validateItineraryForm()" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-slate-200 focus:outline-none h-[38px] text-[11px] font-bold block appearance-none bg-no-repeat pr-6 shadow-inner"></select>
+                    </div>
+                </div>
+
+                <div class="mt-5">
+                    <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Daily Time Window</label>
+                    <div class="flex gap-1 items-center w-full">
+                        <input type="time" id="itin-new-start" value="09:00" class="w-full bg-slate-950 p-1.5 rounded-lg border border-slate-800 text-slate-200 focus:outline-none text-[11px] font-mono h-[38px] shadow-inner">
+                        <span class="text-slate-600 font-black px-1">-</span>
+                        <input type="time" id="itin-new-end" value="21:00" class="w-full bg-slate-950 p-1.5 rounded-lg border border-slate-800 text-slate-200 focus:outline-none text-[11px] font-mono h-[38px] shadow-inner">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Categories Sequence</label>
+                    <div id="itinModalCategoryGridContainer" class="flex flex-wrap gap-2 max-h-32 overflow-y-auto subtle-scrollbar p-2.5 bg-slate-950/40 rounded-xl border border-slate-900/60 w-full"></div>
+                </div>
+
+                <div>
+                    <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Selected Categories Sequence</label>
+                    <div id="itinModalSequenceQueryRowBox" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 min-h-[80px] flex gap-1.5 items-center flex-wrap subtle-scrollbar shadow-inner items-start content-start"></div>
+                </div>
+
+                <button id="buildItinerarySubmitBtn" onclick="generateIntelligentItinerary()" class="w-full mt-2 bg-gradient-to-r from-pink-600 to-purple-600 text-center font-black py-3.5 rounded-xl text-white shadow-lg shadow-pink-600/20 text-xs uppercase tracking-wider active:scale-95 transition-transform opacity-50 grayscale">
+                    <i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i> Build Itinerary
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="itinCalendarModal" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[9999] flex flex-col items-center justify-center hidden p-4">
+        <div class="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-2xl flex flex-col">
+            <div class="flex justify-between items-center mb-4">
+                <button onclick="changeMultiCalendarMonth(-1)" class="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-200 bg-slate-800 rounded-full"><i class="fa-solid fa-chevron-left"></i></button>
+                <h3 id="calendarMonthTitle" class="text-sm font-black text-slate-200 tracking-wide">Month Year</h3>
+                <button onclick="changeMultiCalendarMonth(1)" class="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-200 bg-slate-800 rounded-full"><i class="fa-solid fa-chevron-right"></i></button>
+            </div>
+            <div class="grid grid-cols-7 gap-1 text-center mb-2">
+                <span class="text-[9px] font-black text-slate-500">Sun</span><span class="text-[9px] font-black text-slate-500">Mon</span><span class="text-[9px] font-black text-slate-500">Tue</span>
+                <span class="text-[9px] font-black text-slate-500">Wed</span><span class="text-[9px] font-black text-slate-500">Thu</span><span class="text-[9px] font-black text-slate-500">Fri</span><span class="text-[9px] font-black text-slate-500">Sat</span>
+            </div>
+            <div id="calendarDaysGrid" class="grid grid-cols-7 gap-y-2 gap-x-1 text-center mb-6"></div>
+            
+            <button onclick="closeMultiDatePickerModal()" class="w-full mt-auto bg-gradient-to-r from-pink-600 to-purple-600 text-center font-black py-3.5 rounded-xl text-white shadow-lg text-xs uppercase tracking-wider">
+                Confirm Selection
+            </button>
+        </div>
+    </div>
+    <div id="buildingItineraryLoaderPopup" class="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[99999] flex flex-col items-center justify-center hidden transition-all duration-300">
+        <div class="flex flex-col items-center justify-center space-y-6">
+            <div class="relative w-20 h-20 flex items-center justify-center">
+                <div class="absolute inset-0 border-4 border-slate-800 rounded-full"></div>
+                <div class="absolute inset-0 border-4 border-pink-500 rounded-full border-t-transparent animate-spin"></div>
+                <i class="fa-solid fa-wand-magic-sparkles text-2xl text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-purple-500"></i>
+            </div>
+            <div class="text-center space-y-2">
+                <h3 class="text-lg font-black tracking-widest text-slate-200">Building Itinerary</h3>
+                <p class="text-xs font-bold text-slate-500">Thinking...</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="inlineUnscheduledSpotsDrawer" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[999] flex items-end hidden transition-all duration-300">
+        <div class="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-6 space-y-4 max-h-[85vh] overflow-y-auto subtle-scrollbar shadow-2xl relative flex flex-col">
+            <div class="flex justify-between items-start pb-2 border-b border-slate-800 shrink-0">
+                <div class="flex flex-col">
+                    <h3 class="text-sm font-black text-slate-200">Unscheduled Spots</h3>
+                    <span class="text-[9px] font-bold text-slate-500 mt-0.5">Showing places according to selected city filter.</span>
+                </div>
+                <button onclick="closeInlineUnscheduledSpotDrawer()" class="w-7 h-7 bg-slate-800 rounded-full flex items-center justify-center text-slate-400 text-xs font-bold active:bg-slate-700 transition-colors shrink-0"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="unscheduledSpotsContainer" class="flex-1 overflow-y-auto pr-1 flex flex-col"></div>
+        </div>
+    </div>
+
+    <script src="aap.js"></script>
+    <script src="map.js"></script>
+    <script src="itinerary.js"></script>
+</body>
+</html>
