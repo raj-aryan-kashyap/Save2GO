@@ -2,17 +2,33 @@
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
 /* ── Scroll reliability fixes ───────────────────────────────────────────────
-   1. touch-action: pan-y on the main list container tells the browser to
-      always allow vertical scrolling, bypassing any non-passive inline
-      ontouchmove handlers on child elements (spot-card note paragraphs).
+   1. touch-action: pan-y on the scroll container AND on the card nodes tells
+      the browser to always handle vertical pan natively. This matters because
+      iOS WebKit uses the touched element's touch-action (not just the scroll
+      ancestor's) to decide whether to initiate a scroll gesture.
    2. -webkit-overflow-scrolling: touch enables native momentum scrolling on
-      iOS for all overflow-y-auto regions.
-   3. The note overlay scroll box gets the same treatment so tap-hold expanded
-      notes are also scrollable.
+      iOS for all overflow-y-auto/scroll regions.
+   3. overflow-y: scroll (not auto) on noteExpandedOverlayScrollBox is needed
+      because iOS WebKit does not reliably create a scroll context for
+      overflow-y: auto elements that have only a max-height constraint and no
+      explicit height.
 ────────────────────────────────────────────────────────────────────────── */
 #gesture-touch-container {
     touch-action: pan-y;
     -webkit-overflow-scrolling: touch;
+}
+
+/* Cards inside the list must also declare pan-y so that touches starting
+   anywhere on a card (buttons, flip faces, etc.) still pass vertical scroll
+   intent up to gesture-touch-container. */
+#gesture-touch-container .dynamic-card-node {
+    touch-action: pan-y;
+}
+
+/* Use overflow-y: scroll instead of auto — more reliable on iOS WebKit when
+   only max-height (not an explicit height) is set on the element. */
+#noteExpandedOverlayScrollBox {
+    overflow-y: scroll;
 }
 
 #noteExpandedOverlayScrollBox,

@@ -104,9 +104,12 @@ function initializeNoteGestureEngine(clientX, clientY, textContent) {
     }, 500);
 }
 
-function handleNoteTouchStartEvent(e, text) { 
-    e.stopPropagation(); 
-    initializeNoteGestureEngine(e.touches[0].clientX, e.touches[0].clientY, text); 
+function handleNoteTouchStartEvent(e, text) {
+    // NOTE: Do NOT call e.stopPropagation() here.
+    // iOS WebKit needs the touchstart to bubble up to gesture-touch-container so
+    // the scroll container can register the touch and initiate a scroll gesture.
+    // stopPropagation would silently kill all scroll attempts starting on a note.
+    initializeNoteGestureEngine(e.touches[0].clientX, e.touches[0].clientY, text);
 }
 function handleNoteTouchMoveEvent(e) { evaluateNoteGestureMovement(e.touches[0].clientX, e.touches[0].clientY); }
 function handleNoteTouchEndEvent(e) { killNoteGestureEngine(); }
@@ -928,7 +931,7 @@ function renderList() {
                             <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit ${!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400'}">${spot.distStr}</span>
                         </div>
                         <div class="mt-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60 min-h-[90px] overflow-hidden">
-                            <p class="text-xs ${isDone ? 'text-slate-500 line-through' : 'text-slate-400'} leading-relaxed max-h-16 overflow-y-auto pr-1 subtle-scrollbar" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)">${spot.notes || 'No custom notes.'}</p>
+                            <p class="text-xs ${isDone ? 'text-slate-500 line-through' : 'text-slate-400'} leading-relaxed max-h-16 overflow-hidden pr-1" style="touch-action: pan-y;" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)">${spot.notes || 'No custom notes.'}</p>
                         </div>
                     </div>
                     <div class="flex flex-col gap-2 mt-3">
