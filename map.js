@@ -308,6 +308,7 @@ function startLiveHardwareGPSTracking() {
     liveGpsWatchId = navigator.geolocation.watchPosition(
         (pos) => {
             gpsStatusCachedBool  = true;
+            gpsLastKnownDenied   = false; // clear any previous denied state on success
             lastGpsSuccessTime   = Date.now();
             userLat              = pos.coords.latitude;
             userLon              = pos.coords.longitude;
@@ -349,6 +350,7 @@ function startLiveHardwareGPSTracking() {
         },
         (err) => {
             if (err.code === err.PERMISSION_DENIED) {
+                gpsLastKnownDenied  = true;
                 gpsStatusCachedBool = false;
                 isCameraLocked      = false;
                 syncCameraLockVisualUIState();
@@ -359,7 +361,7 @@ function startLiveHardwareGPSTracking() {
                     liveGpsWatchId = null;
                 }
             } else {
-                // Transient error (timeout, unavailable) — stay in syncing state and retry
+                // Transient error (timeout / position unavailable) — stay syncing, watchPosition retries
                 updateGpsHudStatus('syncing', "GPS Syncing...");
             }
         },
@@ -367,34 +369,174 @@ function startLiveHardwareGPSTracking() {
     );
 }
 
+// ── Recenter: instant snap to cached coords + silent background micro-adjust ──
+function _executeInstantRecenterSnap() {
+    if (!cachedUserCoords || !leafletMapInstance) return;
+
+    const snapLat = cachedUserCoords.lat;
+    const snapLon = cachedUserCoords.lon;
+
+    // Instant viewport snap — zero hardware latency, user sees their location
+    // the same millisecond they tap the button
+    leafletMapInstance.setView([snapLat, snapLon], 18);
+    isCameraLocked = true;
+    syncCameraLockVisualUIState();
+
+    // Place / update the user position marker at the cached location immediately
+    if (userPositionPulseCircle) {
+        userPositionPulseCircle.setLatLng([snapLat, snapLon]);
+    } else {
+        userPositionPulseCircle = L.circleMarker([snapLat, snapLon], {
+            radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2
+        }).addTo(leafletMapInstance);
+    }
+
+    // Silent background micro-adjustment — only when the live stream is already
+    // running (otherwise starting the stream handles the authoritative position)
+    if (liveGpsWatchId !== null && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                const freshLat = pos.coords.latitude;
+                const freshLon = pos.coords.longitude;
+
+                // Update global telemetry cache
+                userLat          = freshLat;
+                userLon          = freshLon;
+                cachedUserCoords = { lat: freshLat, lon: freshLon };
+                gpsStatusCachedBool = true;
+                lastGpsSuccessTime  = Date.now();
+                localStorage.setItem('compass_user_live_lat', freshLat);
+                localStorage.setItem('compass_user_live_lng', freshLon);
+                localStorage.setItem('compass_user_live_ts',  Date.now());
+
+                // Only pan if the user has physically moved more than ~5 metres
+                // (0.00005° ≈ 5.5 m) — filters GPS noise, prevents jarring micro-snaps
+                const moved = Math.abs(freshLat - snapLat) > 0.00005 ||
+                              Math.abs(freshLon - snapLon) > 0.00005;
+
+                if (moved) {
+                    if (userPositionPulseCircle) userPositionPulseCircle.setLatLng([freshLat, freshLon]);
+                    if (userAccuracyRadiusCircle) {
+                        userAccuracyRadiusCircle.setLatLng([freshLat, freshLon])
+                                                .setRadius(pos.coords.accuracy || 0);
+                    }
+                    if (leafletMapInstance && isCameraLocked) {
+                        leafletMapInstance.panTo([freshLat, freshLon], { animate: true, duration: 0.5 });
+                    }
+                }
+            },
+            () => { /* silent — cached snap coordinates are still valid */ },
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+        );
+    }
+
+    // If the live stream isn't running, start it — it will take over continuous tracking
+    if (liveGpsWatchId === null) {
+        startLiveHardwareGPSTracking();
+    }
+}
+
+// ── Recovery poll: verify hardware state when GPS modal is already open ───────
+// Fires a single getCurrentPosition to check if the user re-enabled GPS in Settings.
+// Success: dismiss modal, lock camera, snap to confirmed position.
+// Failure: keep modal open, keep HUD red, map stays exactly as-is.
+function _pollGpsForModalRecovery() {
+    if (!navigator.geolocation) return;
+
+    updateGpsHudStatus('syncing', "GPS Syncing...");
+
+    navigator.geolocation.getCurrentPosition(
+        (pos) => {
+            // GPS is now active — reset denied flag and update all state
+            gpsLastKnownDenied  = false;
+            gpsStatusCachedBool = true;
+            lastGpsSuccessTime  = Date.now();
+            userLat             = pos.coords.latitude;
+            userLon             = pos.coords.longitude;
+            cachedUserCoords    = { lat: userLat, lon: userLon };
+
+            localStorage.setItem('compass_user_live_lat', userLat);
+            localStorage.setItem('compass_user_live_lng', userLon);
+            localStorage.setItem('compass_user_live_ts',  Date.now());
+
+            // Dismiss the error modal
+            const modal = document.getElementById('gpsInstructionsOverlayModal');
+            if (modal) modal.classList.add('hidden');
+
+            updateGpsHudStatus('active', "GPS Active");
+            isCameraLocked = true;
+            syncCameraLockVisualUIState();
+
+            // Snap map to confirmed hardware position
+            if (leafletMapInstance) {
+                leafletMapInstance.setView([userLat, userLon], 18);
+                if (userPositionPulseCircle) {
+                    userPositionPulseCircle.setLatLng([userLat, userLon]);
+                } else {
+                    userPositionPulseCircle = L.circleMarker([userLat, userLon], {
+                        radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2
+                    }).addTo(leafletMapInstance);
+                }
+            }
+
+            // Start continuous watchPosition stream now that permission is granted
+            startLiveHardwareGPSTracking();
+        },
+        (err) => {
+            // GPS still off or denied — keep modal open, no map changes
+            if (err.code === err.PERMISSION_DENIED) gpsLastKnownDenied = true;
+            gpsStatusCachedBool = false;
+            updateGpsHudStatus('off', "GPS Off");
+            // Modal stays visible, camera stays unlocked, map tiles unchanged
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+    );
+}
+
+// ── Main recenter entry-point — routes to the correct state handler ───────────
 function triggerRecenterToGpsHardwareAction(event) {
-    if(event) event.stopPropagation();
+    if (event) event.stopPropagation();
 
     const compassBtn  = document.getElementById('hardwareCompassRecenterButtonNode');
     const compassIcon = document.getElementById('innerCompassEmojiSpinnerSpan');
+    const modal       = document.getElementById('gpsInstructionsOverlayModal');
+    const isModalOpen = modal && !modal.classList.contains('hidden');
 
-    // Snapshot state BEFORE any async side-effects change it
-    const wasAlreadyCentered = isCameraLocked;
-
-    // ── 1. Button press animation (always, every tap) ────────────────────────
+    // ── Button press animation (always, every tap) ───────────────────────────
     if (compassBtn) {
         compassBtn.classList.remove('recenter-button-press');
-        void compassBtn.offsetWidth; // force reflow so animation always restarts
+        void compassBtn.offsetWidth;
         compassBtn.classList.add('recenter-button-press');
         setTimeout(() => compassBtn.classList.remove('recenter-button-press'), 420);
     }
 
+    // ── State D: Error modal is open — verify hardware and attempt recovery ──
+    if (isModalOpen) {
+        _pollGpsForModalRecovery();
+        return;
+    }
+
+    // ── State C: GPS hardware is known denied/off — intercept, preserve map ──
+    // Map viewport is NOT touched — tiles stay on whatever coordinates were
+    // already displaying, preventing any risk of undefined coordinate writes
+    if (!navigator.geolocation || gpsLastKnownDenied) {
+        if (modal) modal.classList.remove('hidden');
+        updateGpsHudStatus('off', "GPS Off");
+        return;
+    }
+
+    // Snapshot centering state BEFORE any async side-effects can change it
+    const wasAlreadyCentered = isCameraLocked;
+
+    // ── Visual feedback: compass spin (new location) or pink glow (already locked)
     if (wasAlreadyCentered) {
-        // ── 2a. Already centred → pink glow, no compass spin ─────────────────
         if (compassBtn) {
             compassBtn.classList.remove('thematic-pink-glow');
             void compassBtn.offsetWidth;
             compassBtn.classList.add('thematic-pink-glow');
         }
     } else {
-        // ── 2b. Moving to a new location → compass spin only ─────────────────
         if (compassIcon) {
-            // Disable the bearing-rotation transition to avoid a jarring snap to 0
             compassIcon.style.transition = 'none';
             compassIcon.style.transform  = '';
             compassIcon.classList.remove('compass-spin-active');
@@ -402,24 +544,39 @@ function triggerRecenterToGpsHardwareAction(event) {
             compassIcon.classList.add('compass-spin-active');
             setTimeout(() => {
                 compassIcon.classList.remove('compass-spin-active');
-                // Restore the transition used by the two-finger bearing rotation
                 compassIcon.style.transition = '';
             }, 700);
         }
     }
 
+    // ── State A: Cached coords available — instant snap + background refresh ─
+    if (cachedUserCoords) {
+        _executeInstantRecenterSnap();
+        return;
+    }
+
+    // ── State B: No cached coords yet — start live stream normally ───────────
+    // The stream's success callback will fire setView once a position is acquired
     startLiveHardwareGPSTracking();
 }
 
 function syncCameraLockVisualUIState() {
     const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
     if (!compassBtn) return;
-    
+
+    // Snapshot animation classes that are mid-flight so className reset doesn't
+    // cancel or restart them — they expire on their own via setTimeout cleanup
+    const liveAnimClasses = ['thematic-pink-glow', 'recenter-button-press']
+        .filter(cls => compassBtn.classList.contains(cls));
+
     if (isCameraLocked) {
-        compassBtn.className = "w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px] thematic-pink-glow";
+        compassBtn.className = "w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
     } else {
         compassBtn.className = "w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
     }
+
+    // Restore mid-flight animation classes
+    liveAnimClasses.forEach(cls => compassBtn.classList.add(cls));
 }
 
 function snapMapViewportToSelectedCityBounds(event) {
