@@ -1,6 +1,6 @@
 // --- DEV SENSOR SIMULATION CONTROL BOUNDS ---
 // Set to true for computer browser emulator testing. CHANGE TO false FOR FINAL PRODUCTION APP ON REAL PHONES!
-const IS_DEBUG_MOCK_MODE = true; 
+const IS_DEBUG_MOCK_MODE = false; 
 
 // Dictionary mapping common travel destination cities to macro bounding territories (Lat/Lon range bounds)
 const KNOWN_COUNTRY_GEOMETRIC_BOUNDS = {
