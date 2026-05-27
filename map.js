@@ -1,7 +1,3 @@
-// --- DEV SENSOR SIMULATION CONTROL BOUNDS ---
-// Set to true for computer browser emulator testing. CHANGE TO false FOR FINAL PRODUCTION APP ON REAL PHONES!
-const IS_DEBUG_MOCK_MODE = false; 
-
 // Dictionary mapping common travel destination cities to macro bounding territories (Lat/Lon range bounds)
 const KNOWN_COUNTRY_GEOMETRIC_BOUNDS = {
     "paris": { name: "France", minLat: 48.8, maxLat: 48.9, minLng: 2.2, maxLng: 2.4 },
@@ -114,7 +110,6 @@ function triggerOptimalLandingViewportRecalculation() {
 function initLeafletMapEngineCanvas() {
     if (leafletMapInstance) return;
     
-    // Smart Hack: Initialize at zoom track level 1 over an empty matrix profile to ensure core layers boot fast
     leafletMapInstance = L.map('map-render-element', { 
         zoomControl: false, 
         attributionControl: false,
@@ -122,7 +117,7 @@ function initLeafletMapEngineCanvas() {
         rotate: true,
         bounceAtZoomLimits: false,
         fadeAnimation: false 
-    }).setView([0, 0], 1);
+    }).setView([48.8566, 2.3522], 12);
     
     setMapBaseLayerProviderSource(currentMapStyleKey);
     mapMarkersLayerGroup = L.layerGroup().addTo(leafletMapInstance);
@@ -158,11 +153,11 @@ function initLeafletMapEngineCanvas() {
         }
     });
 
-    // Product Design Hack: Delay viewport centering tracking until the browser paint loops initialize completely
+    triggerOptimalLandingViewportRecalculation();
+    
     setTimeout(() => {
         if (leafletMapInstance) {
             window.requestAnimationFrame(() => {
-                // Force size boundaries calibration while screen curtain loader mask is 100% active and opaque
                 leafletMapInstance.invalidateSize({ animate: false });
                 triggerOptimalLandingViewportRecalculation();
                 
@@ -174,10 +169,10 @@ function initLeafletMapEngineCanvas() {
                             setTimeout(() => { warmupScreenNode.classList.add('hidden'); }, 500);
                         }
                     });
-                }, 400); // 400ms buffer guarantees map tile pulling settles down safely before reveal
+                }, 350); 
             });
         }
-    }, 1200);
+    }, 1500);
 
     const initialZoomLevel = leafletMapInstance.getZoom();
     const debugNode = document.getElementById('mapZoomDebugHUD');
@@ -293,40 +288,6 @@ function startLiveHardwareGPSTracking() {
         return;
     }
     
-    // Product Design Mock Sandbox: Instantaneous simulator activation preventing kCLErrorLocationUnknown framework freezes completely
-    if (IS_DEBUG_MOCK_MODE) {
-        console.warn("Sensor simulation override active: Initializing mock user tracking assets.");
-        gpsStatusCachedBool = true;
-        lastGpsSuccessTime = Date.now();
-        
-        const fallbackRecord = calculateDefaultMapCenterCity();
-        if (fallbackRecord) {
-            userLat = parseFloat(fallbackRecord.latitude);
-            userLon = parseFloat(fallbackRecord.longitude);
-        } else {
-            userLat = 48.8566; 
-            userLon = 2.3522;
-        }
-        
-        cachedUserCoords = { lat: userLat, lon: userLon };
-        updateGpsHudStatus('active', "GPS Active");
-
-        isCameraLocked = true;
-        syncCameraLockVisualUIState();
-
-        if (leafletMapInstance) {
-            if (userPositionPulseCircle) {
-                userPositionPulseCircle.setLatLng([userLat, userLon]);
-            } else {
-                userPositionPulseCircle = L.circleMarker([userLat, userLon], { 
-                    radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2 
-                }).addTo(leafletMapInstance);
-            }
-            leafletMapInstance.setView([userLat, userLon], 18);
-        }
-        return;
-    }
-
     if (liveGpsWatchId !== null) {
         navigator.geolocation.clearWatch(liveGpsWatchId);
     }
@@ -375,6 +336,10 @@ function startLiveHardwareGPSTracking() {
             syncCameraLockVisualUIState();
             updateGpsHudStatus('off', "GPS Off");
             document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
+            if (liveGpsWatchId !== null) {
+                navigator.geolocation.clearWatch(liveGpsWatchId);
+                liveGpsWatchId = null;
+            }
         },
         { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
@@ -382,6 +347,36 @@ function startLiveHardwareGPSTracking() {
 
 function triggerRecenterToGpsHardwareAction(event) {
     if(event) event.stopPropagation();
+    if(typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
+    
+    const deck = document.getElementById('mapLayerStyleDropdownDeck');
+    if (deck) deck.classList.add('hidden');
+
+    const compassBtn = document.getElementById('hardwareCompassRecenterButtonNode');
+
+    // State A Check (GPS Dead/Off): Intercept hardware off states and open location instructions instantly
+    if (!gpsStatusCachedBool) {
+        isCameraLocked = false;
+        syncCameraLockVisualUIState();
+        document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
+        return;
+    }
+
+    // State B Check (Already Locked): Run high-fidelity pink gradient ambient pulse glow feedback sequence
+    if (isCameraLocked && compassBtn) {
+        compassBtn.classList.remove('thematic-pink-glow');
+        void compassBtn.offsetWidth; // Force DOM flow clear for seamless restart
+        compassBtn.classList.add('thematic-pink-glow');
+        return;
+    }
+
+    // State C Check (Not Recentered): Trigger rotation transformation feedback loop and query live sensors
+    const emojiSpinnerNode = document.getElementById('innerCompassEmojiSpinnerSpan');
+    if (emojiSpinnerNode) {
+        emojiSpinnerNode.style.transform = 'rotate(180deg) scale(0.85)';
+        setTimeout(() => { emojiSpinnerNode.style.transform = 'rotate(0deg) scale(1)'; }, 350);
+    }
+
     startLiveHardwareGPSTracking();
 }
 
