@@ -75,7 +75,15 @@ function calculateDefaultMapCenterCity() {
     if (candidatePoolList.length === 0) return null;
     
     const pickedCityName = candidatePoolList[Math.floor(Math.random() * candidatePoolList.length)];
-    return travelSpots.find(s => s.city === pickedCityName);
+    // Return the first spot of the chosen city that has valid non-zero coordinates.
+    // travelSpots.find (without this guard) would return the first row for the city,
+    // which may have latitude/longitude "0" (Google Sheets default) — that resolves
+    // to Null Island [0, 0] in the Gulf of Guinea and corrupts the initial viewport.
+    return travelSpots.find(s =>
+        s.city === pickedCityName &&
+        s.latitude  && String(s.latitude).trim()  !== "0" &&
+        s.longitude && String(s.longitude).trim() !== "0"
+    );
 }
 
 // ── Map Viewport Priority Resolver ───────────────────────────────────────────
@@ -89,7 +97,10 @@ function resolveInitialMapViewState() {
 
     if (rawLat && rawLng && rawZoom) {
         const lat = parseFloat(rawLat), lng = parseFloat(rawLng), zoom = parseInt(rawZoom, 10);
-        if (!isNaN(lat) && !isNaN(lng) && !isNaN(zoom) && zoom >= 1 && zoom <= 20) {
+        // Also reject [0, 0] — Null Island can be written to localStorage if a spot
+        // with missing coordinates was previously used as the default view.
+        const isNullIsland = (lat === 0 && lng === 0);
+        if (!isNaN(lat) && !isNaN(lng) && !isNaN(zoom) && zoom >= 1 && zoom <= 20 && !isNullIsland) {
             return { lat, lng, zoom };
         }
     }
@@ -97,7 +108,11 @@ function resolveInitialMapViewState() {
     const cityRecord = calculateDefaultMapCenterCity();
     if (cityRecord) {
         const lat = parseFloat(cityRecord.latitude), lng = parseFloat(cityRecord.longitude);
-        if (!isNaN(lat) && !isNaN(lng)) return { lat, lng, zoom: 12 };
+        // Guard: calculateDefaultMapCenterCity now guarantees non-zero coords on the
+        // returned spot, but validate here as a belt-and-suspenders check.
+        if (!isNaN(lat) && !isNaN(lng) && !(lat === 0 && lng === 0)) {
+            return { lat, lng, zoom: 12 };
+        }
     }
 
     // Global fallback: Lisbon city centre

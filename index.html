@@ -530,8 +530,7 @@
         <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
             <div id="sResultTopBar" class="h-0.5 w-full bg-gradient-to-r from-pink-500 to-violet-500"></div>
             <div class="p-5 pt-4">
-                <button onclick="closeSettingsResultModal()" class="absolute top-3.5 right-3.5 w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold z-10"><i class="fa-solid fa-xmark"></i></button>
-                <div class="flex flex-col items-center text-center gap-2 mt-3 mb-5 px-2">
+                <div class="flex flex-col items-center text-center gap-2 mt-2 mb-5 px-2">
                     <div class="flex justify-center mb-1">
                         <div id="sResultIconWrap" class="w-12 h-12 rounded-2xl flex items-center justify-center text-xl">
                             <i id="sResultIconEl"></i>
@@ -558,15 +557,24 @@
             
             <div class="space-y-3 pt-2 text-left">
                 <div id="loginDropdownContainer">
-                    <select id="user-dropdown-select" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 font-medium text-xs focus:outline-none block appearance-none h-12 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_16px_center] bg-no-repeat pr-10"></select>
+                    <select id="user-dropdown-select" onchange="handleLandingDropdownChange()" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 font-medium text-xs focus:outline-none block appearance-none h-12 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_16px_center] bg-no-repeat pr-10"></select>
                 </div>
                 <div id="loginDividerLine" class="relative flex items-center justify-center my-2">
+                    <div class="w-full h-px bg-slate-800"></div>
                     <span class="absolute px-2 bg-slate-950 text-[10px] text-slate-600 font-bold uppercase">Or Register New</span>
                 </div>
-                <div>
-                    <input type="text" id="customUsernameInput" placeholder="Type name..." class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 placeholder-slate-600 text-xs focus:outline-none">
+                <div class="space-y-1.5">
+                    <input type="text" id="customUsernameInput" oninput="validateLandingRegisterInput()" placeholder="Enter Your New Name Here" class="w-full bg-slate-900 p-3 rounded-xl border border-slate-800 text-slate-200 placeholder-slate-600 text-xs focus:outline-none">
+                    <div id="landingRegisterMinCharWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-amber-400/75 pl-0.5">
+                        <i class="fa-solid fa-triangle-exclamation text-[9px]"></i>
+                        <span>Minimum 3 characters required</span>
+                    </div>
+                    <div id="landingRegisterNameTakenWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5">
+                        <i class="fa-solid fa-circle-xmark text-[9px]"></i>
+                        <span>Name not available</span>
+                    </div>
                 </div>
-                <button onclick="handleInitialLoginSubmit()" id="beginSessionBtn" class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 text-center font-black py-3.5 rounded-xl text-white text-xs uppercase tracking-wider">
+                <button onclick="handleInitialLoginSubmit()" id="beginSessionBtn" disabled class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 text-center font-black py-3.5 rounded-xl text-white text-xs uppercase tracking-wider opacity-40 cursor-not-allowed transition-all duration-200">
                     Begin
                 </button>
             </div>

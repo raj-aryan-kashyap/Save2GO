@@ -215,10 +215,132 @@ async function populateUserDropdown() {
 }
 
 async function handleInitialLoginSubmit() {
-    const chosenUser = document.getElementById('user-dropdown-select').value || "Global Traveller";
-    localStorage.setItem('compass_user', chosenUser); currentUser = chosenUser;
+    const dropdown    = document.getElementById('user-dropdown-select');
+    const newNameInput = document.getElementById('customUsernameInput');
+    const newName     = newNameInput ? newNameInput.value.trim() : '';
+    const dropdownVal = dropdown ? dropdown.value.trim() : '';
+
+    let selectedUser = '';
+
+    if (newName.length >= 3) {
+        // ── NEW REGISTRATION PATH ──────────────────────────────────────────
+        // Defensive duplicate guard (validation UI should have caught this already)
+        const isDup = registeredUsersList.some(u => u.toLowerCase() === newName.toLowerCase());
+        if (isDup) return;
+
+        try {
+            await fetch(BACKEND_URL, {
+                method: 'POST',
+                mode:   'cors',
+                body: JSON.stringify({ action: 'register_new_user', new_name: newName })
+            });
+            // Keep in-memory and localStorage cache accurate for the rest of the session
+            registeredUsersList.push(newName);
+            localStorage.setItem('compass_registered_users', JSON.stringify(registeredUsersList));
+        } catch (err) {
+            console.error('Failed to register new user on server:', err);
+            // Continue anyway — user still gets a local session
+        }
+        selectedUser = newName;
+
+    } else if (dropdownVal !== '') {
+        // ── EXISTING USER PATH ─────────────────────────────────────────────
+        selectedUser = dropdownVal;
+
+    } else {
+        // Nothing valid selected — button should be disabled so we never reach here
+        return;
+    }
+
+    localStorage.setItem('compass_user', selectedUser);
+    currentUser = selectedUser;
     document.getElementById('userModal').classList.add('hidden');
     initializeSessionDashboard();
+}
+
+// ─── LANDING PAGE VALIDATION ───────────────────────────────────────────────────
+
+// Called by the "Or Register New" input field on every keystroke.
+function validateLandingRegisterInput() {
+    const input        = document.getElementById('customUsernameInput');
+    const minCharWarn  = document.getElementById('landingRegisterMinCharWarning');
+    const nameTakenWarn = document.getElementById('landingRegisterNameTakenWarning');
+    const beginBtn     = document.getElementById('beginSessionBtn');
+    const dropdown     = document.getElementById('user-dropdown-select');
+    if (!input || !minCharWarn || !nameTakenWarn || !beginBtn) return;
+
+    const val = input.value.trim();
+
+    // Reset dropdown whenever the user is typing a new name
+    if (val.length > 0 && dropdown) dropdown.value = '';
+
+    if (val.length === 0) {
+        // Input cleared — re-evaluate based on dropdown alone
+        minCharWarn.classList.add('hidden');
+        nameTakenWarn.classList.add('hidden');
+        const hasDropdown = dropdown && dropdown.value.trim() !== '';
+        _setBeginBtnState(beginBtn, hasDropdown);
+        return;
+    }
+
+    if (val.length < 3) {
+        minCharWarn.classList.remove('hidden');
+        nameTakenWarn.classList.add('hidden');
+        _setBeginBtnState(beginBtn, false);
+        return;
+    }
+
+    minCharWarn.classList.add('hidden');
+    const nameTaken = registeredUsersList.some(u => u.toLowerCase() === val.toLowerCase());
+    if (nameTaken) {
+        nameTakenWarn.classList.remove('hidden');
+        _setBeginBtnState(beginBtn, false);
+    } else {
+        nameTakenWarn.classList.add('hidden');
+        _setBeginBtnState(beginBtn, true);
+    }
+}
+
+// Called when the dropdown selection changes.
+function handleLandingDropdownChange() {
+    const dropdown     = document.getElementById('user-dropdown-select');
+    const newNameInput = document.getElementById('customUsernameInput');
+    const minCharWarn  = document.getElementById('landingRegisterMinCharWarning');
+    const nameTakenWarn = document.getElementById('landingRegisterNameTakenWarning');
+    const beginBtn     = document.getElementById('beginSessionBtn');
+    if (!dropdown || !beginBtn) return;
+
+    // Selecting an existing user clears the new-name field and all warnings
+    if (newNameInput) newNameInput.value = '';
+    if (minCharWarn)  minCharWarn.classList.add('hidden');
+    if (nameTakenWarn) nameTakenWarn.classList.add('hidden');
+
+    _setBeginBtnState(beginBtn, dropdown.value.trim() !== '');
+}
+
+// Resets the entire user modal form to its initial empty/disabled state.
+// Called whenever the modal is shown (logout, first load).
+function resetUserModalForm() {
+    const input        = document.getElementById('customUsernameInput');
+    const dropdown     = document.getElementById('user-dropdown-select');
+    const minCharWarn  = document.getElementById('landingRegisterMinCharWarning');
+    const nameTakenWarn = document.getElementById('landingRegisterNameTakenWarning');
+    const beginBtn     = document.getElementById('beginSessionBtn');
+    if (input)        input.value = '';
+    if (dropdown)     dropdown.value = '';
+    if (minCharWarn)  minCharWarn.classList.add('hidden');
+    if (nameTakenWarn) nameTakenWarn.classList.add('hidden');
+    if (beginBtn)     _setBeginBtnState(beginBtn, false);
+}
+
+// Small helper — sets the Begin button's enabled/disabled visual state.
+function _setBeginBtnState(btn, enabled) {
+    btn.disabled = !enabled;
+    if (enabled) {
+        btn.classList.remove('opacity-40', 'cursor-not-allowed');
+    } else {
+        btn.classList.add('opacity-40', 'cursor-not-allowed');
+    }
 }
 
 function initializeSessionDashboard() {
@@ -397,6 +519,60 @@ function killLiveSpeechBubbleHUDState() {
         globalBubbleHUD.classList.remove('bubble-popup-anim', 'bubble-popdown-anim');
     }
     if(speechBubbleHideTimer) clearTimeout(speechBubbleHideTimer);
+}
+
+/**
+ * Show a speech-bubble tooltip anchored above a given element.
+ *
+ * @param {string}      message       - Text to display inside the bubble.
+ * @param {HTMLElement} anchorElement - The button/element to point at.
+ * @param {Event}       [event]       - Originating event (unused, kept for call-site compat).
+ */
+function triggerCuteSpeechBubbleHUD(message, anchorElement, event) {
+    const hud      = document.getElementById('globalToastSpeechBubbleHUD');
+    const textNode = document.getElementById('speechBubbleTextContainer');
+    const pointer  = document.getElementById('bubblePointerNode');
+    if (!hud || !textNode) return;
+
+    // Tear down any currently-visible bubble / pending hide timer
+    killLiveSpeechBubbleHUDState();
+
+    textNode.textContent = message;
+
+    if (anchorElement) {
+        const rect          = anchorElement.getBoundingClientRect();
+        const anchorCenterX = rect.left + rect.width / 2;
+        const bubbleWidth   = 240;
+        const margin        = 8;
+
+        // Centre the bubble on the anchor horizontally, clamped to viewport edges
+        let leftPos = anchorCenterX - bubbleWidth / 2;
+        leftPos = Math.max(margin, Math.min(window.innerWidth - bubbleWidth - margin, leftPos));
+
+        // The HUD origin sits at the TOP of the anchor button.
+        // The CSS animation translates the inner div upward by 100% + 8 px gap,
+        // so the bubble floats above the button with the pointer aimed at it.
+        hud.style.left = leftPos + 'px';
+        hud.style.top  = rect.top  + 'px';
+
+        // Slide the pointer diamond so it lines up with the anchor's horizontal centre
+        if (pointer) {
+            const pLeft = Math.max(8, Math.min(bubbleWidth - 20, Math.round(anchorCenterX - leftPos - 6)));
+            pointer.style.left  = pLeft + 'px';
+            pointer.style.right = 'auto';
+        }
+    }
+
+    // Reveal with pop-in animation (force reflow so re-triggering the same animation works)
+    hud.classList.remove('hidden');
+    hud.classList.remove('bubble-popup-anim');
+    void hud.offsetWidth;
+    hud.classList.add('bubble-popup-anim');
+
+    // Auto-dismiss after 2.6 s
+    speechBubbleHideTimer = setTimeout(() => {
+        killLiveSpeechBubbleHUDState();
+    }, 2600);
 }
 
 function toggleCityDropdownOverlayMenu(event) {
@@ -874,12 +1050,22 @@ function updateNetworkStatusHUD() {
 //  originate from the settings drawer flow.
 // ═══════════════════════════════════════════════════════════════════════════
 
-let _sConfirmCb = null; // stored callback for executeSettingsConfirmAction
+let _sConfirmCb          = null;  // stored callback for executeSettingsConfirmAction
+let _sConfirmShowLoading  = false; // when true, executeSettingsConfirmAction shows loading state
+let _sConfirmLoadingLabel = '';    // text shown in the button during loading (no dots suffix)
+let _sConfirmDotsInterval = null;  // setInterval handle for animated dots
 
 /**
  * Open the reusable confirm modal.
  * @param {object} cfg - { faIcon, iconBg, iconColor, topBar, title, body,
- *                         btnLabel, btnClass, callback }
+ *                         btnLabel, btnClass, callback,
+ *                         showLoading, loadingLabel }
+ *   showLoading  {boolean} — when true the modal stays open after the button
+ *                            is pressed, shows an animated loading state, and
+ *                            only closes once the async callback resolves.
+ *   loadingLabel {string}  — text shown in the button during loading
+ *                            (dots are appended automatically). Defaults to
+ *                            the btnLabel value.
  */
 function openSettingsConfirmModal(cfg) {
     document.getElementById('sConfirmIconWrap').className =
@@ -891,25 +1077,110 @@ function openSettingsConfirmModal(cfg) {
     document.getElementById('sConfirmTitle').textContent = cfg.title;
     document.getElementById('sConfirmBody').textContent  = cfg.body;
     const btn = document.getElementById('sConfirmActionBtn');
+    btn.disabled     = false; // always reset — loading state sets disabled=true and className reassignment doesn't clear DOM properties
     btn.textContent  = cfg.btnLabel;
     btn.className    = `w-full py-3 ${cfg.btnClass || 'bg-gradient-to-r from-red-600 to-rose-700'} font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg`;
-    _sConfirmCb = cfg.callback || null;
+    _sConfirmCb          = cfg.callback || null;
+    _sConfirmShowLoading  = !!cfg.showLoading;
+    _sConfirmLoadingLabel = cfg.loadingLabel || cfg.btnLabel || 'Processing';
     document.getElementById('settingsConfirmModal').classList.remove('hidden');
 }
+
 function closeSettingsConfirmModal() {
-    // Programmatic close (action executed) — settings already handled by callback
+    // Always clean up loading state before hiding
+    _exitConfirmModalLoadingState();
     document.getElementById('settingsConfirmModal').classList.add('hidden');
-    _sConfirmCb = null;
+    _sConfirmCb          = null;
+    _sConfirmShowLoading  = false;
+    _sConfirmLoadingLabel = '';
 }
+
 function cancelSettingsConfirmModal() {
-    // X button dismiss — user cancelled, navigate back to settings drawer
+    // X button dismiss — user cancelled, navigate back to settings drawer.
+    // Guard: do nothing if currently in a loading state (X is visually disabled
+    // but belt-and-suspenders here in case it fires via keyboard or AT).
+    if (_sConfirmDotsInterval !== null) return;
     closeSettingsConfirmModal();
     toggleSettingsMenu(true);
 }
-function executeSettingsConfirmAction() {
+
+async function executeSettingsConfirmAction() {
     const cb = _sConfirmCb;
-    closeSettingsConfirmModal();
-    if (typeof cb === 'function') cb();
+    if (!cb) return;
+
+    if (_sConfirmShowLoading) {
+        // ── Async path: keep modal open, lock it down, await the callback ──
+        _enterConfirmModalLoadingState();
+        try {
+            await cb();
+        } catch (err) {
+            console.error('Settings confirm action error:', err);
+        } finally {
+            // Clean up loading UI; the callback is responsible for opening the
+            // result modal. We close the confirm modal last so it dissolves
+            // cleanly behind whatever the callback already rendered.
+            closeSettingsConfirmModal();
+        }
+    } else {
+        // ── Synchronous path: original behaviour ────────────────────────────
+        closeSettingsConfirmModal();
+        cb();
+    }
+}
+
+// ─── Confirm modal loading-state helpers ──────────────────────────────────────
+
+function _enterConfirmModalLoadingState() {
+    const modal = document.getElementById('settingsConfirmModal');
+    if (!modal) return;
+
+    // Lock the X button — user must wait for the operation to complete
+    const xBtn = modal.querySelector('button[onclick="cancelSettingsConfirmModal()"]');
+    if (xBtn) {
+        xBtn.disabled = true;
+        xBtn.classList.add('opacity-30', 'pointer-events-none');
+    }
+
+    // Switch action button to animated loading text
+    const actionBtn = document.getElementById('sConfirmActionBtn');
+    if (actionBtn) {
+        actionBtn.disabled = true;
+        actionBtn.classList.remove('active:scale-95');
+        actionBtn.classList.add('opacity-70', 'cursor-not-allowed', 'pointer-events-none');
+        const base = _sConfirmLoadingLabel;
+        let dots = 0;
+        actionBtn.textContent = base;
+        _sConfirmDotsInterval = setInterval(() => {
+            dots = (dots + 1) % 4;
+            actionBtn.textContent = base + '.'.repeat(dots);
+        }, 450);
+    }
+}
+
+function _exitConfirmModalLoadingState() {
+    // Stop animated dots
+    if (_sConfirmDotsInterval !== null) {
+        clearInterval(_sConfirmDotsInterval);
+        _sConfirmDotsInterval = null;
+    }
+    const modal = document.getElementById('settingsConfirmModal');
+    if (!modal) return;
+
+    // Restore X button
+    const xBtn = modal.querySelector('button[onclick="cancelSettingsConfirmModal()"]');
+    if (xBtn) {
+        xBtn.disabled = false;
+        xBtn.classList.remove('opacity-30', 'pointer-events-none');
+    }
+
+    // Restore action button — className reassignment in openSettingsConfirmModal
+    // clears visual classes but NOT the disabled DOM property, so we must reset
+    // it here explicitly to ensure subsequent modal uses work correctly.
+    const actionBtn = document.getElementById('sConfirmActionBtn');
+    if (actionBtn) {
+        actionBtn.disabled = false;
+        actionBtn.classList.remove('opacity-70', 'cursor-not-allowed', 'pointer-events-none');
+    }
 }
 
 /** Purge modal helpers */
@@ -1151,27 +1422,46 @@ function commitProfileRename() {
         body:  `Change your identity from "${oldName}" to "${newName}"?`,
         btnLabel: 'Update Profile',
         btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
+        showLoading:  true,
+        loadingLabel: 'Updating Profile Name',
         callback: async () => {
             try {
+                // Single call: finds the old name row in RegisteredUsers and
+                // overwrites it with the new name in-place. Also logs to History.
                 await fetch(BACKEND_URL, {
                     method: 'POST',
                     mode: 'cors',
                     body: JSON.stringify({
-                        action: 'log_name_change',
-                        user: newName,
-                        oldName,
+                        action: 'rename_user',
+                        old_name: oldName,
+                        new_name: newName,
                         deviceMeta: cachedHardwareString
                     })
                 });
             } catch (err) {
-                console.error('Failed to log name change to cloud logs:', err);
+                console.error('Failed to rename user on server:', err);
             }
 
+            // ── Update local state ──────────────────────────────────────────
             localStorage.setItem('compass_user', newName);
             currentUser = newName;
 
-            // Keep cached list accurate for duplicate-check within the session
-            if (!registeredUsersList.includes(newName)) registeredUsersList.push(newName);
+            // Replace old name in-place in the in-memory list so duplicate
+            // checks remain accurate without needing a fresh server fetch.
+            const renameIdx = registeredUsersList.findIndex(
+                u => u.toLowerCase() === oldName.toLowerCase()
+            );
+            if (renameIdx !== -1) {
+                registeredUsersList[renameIdx] = newName;
+            } else {
+                registeredUsersList.push(newName);
+            }
+            localStorage.setItem('compass_registered_users', JSON.stringify(registeredUsersList));
+
+            // Refresh both dropdowns with the updated list. _fillUserDropdowns
+            // reads currentUser so the settings dropdown auto-selects the new
+            // name immediately — before settings is closed.
+            _fillUserDropdowns(registeredUsersList);
 
             resetProfileRenameValidationUI();
             toggleSettingsMenu(false);
@@ -1195,7 +1485,15 @@ function clearDeviceSessionAndLogout() {
         btnLabel: 'Logout & Reset',
         btnClass: 'bg-gradient-to-r from-red-600 to-rose-700',
         callback: () => {
+            // Preserve the registered-users list across logout so the login
+            // dropdown can be painted from cache instantly on the next load,
+            // without waiting for a fresh server fetch. The list is not
+            // sensitive — it contains only display names.
+            const preservedUsersCache = localStorage.getItem('compass_registered_users');
             localStorage.clear();
+            if (preservedUsersCache) {
+                localStorage.setItem('compass_registered_users', preservedUsersCache);
+            }
             window.location.reload();
         }
     });
@@ -1206,6 +1504,16 @@ window.onload = function() {
     // NOTE: Do NOT write any default zoom/lat/lng here — doing so would wipe the
     // user's last active view on every reload. The priority resolver in map.js
     // reads and validates those values independently.
+
+    // ── Kick off the user-list fetch as the very first async operation ────────
+    // populateUserDropdown() has two phases:
+    //   1. Synchronous: paint dropdown instantly from localStorage cache
+    //   2. Async: refresh the list from the server in the background
+    // By starting it before initLeafletMapEngineCanvas() we give the network
+    // request the maximum possible head-start. The calibration canvas takes
+    // 1-3 s to dismiss (tile load), so the fetch almost always completes before
+    // the user ever sees the login screen — making the dropdown immediately ready.
+    populateUserDropdown();
 
     cachedHardwareString = parseReadableDeviceHardware();
     document.getElementById('meta-id').innerText = `Device ID: ${deviceId}`;
@@ -1264,9 +1572,9 @@ window.onload = function() {
             startLiveHardwareGPSTracking();
         }
     });
-    populateUserDropdown(); 
     syncPriorityFilterViewModeUI();
-    
+    setupNativePullToRefreshGestures();
+
     document.getElementById('trayFlipToBackBtn').addEventListener('click', (e) => { 
         e.stopPropagation(); 
         document.getElementById('mapDetailTrayHUD').classList.add('flipped'); 
@@ -1321,6 +1629,7 @@ window.onload = function() {
     
     if (!currentUser) {
         document.getElementById('userModal').classList.remove('hidden');
+        resetUserModalForm(); // ensure clean form state on every show
     } else {
         initializeSessionDashboard();
     }
@@ -1348,8 +1657,15 @@ window.onload = function() {
              const subModalOpen = document.getElementById('settingsConfirmModal')?.classList.contains('hidden') === false
                                || document.getElementById('settingsPurgeModal')?.classList.contains('hidden') === false
                                || document.getElementById('settingsResultModal')?.classList.contains('hidden') === false;
+             // Also guard against clicks that originated inside a sub-modal container.
+             // Without this, the cancel* functions hide the sub-modal and re-open settings,
+             // but the click then bubbles here — subModalOpen is already false by then —
+             // and the handler incorrectly closes settings again.
              if (!subModalOpen
                  && !event.target.closest('#settingsDrawerContentBody')
+                 && !event.target.closest('#settingsConfirmModal')
+                 && !event.target.closest('#settingsPurgeModal')
+                 && !event.target.closest('#settingsResultModal')
                  && !event.target.closest('button[onclick="toggleSettingsMenu(true)"]')) {
                  toggleSettingsMenu(false);
              }
