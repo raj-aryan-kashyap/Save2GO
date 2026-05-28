@@ -315,7 +315,7 @@
                 <div class="px-4 py-3 bg-slate-900/95 backdrop-blur-xl border-b border-slate-800 shrink-0 flex flex-col gap-3">
                     <div class="flex items-center justify-between">
                         <button onclick="closeItineraryDetailView()" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300"><i class="fa-solid fa-arrow-left"></i></button>
-                        <h2 id="detailItineraryTitle" class="text-[13px] font-black text-slate-200 truncate"></h2>
+                        <h2 id="detailItineraryTitle" class="text-[13px] font-black text-slate-200 flex items-center gap-1.5 min-w-0"></h2>
                         <div class="flex items-center gap-2">
                             <button id="detailItinStarBtn" onclick="toggleItineraryStar(activeItineraryId)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300 transition-colors">
                                 <i class="fa-regular fa-star text-[11px]"></i>
@@ -333,10 +333,13 @@
                         <button id="itinNavPrevBtn" onclick="navigateItineraryDay(-1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-left text-xs text-slate-400"></i></button>
                         <div class="flex flex-col items-center">
                             <span id="detailDayLabel" class="text-[11px] font-black text-pink-400 uppercase">Day 1</span>
-                            <span id="detailDateLabel" class="text-[9px] text-slate-500 font-bold mt-0.5"></span>
-                            <span id="detailDayWeatherBadge" class="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 mt-1">
-                                <i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>
-                            </span>
+                            <div class="flex items-center gap-1 mt-0.5">
+                                <span id="detailDayWeatherBadge" class="inline-flex items-center gap-0.5 text-[9px] font-bold text-slate-400">
+                                    <i class="fa-solid fa-ellipsis text-slate-700 text-[9px] animate-pulse"></i>
+                                </span>
+                                <span class="text-slate-700 text-[9px] font-bold">|</span>
+                                <span id="detailDateLabel" class="text-[9px] text-slate-500 font-bold"></span>
+                            </div>
                         </div>
                         <button id="itinNavNextBtn" onclick="navigateItineraryDay(1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-right text-xs text-slate-400"></i></button>
                     </div>
@@ -347,7 +350,7 @@
                     </div>
                 </div>
                 
-                <div id="itineraryTimelineScrollContainer" class="flex-1 overflow-y-auto subtle-scrollbar px-4 pt-4 pb-32 space-y-3 relative bg-slate-950">
+                <div id="itineraryTimelineScrollContainer" class="flex-1 overflow-y-auto subtle-scrollbar pt-2 pb-32 relative bg-slate-950">
                     </div>
             </div>
             

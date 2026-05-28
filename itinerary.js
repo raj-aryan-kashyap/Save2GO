@@ -855,7 +855,10 @@ function renderItineraryMasterDashboardWorkspace() {
         card.onclick = () => openItineraryDetailView(itin.id);
         card.innerHTML = `
             <div class="flex justify-between items-start">
-                <h3 class="text-sm font-black text-slate-200 flex-1 min-w-0 pr-2 truncate">${itin.title}</h3>
+                <h3 class="text-sm font-black text-slate-200 flex-1 min-w-0 pr-2 flex items-center gap-1.5">
+                    <i class="fa-solid ${itin.config?.pacing === 'relaxed' ? 'fa-mug-hot text-sky-400' : 'fa-rocket text-amber-400'} text-[10px] shrink-0"></i>
+                    <span class="truncate">${itin.title}</span>
+                </h3>
                 <div class="flex items-center gap-2 shrink-0">
                     <button onclick="event.stopPropagation(); toggleItineraryStar('${itin.id}')"
                             class="w-6 h-6 flex items-center justify-center transition-colors active:scale-90">
@@ -894,79 +897,109 @@ function renderItineraryMasterDashboardWorkspace() {
     });
 }
 
-// ── Weather: master card bus-sign strip ──────────────────────────────────────
+// ── Weather: master card consolidated summary strip ──────────────────────────
 /**
- * Fetches forecast for `city`, then updates the weather strip for a master card.
- * `days` is the itinerary days array — used to match forecast dates to actual
- * trip dates so we show only the days the user will be there.
+ * Fetches forecast for `city`, then renders a single-line consolidated summary:
+ *   Oct 14 (Tue) → Oct 16 (Thu)  ☀ → 🌧  12°C – 22°C
+ * Icons come from the days with the highest and lowest temperatures.
+ * Falls back to a greyed-out cloud + "No forecast" on any failure.
  */
 async function _populateItineraryWeatherStrip(itinId, city, days) {
     const el = document.getElementById(`itinWeatherStrip-${itinId}`);
     if (!el) return;
 
-    const forecast = await fetchItineraryForecast(city);
-
-    if (!forecast || !forecast.days || forecast.days.length === 0) {
-        // Error / no data state — neutral cloud, no animation
+    // ── Error/fallback renderer ───────────────────────────────────────────────
+    const _noData = () => {
         el.innerHTML = `
-            <span class="text-[9px] text-slate-700 font-bold flex items-center gap-1.5">
-                <i class="fa-solid fa-cloud text-slate-700 text-[8px]"></i> No forecast
+            <span class="inline-flex items-center gap-1.5 text-[9px] text-slate-700 font-bold">
+                <i class="fa-solid fa-cloud text-slate-700 text-[8px]"></i>
+                <span>No forecast</span>
             </span>`;
-        return;
-    }
+    };
 
-    // Match forecast days to the itinerary trip dates
-    const tripDates = (days || []).map(d => {
-        // Normalise to YYYY-MM-DD (handles both Date objects and ISO strings)
-        return (d.date instanceof Date)
-            ? d.date.toISOString().slice(0, 10)
-            : String(d.date).slice(0, 10);
-    });
-    const matchedDays = forecast.days.filter(fd => tripDates.includes(fd.date));
-    // Fall back to all available forecast days if none overlap (e.g. future trip)
-    const displayDays = matchedDays.length > 0 ? matchedDays : forecast.days.slice(0, 5);
+    const forecast = await fetchItineraryForecast(city);
+    if (!forecast || !forecast.days || forecast.days.length === 0) { _noData(); return; }
 
-    if (displayDays.length === 0) {
-        el.innerHTML = `<span class="text-[9px] text-slate-700 font-bold flex items-center gap-1.5"><i class="fa-solid fa-cloud text-slate-700 text-[8px]"></i> No forecast</span>`;
-        return;
-    }
+    // Normalise trip dates to YYYY-MM-DD strings
+    const _toYMD = (d) => {
+        if (d instanceof Date) {
+            const [y, m, day] = [d.getFullYear(), d.getMonth(), d.getDate()];
+            return `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+        return String(d).slice(0, 10);
+    };
 
-    // Build bus-sign segment string — doubled for seamless loop
-    const buildSegment = () => displayDays.map((fd, i) => {
-        const label = `D${i + 1}`;
-        const temp  = fd.temp !== undefined ? `${Math.round(fd.temp)}°` : '–';
-        return `<span class="inline-flex items-center gap-1 shrink-0">
-                    <span class="text-slate-500 font-bold text-[9px]">${label}</span>
-                    <i class="fa-solid ${fd.iconClass} text-[9px]"></i>
-                    <span class="text-slate-400 font-bold text-[9px]">${temp}</span>
-                </span>
-                <span class="text-slate-700 mx-2 text-[9px] shrink-0">|</span>`;
-    }).join('');
+    // Safe local-time Date constructor (avoids UTC midnight off-by-one)
+    const _parseDate = (d) => {
+        if (d instanceof Date) return d;
+        const p = String(d).slice(0, 10).split('-').map(Number);
+        return new Date(p[0], p[1] - 1, p[2]);
+    };
 
-    const segment = buildSegment();
-    // Decide animation: only scroll if content is wide (more than 3 days)
-    const shouldScroll = displayDays.length > 3;
+    const tripDates  = (days || []).map(d => _toYMD(d.date));
+    const matched    = forecast.days.filter(fd => tripDates.includes(fd.date));
+    // Fall back to using the first N available forecast days when dates don't overlap
+    const pool       = matched.length > 0 ? matched : forecast.days.slice(0, Math.max((days || []).length, 1));
 
-    el.style.overflow = 'hidden';
+    const valid = pool.filter(d => d.temp !== undefined && d.temp !== null);
+    if (valid.length === 0) { _noData(); return; }
+
+    // Days with extreme temperatures
+    const maxDay = valid.reduce((a, b) => a.temp >= b.temp ? a : b);
+    const minDay = valid.reduce((a, b) => a.temp <= b.temp ? a : b);
+
+    // Format itinerary start → end date labels
+    const _fmtDate = (d) => {
+        if (!d || isNaN(d.getTime())) return '';
+        const month   = d.toLocaleDateString('en-US', { month: 'short' });
+        const dayNum  = d.getDate();
+        const weekday = d.toLocaleDateString('en-US', { weekday: 'short' });
+        return `${month} ${dayNum} (${weekday})`;
+    };
+
+    const itinDays    = days || [];
+    const startLabel  = itinDays.length > 0 ? _fmtDate(_parseDate(itinDays[0].date)) : '';
+    const endLabel    = itinDays.length > 1  ? _fmtDate(_parseDate(itinDays[itinDays.length - 1].date)) : '';
+    const dateRange   = startLabel && endLabel
+        ? `<span class="text-slate-600">${startLabel}</span>
+           <span class="text-slate-700 mx-1">→</span>
+           <span class="text-slate-600">${endLabel}</span>
+           <span class="text-slate-800 mx-1.5">·</span>`
+        : startLabel
+            ? `<span class="text-slate-600">${startLabel}</span><span class="text-slate-800 mx-1.5">·</span>`
+            : '';
+
+    // Temperatures always use text-slate-300 (readable on dark bg regardless of
+    // weather condition).  Tying temp colour to the icon class caused overcast
+    // entries to render as uniform grey — visually identical to the no-data state.
     el.innerHTML = `
-        <div class="${shouldScroll ? 'itin-weather-run' : 'inline-flex items-center gap-0'}"
-             style="${shouldScroll ? '' : 'flex-wrap:nowrap;'}">
-            ${segment}
-            ${shouldScroll ? segment : ''}
-        </div>`;
+        <span class="inline-flex items-center text-[9px] font-bold whitespace-nowrap">
+            ${dateRange}
+            <i class="fa-solid ${maxDay.iconClass} text-[9px] mr-0.5"></i>
+            <span class="text-slate-300 opacity-90 mr-1">${Math.round(maxDay.temp)}°</span>
+            <span class="text-slate-700 mr-1">→</span>
+            <i class="fa-solid ${minDay.iconClass} text-[9px] mr-0.5"></i>
+            <span class="text-slate-300 opacity-90">${Math.round(minDay.temp)}°</span>
+        </span>`;
 }
 
 // ── Weather: expanded view day badge ─────────────────────────────────────────
 /**
  * Updates the #detailDayWeatherBadge for the currently displayed day.
- * @param {string} city      – itinerary city name
- * @param {string} dateStr   – ISO date string for the active day (YYYY-MM-DD or Date)
+ *
+ * Strategy: try to match the forecast by exact date first (most accurate). If
+ * the itinerary dates fall outside OWM's 5-day window (very common for future
+ * trips), fall back to using dayIndex to pick from available forecast days so
+ * the expanded view is always consistent with the master card.
+ *
+ * @param {string}         city     – itinerary city name
+ * @param {string|Date}    dateStr  – date of the active day
+ * @param {number}         dayIndex – 0-based index of the active day (fallback)
  */
-async function _fetchAndRenderDetailDayWeather(city, dateStr) {
+async function _fetchAndRenderDetailDayWeather(city, dateStr, dayIndex) {
     const badge = document.getElementById('detailDayWeatherBadge');
     if (!badge) return;
 
-    // Show a neutral loading state while we wait
     badge.innerHTML = `<i class="fa-solid fa-ellipsis text-slate-700 text-[9px] animate-pulse"></i>`;
 
     if (!city) { badge.innerHTML = ''; return; }
@@ -977,11 +1010,22 @@ async function _fetchAndRenderDetailDayWeather(city, dateStr) {
         return;
     }
 
+    // Normalise target date to YYYY-MM-DD
     const targetDate = (dateStr instanceof Date)
-        ? dateStr.toISOString().slice(0, 10)
+        ? (() => {
+            const d = dateStr;
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          })()
         : String(dateStr).slice(0, 10);
 
-    const match = forecast.days.find(fd => fd.date === targetDate);
+    // 1st: exact date match
+    let match = forecast.days.find(fd => fd.date === targetDate);
+
+    // 2nd: day-index fallback (same pool the master card uses)
+    if (!match && typeof dayIndex === 'number') {
+        match = forecast.days[Math.min(dayIndex, forecast.days.length - 1)];
+    }
+
     if (!match) {
         badge.innerHTML = `<i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>`;
         return;
@@ -990,7 +1034,148 @@ async function _fetchAndRenderDetailDayWeather(city, dateStr) {
     const temp = match.temp !== undefined ? `${Math.round(match.temp)}°C` : '';
     badge.innerHTML = `
         <i class="fa-solid ${match.iconClass} text-[11px]"></i>
-        ${temp ? `<span class="text-slate-400 font-bold text-[9px]">${temp}</span>` : ''}`;
+        ${temp ? `<span class="text-slate-300 opacity-90 font-bold text-[9px]">${temp}</span>` : ''}`;
+}
+
+// ── Weather: per-activity badge in the expanded timeline ─────────────────────
+/**
+ * Fills the compact weather badge (`#wba-*`) that sits next to each activity's
+ * time slot.  Re-uses the same city forecast cache so no extra network call is
+ * made when the day's weather was already fetched for the header badge.
+ *
+ * Strategy mirrors _fetchAndRenderDetailDayWeather: exact-date match first,
+ * then dayIndex fallback so badges always show something meaningful.
+ *
+ * Matching the Saved Spots badge style:
+ *   container  bg-sky-500/10 text-sky-300  (set at render time, kept here)
+ *   icon       uses its own colour from iconClass  (e.g. text-yellow-400)
+ *   temp       inherits text-sky-300 from container — same as Saved Spots
+ *
+ * @param {string}      badgeId  – element id of the badge span
+ * @param {string}      city     – itinerary city name
+ * @param {string|Date} dateStr  – date of the active day
+ * @param {number}      dayIndex – 0-based day index (fallback selector)
+ */
+/**
+ * @param {string}      badgeId   – element id of the per-activity weather span
+ * @param {string}      city      – itinerary city (city-level forecast fallback)
+ * @param {string|Date} dateStr   – calendar date of the active day
+ * @param {number}      dayIndex  – 0-based day index (fallback selector)
+ * @param {object}      [spotObj] – activity spot; when the date is today and the
+ *                                   spot has valid coordinates, real-time per-location
+ *                                   weather is fetched so each spot on the same day
+ *                                   can show different conditions.
+ */
+async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayIndex, spotObj) {
+    const el = document.getElementById(badgeId);
+    if (!el) return;
+
+    if (!city) { el.innerHTML = ''; return; }
+
+    // Normalise target date → YYYY-MM-DD
+    const targetDate = (dateStr instanceof Date)
+        ? (() => {
+            const d = dateStr;
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          })()
+        : String(dateStr).slice(0, 10);
+
+    // Today's date string — used to decide whether real-time fetch makes sense
+    const todayStr = (() => {
+        const t = new Date();
+        return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    })();
+
+    // ── Path A: today's activity with valid coordinates ───────────────────────
+    // Uses fetchWeatherForCoords (current weather, per-location) so activities
+    // at different parts of the city can show genuinely different conditions.
+    // The result is cached by coordinate key, so N spots → max N unique fetches.
+    if (targetDate === todayStr && spotObj && typeof fetchWeatherForCoords === 'function') {
+        const lat = spotObj._lat  || (spotObj.latitude  ? parseFloat(spotObj.latitude)  : null);
+        const lng = spotObj._lng  || (spotObj.longitude ? parseFloat(spotObj.longitude) : null);
+        if (lat && lng && lat !== 0 && lng !== 0) {
+            const w = await fetchWeatherForCoords(lat, lng);
+            if (w) {
+                el.innerHTML = `<i class="fa-solid ${w.iconClass} text-[8px]"></i>${w.temp ? `<span>${w.temp}°</span>` : ''}`;
+                return;
+            }
+        }
+    }
+
+    // ── Path B: future date or no coordinates → city-level daily forecast ─────
+    // All activities on the same future day will share the same daily snapshot;
+    // 3-hour granularity would require a backend change to get_forecast.
+    const forecast = await fetchItineraryForecast(city);
+    if (!forecast || !forecast.days || forecast.days.length === 0) {
+        el.innerHTML = `<i class="fa-solid fa-cloud text-[8px] opacity-30"></i>`;
+        return;
+    }
+
+    let match = forecast.days.find(fd => fd.date === targetDate);
+    if (!match && typeof dayIndex === 'number') {
+        match = forecast.days[Math.min(dayIndex, forecast.days.length - 1)];
+    }
+
+    if (!match) {
+        el.innerHTML = `<i class="fa-solid fa-cloud text-[8px] opacity-30"></i>`;
+        return;
+    }
+
+    const temp = match.temp !== undefined ? `${Math.round(match.temp)}°` : '';
+    el.innerHTML = `<i class="fa-solid ${match.iconClass} text-[8px]"></i>${temp ? `<span>${temp}</span>` : ''}`;
+}
+
+// ── Open map-style info tray from the itinerary expanded view ─────────────────
+/**
+ * Opens the standard mapDetailTrayHUD populated with the given spot's data,
+ * exactly as it appears when tapping a map pin.  The FAB is already hidden
+ * while the itinerary is open; we monkey-patch dismissMapDetailTrayHUDCard
+ * once so it re-hides the FAB after any dismissal path (X button on either
+ * face, done-button dismiss).  The patch restores itself on first invocation.
+ */
+function openSpotTrayFromItinerary(spotObj) {
+    if (typeof revealMapItemDetailTrayHUD !== 'function') return;
+
+    const plusBtn      = document.getElementById('globalFloatingActionPlusButton');
+    const fabWasHidden = plusBtn && plusBtn.classList.contains('hidden');
+
+    const isStarred = ['high', '🔥', 'must do', 'starred']
+        .includes((spotObj.priority || '').toLowerCase());
+
+    // Compute distStr using the same logic as the Saved Spots list render so the
+    // tray shows: distance in km/m when GPS is on, GPS Off icon when GPS is off,
+    // or "Missing Location" when the spot has no coordinate data.
+    const _lat = spotObj.latitude  ? String(spotObj.latitude).trim()  : '';
+    const _lng = spotObj.longitude ? String(spotObj.longitude).trim() : '';
+    const _hasCoords = _lat !== '' && _lat !== '0' && _lng !== '' && _lng !== '0';
+
+    let _distStr;
+    if (!_hasCoords) {
+        _distStr = 'Missing Location';
+    } else if (!gpsStatusCachedBool) {
+        _distStr = "<i class='fa-solid fa-location-dot mr-1'></i>GPS Off";
+    } else if (typeof calculateDistance === 'function') {
+        const _d = calculateDistance(userLat, userLon, parseFloat(_lat), parseFloat(_lng));
+        _distStr = _d < 1 ? `${Math.round(_d * 1000)}m` : `${_d.toFixed(1)}km`;
+    } else {
+        _distStr = 'GPS Off';
+    }
+
+    const safeSpot = { ...spotObj, distStr: _distStr };
+
+    revealMapItemDetailTrayHUD(safeSpot, isStarred);
+
+    // Restore FAB to its pre-tray state (hidden) when tray is closed.
+    // All dismissal paths (both X buttons, done-button) call the global
+    // dismissMapDetailTrayHUDCard by name, so patching window-level is enough.
+    if (fabWasHidden && typeof window.dismissMapDetailTrayHUDCard === 'function') {
+        const _orig = window.dismissMapDetailTrayHUDCard;
+        window.dismissMapDetailTrayHUDCard = function () {
+            _orig();                                       // hides tray, shows FAB
+            if (plusBtn) plusBtn.classList.add('hidden');  // re-hide for itinerary
+            window.dismissMapDetailTrayHUDCard = _orig;    // restore for map use
+        };
+    }
 }
 
 function openItineraryDetailView(itinId) {
@@ -1021,66 +1206,290 @@ function renderDetailViewTimeline() {
     const itin = getActiveItinerary();
     if (!itin) return;
 
-    document.getElementById('detailItineraryTitle').innerText = itin.title;
+    const _pacingIconHtml = (itin.config?.pacing === 'relaxed')
+        ? '<i class="fa-solid fa-mug-hot text-sky-400 text-[11px] shrink-0"></i>'
+        : '<i class="fa-solid fa-rocket  text-amber-400 text-[11px] shrink-0"></i>';
+    const _safeTitle = (itin.title || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    document.getElementById('detailItineraryTitle').innerHTML =
+        `${_pacingIconHtml}<span class="truncate min-w-0">${_safeTitle}</span>`;
     document.getElementById('detailDayLabel').innerText = `Day ${activeItineraryDayTracker + 1} of ${itin.days.length}`;
 
-    // Hide both nav arrows for single-day itineraries — no navigation needed
-    const prevBtn    = document.getElementById('itinNavPrevBtn');
-    const nextBtn    = document.getElementById('itinNavNextBtn');
-    const isSingleDay = itin.days.length === 1;
-    if (prevBtn) prevBtn.classList.toggle('invisible', isSingleDay);
-    if (nextBtn) nextBtn.classList.toggle('invisible', isSingleDay);
+    const prevBtn     = document.getElementById('itinNavPrevBtn');
+    const nextBtn     = document.getElementById('itinNavNextBtn');
+    if (prevBtn) prevBtn.classList.toggle('invisible', activeItineraryDayTracker === 0);
+    if (nextBtn) nextBtn.classList.toggle('invisible', activeItineraryDayTracker >= itin.days.length - 1);
 
-    // Keep the star button in the detail header in sync
     _syncDetailViewStarBtn(itin);
 
     const activeDay = itin.days[activeItineraryDayTracker];
-    document.getElementById('detailDateLabel').innerText = new Date(activeDay.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    document.getElementById('detailDateLabel').innerText = new Date(activeDay.date)
+        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    _fetchAndRenderDetailDayWeather(itin.city, activeDay.date, activeItineraryDayTracker);
 
     container.innerHTML = '';
-    
+
+    // ── Layout constants ──────────────────────────────────────────────────────
+    const PX_PER_MIN  = 2.0;   // 120 px per hour
+    const RULER_W     = 46;    // left time-column width in px
+    const MIN_BLOCK_H = 140;   // minimum block height — ensures card always fits
+    const CARD_TOP    = 2;     // px from block top to card top — flush with time mark
+
+    // ── Empty-day state ───────────────────────────────────────────────────────
     if (activeDay.timeline.length === 0) {
-        container.innerHTML = `<div class="text-center text-slate-600 py-16 text-xs font-medium space-y-3"><div class="text-4xl opacity-30"><i class="fa-solid fa-mug-hot"></i></div><p>No activities scheduled for this day.</p></div>`;
+        const emptyDiv = document.createElement('div');
+        emptyDiv.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:80px 16px;text-align:center;';
+        emptyDiv.innerHTML = `
+            <div style="font-size:2.5rem;opacity:0.2;color:rgb(148 163 184);">
+                <i class="fa-solid fa-mug-hot"></i>
+            </div>
+            <p style="font-size:11px;font-weight:600;color:rgb(71 85 105);">No activities scheduled for this day.</p>`;
+        container.appendChild(emptyDiv);
         return;
     }
 
-    activeDay.timeline.forEach((spot, spotIndex) => {
+    // ── Helper: format a minutes value into a label object ───────────────────
+    // Returns { main, ampm, isMid } — e.g. 570 → { main:"9:30", ampm:"AM", isMid:false }
+    const _fmtLabel = (mins) => {
+        const h    = Math.floor(mins / 60) % 24;
+        const m    = mins % 60;
+        const h12  = h === 0 ? 12 : h <= 12 ? h : h - 12;
+        const ampm = h < 12 ? 'AM' : 'PM';
+        const main = m === 0 ? String(h12) : `${h12}:${String(m).padStart(2, '0')}`;
+        return { main, ampm, isMid: mins === 0 || mins === 720 };
+    };
+
+    // ── Helper: add a horizontal time mark to a block element ────────────────
+    // isStart marks are always rendered as a solid line (they anchor the block).
+    // Internal hour marks are solid; internal half-hour marks are dotted.
+    // All lines span left:0 → right:0 (full block width, behind the card).
+    const _addMark = (block, mins, offsetPx, isStart) => {
+        const onHour     = mins % 60 === 0;
+        const renderSolid = isStart || onHour;
+        const lbl        = _fmtLabel(mins);
+
+        const wrap = document.createElement('div');
+        wrap.style.cssText = `position:absolute;left:0;right:0;top:${offsetPx}px;height:0;z-index:0;pointer-events:none;`;
+
+        if (renderSolid) {
+            const lineCol = lbl.isMid ? 'rgba(71,85,105,0.6)' : 'rgba(30,41,59,1)';
+            const lblCol  = lbl.isMid ? 'rgba(148,163,184,0.65)'
+                          : isStart    ? 'rgba(100,116,139,0.95)'
+                          :              'rgba(71,85,105,0.8)';
+            wrap.innerHTML = `
+                <div style="position:absolute;left:0;right:0;top:0;height:1px;background:${lineCol};"></div>
+                <span style="
+                    position:absolute;left:4px;top:-8px;
+                    font-size:7.5px;font-weight:800;color:${lblCol};
+                    white-space:nowrap;line-height:1;letter-spacing:0.02em;">
+                    ${lbl.main}<span style="font-size:6px;margin-left:1px;">${lbl.ampm}</span>
+                </span>`;
+        } else {
+            // Half-hour mark: full-width dashed line using a repeating gradient
+            // (4 px dash / 6 px gap) — readable at any screen density
+            wrap.innerHTML = `
+                <div style="
+                    position:absolute;left:0;right:0;top:0;height:1px;
+                    background:repeating-linear-gradient(
+                        to right,
+                        rgba(30,41,59,0.9) 0px,
+                        rgba(30,41,59,0.9) 4px,
+                        transparent 4px,
+                        transparent 10px
+                    );"></div>`;
+        }
+
+        block.appendChild(wrap);
+    };
+
+    // ── Helper: append a proportional ruler section (preamble / gap / postamble)
+    // Renders hour (solid) and half-hour (dotted) marks over the time range
+    // [fromMins, toMins].  The last mark (toMins) is suppressed unless it is
+    // exactly midnight (1440) so it is never double-drawn with the next block's
+    // start mark.
+    const _appendRulerSection = (fromMins, toMins) => {
+        if (toMins <= fromMins) return;
+        const sectionH = Math.round((toMins - fromMins) * PX_PER_MIN);
+        if (sectionH <= 0) return;
+
+        const section = document.createElement('div');
+        section.style.cssText = `position:relative;height:${sectionH}px;`;
+
+        // Ruler spine
+        const spine = document.createElement('div');
+        spine.style.cssText = `position:absolute;left:${RULER_W - 1}px;top:0;bottom:0;width:1px;background:rgba(20,30,40,1);z-index:0;pointer-events:none;`;
+        section.appendChild(spine);
+
+        // Draw marks for every 30-min boundary within [fromMins, toMins]
+        const startMark = (fromMins % 30 === 0) ? fromMins : Math.ceil(fromMins / 30) * 30;
+        for (let m = startMark; m <= toMins; m += 30) {
+            // Suppress the closing boundary mark except at true midnight (end of day)
+            if (m === toMins && toMins !== 1440) continue;
+            const offsetPx = Math.round((m - fromMins) * PX_PER_MIN);
+            // Use m % 1440 so 1440 displays as "12 AM" via _fmtLabel
+            _addMark(section, m % 1440, offsetPx, false);
+        }
+
+        container.appendChild(section);
+    };
+
+    // ── Render blocks ─────────────────────────────────────────────────────────
+    const timeline = activeDay.timeline;
+
+    // Preamble ruler: 12 AM → first activity start
+    const firstStart = timeline.length > 0 ? (timeline[0].sch_start || 0) : 1440;
+    const lastEnd    = timeline.length > 0
+        ? (timeline[timeline.length - 1].sch_end
+           || (timeline[timeline.length - 1].sch_start + 60))
+        : 0;
+    _appendRulerSection(0, firstStart);
+
+    timeline.forEach((spot, spotIndex) => {
+        const startMins    = spot.sch_start || 0;
+        const endMins      = spot.sch_end   || (startMins + 60);
+        const durationMins = Math.max(endMins - startMins, 1);
+        // Proportional height drives min-height so time marks stay evenly spaced,
+        // but the block can grow beyond this to fit card content.
+        const propH = Math.round(durationMins * PX_PER_MIN);
+
+        // ── Gap spacer before this block (skipped for the first entry) ────────
+        if (spotIndex > 0) {
+            const prevEnd = timeline[spotIndex - 1].sch_end
+                         || (timeline[spotIndex - 1].sch_start + 60);
+            const gapMins = startMins - prevEnd;
+
+            if (gapMins > 0) {
+                // Proportional ruler section for the free-time gap
+                _appendRulerSection(prevEnd, startMins);
+            }
+        }
+
+        // ── Activity block ────────────────────────────────────────────────────
+        // Card is in NORMAL FLOW (not absolute) so the block grows to fit its
+        // content — cards can never overflow into adjacent blocks.
+        // padding-left pushes the card into the right column.
+        // min-height keeps proportional time-mark spacing even on short activities.
+        const block = document.createElement('div');
+        block.style.cssText = `
+            position:relative;
+            padding:${CARD_TOP}px 16px ${CARD_TOP}px ${RULER_W + 6}px;
+            min-height:${Math.max(propH, MIN_BLOCK_H)}px;`;
+
+        // 1px right-border of the ruler column — visual vertical spine
+        const spine = document.createElement('div');
+        spine.style.cssText = `
+            position:absolute;left:${RULER_W - 1}px;top:0;bottom:0;
+            width:1px;background:rgba(20,30,40,1);z-index:0;pointer-events:none;`;
+        block.appendChild(spine);
+
+        // Start-time solid mark (always at top of block)
+        _addMark(block, startMins, 0, true);
+
+        // All hour / half-hour marks that fall strictly inside the activity window
+        const firstInternal = Math.ceil((startMins + 1) / 30) * 30;
+        for (let m = firstInternal; m < endMins; m += 30) {
+            _addMark(block, m, Math.round((m - startMins) * PX_PER_MIN), false);
+        }
+
+        // ── Card — normal-flow child; grows to fit its own content ────────────
         const card = document.createElement('div');
-        card.className = `w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 relative flex items-center gap-3 shrink-0 transition-all ${spot.isDone ? 'itin-done-card border-slate-900' : ''}`;
-        
+        card.className = `bg-slate-900 border border-slate-800 rounded-2xl p-4 relative transition-all cursor-pointer ${spot.isDone ? 'itin-done-card border-slate-900' : ''}`;
+
+        // Resolve category icon — same helper used by the Saved Spots list
+        const _catIconCls = (typeof getCategoryIconClass === 'function')
+            ? getCategoryIconClass(spot.category)
+            : 'fa-location-dot text-slate-400';
+
         card.innerHTML = `
             <div class="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-pink-500 to-purple-600 opacity-80 rounded-l-2xl"></div>
-            
-            <div class="flex items-start gap-3 w-full">
-                <div class="flex flex-col items-center justify-start shrink-0 w-8 pt-1 pl-1">
-                    <button onclick="toggleActivityDoneState(${activeItineraryDayTracker}, ${spotIndex})" class="w-7 h-7 rounded-full border-2 flex items-center justify-center transition-colors ${spot.isDone ? 'bg-pink-600 border-pink-600 text-white shadow-[0_0_10px_rgba(236,72,153,0.5)]' : 'border-slate-600 text-transparent hover:border-pink-500'}">
-                        <i class="fa-solid fa-check text-[12px]"></i>
+
+            <div class="pl-2">
+                <!-- Row 1: category pill · time badge · delete -->
+                <div class="flex items-center gap-1.5 mb-2">
+                    <span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800 shrink-0">
+                        <i class="fa-solid ${_catIconCls} text-[8px]"></i>
+                        <span class="uppercase tracking-wider">${spot.category || 'General'}</span>
+                        ${spot.isAnchored ? '<i class="fa-solid fa-lock text-amber-400 text-[7px] ml-0.5"></i>' : ''}
+                    </span>
+                    <span class="text-[9px] font-mono font-bold text-pink-400 bg-pink-500/10 px-1.5 py-0.5 rounded border border-pink-500/20 shadow-inner shrink-0">
+                        ${formatMinutesToTime(spot.sch_start)} – ${formatMinutesToTime(spot.sch_end)}
+                    </span>
+                    <span id="wba-${itin.id}-${activeItineraryDayTracker}-${spotIndex}"
+                          class="inline-flex items-center justify-center gap-0.5 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-lg min-w-[2.75rem] bg-sky-500/10 text-sky-300 shrink-0">
+                        <i class="fa-solid fa-cloud text-[8px] opacity-25 animate-pulse"></i>
+                    </span>
+                    <button onclick="removeActivityFromTimeline(${activeItineraryDayTracker}, ${spotIndex})"
+                            class="ml-auto w-6 h-6 flex items-center justify-center bg-red-950/20 text-red-500 rounded-lg shrink-0 text-[10px] hover:bg-red-900/60 transition-colors">
+                        <i class="fa-solid fa-trash-can"></i>
                     </button>
                 </div>
-                <div class="flex-1 min-w-0 pl-1">
-                    <div class="flex justify-between items-start gap-2">
-                        <div class="flex flex-col min-w-0">
-                            <span class="text-[9px] font-mono font-bold text-pink-400 bg-pink-500/10 px-1.5 py-0.5 rounded w-fit mb-1 border border-pink-500/20 shadow-inner">${formatMinutesToTime(spot.sch_start)} - ${formatMinutesToTime(spot.sch_end)}</span>
-                            <h3 class="text-[13px] font-black truncate text-slate-200 ${spot.isDone ? 'itin-done-text' : ''}">${spot.spot_name}</h3>
-                            <p class="text-[9px] text-slate-400 font-bold uppercase tracking-wider mt-0.5 flex items-center gap-1">${spot.category} ${spot.isAnchored ? '<span class="text-amber-400 ml-1 flex items-center gap-0.5"><i class="fa-solid fa-lock text-[8px]"></i> Fixed</span>' : ''}</p>
-                        </div>
-                        <button onclick="removeActivityFromTimeline(${activeItineraryDayTracker}, ${spotIndex})" class="w-6 h-6 flex items-center justify-center bg-red-950/20 text-red-500 rounded-full shrink-0 text-xs hover:bg-red-900/60 transition-colors"><i class="fa-solid fa-xmark"></i></button>
-                    </div>
-                    ${spot.notes ? `<div class="mt-2.5 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60"><p class="text-[10px] leading-relaxed font-medium text-slate-400 line-clamp-2 ${spot.isDone ? 'itin-done-text' : ''}">${spot.notes}</p></div>` : ''}
-                    <div class="flex gap-2 mt-3 justify-end items-center">
-                        <button onclick="swapActivityInTimeline(${activeItineraryDayTracker}, ${spotIndex})" class="mr-auto px-3 py-1.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg text-[10px] font-black tracking-wide active:bg-indigo-500/20 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}"><i class="fa-solid fa-arrows-rotate mr-1"></i> Swap</button>
-                        <a href="${spot.instagram_url || spot.reference_link || '#'}" target="_blank" class="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-[10px] font-bold text-slate-300 active:bg-slate-900 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">Reference</a>
-                        <button data-row-id="${spot.rowid}" onclick="handleAdaptiveDirectionClick(this, event)" class="px-3 py-1.5 bg-pink-600/10 border border-pink-500/20 text-pink-400 rounded-lg text-[10px] font-black tracking-wide active:bg-pink-600/20 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}"><i class="fa-solid fa-map mr-1"></i> Directions</button>
-                    </div>
+
+                <!-- Row 2: spot name -->
+                <h3 class="text-[13px] font-black text-slate-200 truncate mb-2 ${spot.isDone ? 'itin-done-text' : ''}">${spot.spot_name}</h3>
+
+                <!-- Notes (optional) -->
+                ${spot.notes ? `<div class="mb-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60"><p class="text-[10px] leading-relaxed font-medium text-slate-400 line-clamp-2 ${spot.isDone ? 'itin-done-text' : ''}">${spot.notes}</p></div>` : ''}
+
+                <!-- Action row: Reference · Directions · Mark Done · Swap -->
+                <div class="flex gap-1.5 items-center">
+                    <a href="${spot.instagram_url || spot.reference_link || '#'}" target="_blank"
+                       class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-[10px] font-bold py-2 rounded-xl text-white flex items-center justify-center gap-1 shadow-md active:opacity-80 transition-opacity ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
+                        <i class="fa-solid fa-link text-[9px]"></i> Ref
+                    </a>
+                    <button data-row-id="${spot.rowid}" onclick="handleAdaptiveDirectionClick(this, event)"
+                            class="flex-1 bg-slate-950 border border-slate-800 text-slate-300 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 active:bg-slate-900 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
+                        <i class="fa-solid fa-map text-[9px]"></i> Dir
+                    </button>
+                    <button onclick="toggleActivityDoneState(${activeItineraryDayTracker}, ${spotIndex})"
+                            class="flex-1 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 border transition-colors
+                                   ${spot.isDone ? 'bg-pink-600/10 border-pink-600/20 text-pink-400 active:bg-pink-600/20' : 'bg-slate-950 border-slate-800 text-slate-400 active:bg-slate-900'}">
+                        ${spot.isDone
+                            ? '<i class="fa-solid fa-arrow-rotate-left text-[9px]"></i> Undo'
+                            : '<i class="fa-solid fa-check text-[9px]"></i> Done'}
+                    </button>
+                    <button onclick="swapActivityInTimeline(${activeItineraryDayTracker}, ${spotIndex})"
+                            class="flex-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 active:bg-indigo-500/20 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
+                        <i class="fa-solid fa-arrows-rotate text-[9px]"></i> Swap
+                    </button>
                 </div>
-            </div>
-        `;
-        container.appendChild(card);
+            </div>`;
+
+        // Tap on the card body (not a button or link) → open full map info tray
+        card.addEventListener('click', function (e) {
+            if (e.target.closest('button, a')) return;
+            openSpotTrayFromItinerary(spot);
+        });
+
+        block.appendChild(card);
+        container.appendChild(block);
     });
 
+    // Postamble ruler: last activity end → midnight
+    _appendRulerSection(lastEnd, 1440);
+
+    // Per-activity weather badges — deferred so the DOM is painted first.
+    // Uses the already-warm forecast cache; no extra network round-trips.
+    const _actWeatherJobs = timeline.map((spot, idx) => ({
+        badgeId:  `wba-${itin.id}-${activeItineraryDayTracker}-${idx}`,
+        date:     activeDay.date,
+        dayIndex: activeItineraryDayTracker,
+        spot,                // passed so coord-based weather can be used for today
+    }));
+    setTimeout(() => {
+        _actWeatherJobs.forEach(job =>
+            _populateItinActivityWeatherBadge(job.badgeId, itin.city, job.date, job.dayIndex, job.spot)
+        );
+    }, 0);
+
+    // Auto-scroll: snap to ~30 min before the first activity
+    if (timeline.length > 0) {
+        const scrollTarget = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
+        requestAnimationFrame(() => { container.scrollTop = scrollTarget; });
+    }
+
+    // ── Footer ────────────────────────────────────────────────────────────────
     const tlFooter = document.createElement('div');
-    tlFooter.className = "text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4";
-    tlFooter.textContent = "End of Selected Day Itinerary List";
+    tlFooter.style.cssText = 'margin:24px 16px 0;padding:20px 0;text-align:center;font-size:9px;font-weight:900;color:rgb(51 65 85);letter-spacing:0.12em;opacity:0.6;border-top:1px solid rgba(30,41,59,0.8);';
+    tlFooter.textContent = 'End of Selected Day Itinerary List';
     container.appendChild(tlFooter);
 }
 

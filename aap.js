@@ -990,13 +990,13 @@ function getWeatherFAIconClass(owmIconCode) {
     const c = (owmIconCode || '').substring(0, 2);
     if (c === '01') return 'fa-sun text-yellow-400';
     if (c === '02') return 'fa-cloud-sun text-yellow-300';
-    if (c === '03') return 'fa-cloud text-slate-400';
-    if (c === '04') return 'fa-cloud text-slate-500';
+    if (c === '03') return 'fa-cloud text-slate-300';
+    if (c === '04') return 'fa-cloud text-slate-400';
     if (c === '09') return 'fa-cloud-showers-heavy text-blue-400';
-    if (c === '10') return 'fa-cloud-rain text-blue-400';
+    if (c === '10') return 'fa-cloud-rain text-blue-300';
     if (c === '11') return 'fa-cloud-bolt text-amber-400';
     if (c === '13') return 'fa-snowflake text-sky-300';
-    if (c === '50') return 'fa-smog text-slate-400';
+    if (c === '50') return 'fa-smog text-slate-300';
     return 'fa-cloud text-slate-400';
 }
 
