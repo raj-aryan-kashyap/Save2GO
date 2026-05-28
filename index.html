@@ -257,6 +257,9 @@
                     <span class="animate-pulse">Refresh...</span>
                 </div>
             </div>
+            <!-- Bottom fade — cards dissolve smoothly as they scroll toward the nav bar -->
+            <div class="absolute bottom-0 left-0 right-0 h-20 pointer-events-none z-30"
+                 style="background:linear-gradient(to top,#020617 0%,transparent 100%)"></div>
         </div>
 
         <div id="view-itinerary" class="view-panel bg-slate-950 overflow-hidden">
@@ -269,8 +272,12 @@
                         <i class="fa-solid fa-plus"></i> New Itinerary
                     </button>
                 </div>
-                <!-- Scroll area: pre-populated with landing page so it shows before JS runs -->
-                <div id="itineraryMasterListScroll" class="flex-1 overflow-y-auto subtle-scrollbar px-4 pt-4 pb-24 space-y-3">
+                <!-- Scroll area wrapper — relative so the fade overlays can sit above it -->
+                <div class="flex-1 relative min-h-0">
+                <!-- Top fade — cards dissolve cleanly as they scroll under the header -->
+                <div class="absolute top-0 left-0 right-0 h-8 pointer-events-none z-10"
+                     style="background:linear-gradient(to bottom,#020617 0%,transparent 100%)"></div>
+                <div id="itineraryMasterListScroll" class="h-full overflow-y-auto subtle-scrollbar px-4 pt-4 pb-24 space-y-3">
                     <div id="itineraryEmptyStateLanding" class="flex flex-col items-center justify-center min-h-full py-16 text-center px-6">
                         <div class="space-y-6 max-w-xs w-full">
                             <!-- Illustration cluster -->
@@ -309,6 +316,10 @@
                         </div>
                     </div>
                 </div>
+                <!-- Bottom fade — cards dissolve smoothly as they scroll toward the nav bar -->
+                <div class="absolute bottom-0 left-0 right-0 h-20 pointer-events-none z-10"
+                     style="background:linear-gradient(to top,#020617 0%,transparent 100%)"></div>
+                </div><!-- /scroll wrapper -->
             </div>
 
             <div id="itineraryDetailView" class="flex flex-col h-full w-full absolute inset-0 z-20 hidden bg-slate-950">
@@ -350,8 +361,17 @@
                     </div>
                 </div>
                 
-                <div id="itineraryTimelineScrollContainer" class="flex-1 overflow-y-auto subtle-scrollbar pt-2 pb-32 relative bg-slate-950">
+                <!-- Wrapper provides the stacking context for the non-scrolling fade overlay -->
+                <div class="flex-1 relative min-h-0">
+                    <div id="itineraryTimelineScrollContainer" class="h-full overflow-y-auto subtle-scrollbar pt-2 pb-32 bg-slate-950">
                     </div>
+                    <!-- Soft top fade — masks the hard cut between the header and scrolling content -->
+                    <div class="absolute top-0 left-0 right-0 h-8 pointer-events-none z-10"
+                         style="background:linear-gradient(to bottom,#020617 0%,transparent 100%)"></div>
+                    <!-- Bottom fade — timeline cards dissolve as they scroll toward the nav bar -->
+                    <div class="absolute bottom-0 left-0 right-0 h-20 pointer-events-none z-10"
+                         style="background:linear-gradient(to top,#020617 0%,transparent 100%)"></div>
+                </div>
             </div>
             
         </div>

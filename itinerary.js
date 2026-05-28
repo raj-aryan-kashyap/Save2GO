@@ -15,6 +15,7 @@ let finalGeneratedSequenceRowIds = [null, null, null, null];
 let isEditingMode            = false;
 let editingItinId            = null;
 let pendingConfirmCallback   = null;
+let itinShowStarredOnly      = JSON.parse(localStorage.getItem('compass_itin_starred_only')) || false;
 
 // Duration (minutes) and operating hours per category keyword.
 // Used by getCategoryLogic() when scheduling time slots.
@@ -856,6 +857,16 @@ function _syncDetailViewStarBtn(itin) {
     }
 }
 
+// ── Itinerary master list filter ─────────────────────────────────────────────
+// Sets the itinerary-specific star filter and re-renders the master list.
+// UI toggle sync (the top HUD "All / Starred" pill) is handled by
+// syncPriorityFilterViewModeUI() in aap.js, which is tab-aware.
+function setItinFilterState(starredOnly) {
+    itinShowStarredOnly = !!starredOnly;
+    localStorage.setItem('compass_itin_starred_only', JSON.stringify(itinShowStarredOnly));
+    renderItineraryMasterDashboardWorkspace();
+}
+
 function renderItineraryMasterDashboardWorkspace() {
     const masterList  = document.getElementById('itineraryMasterListScroll');
     const container   = document.getElementById('itineraryMasterListView');
@@ -883,15 +894,22 @@ function renderItineraryMasterDashboardWorkspace() {
     if (headerBar)  headerBar.classList.remove('hidden');
     if (emptyState) emptyState.classList.add('hidden');
 
-    // Clear previous cards (keep the emptyState node in DOM so toggle is cheap)
+    // Keep the top HUD toggle in sync regardless of how render was triggered
+    if (typeof syncPriorityFilterViewModeUI === 'function') syncPriorityFilterViewModeUI();
+
+    // Clear previous cards (keep only the static landing page node)
     Array.from(masterList.children).forEach(el => {
         if (el.id !== 'itineraryEmptyStateLanding') el.remove();
     });
 
+    let visibleCount = 0;
     savedItineraries.forEach(itin => {
+        // ── Master list filters ───────────────────────────────────────────────
+        if (itinShowStarredOnly && !itin.starred) return;
         if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(itin.city)) {
-            return; 
+            return;
         }
+        visibleCount++;
 
         let doneCount  = 0;
         let totalCount = 0;
@@ -938,13 +956,33 @@ function renderItineraryMasterDashboardWorkspace() {
         masterList.appendChild(card);
     });
 
+    // If the active filter hides everything, show a contextual nudge
+    if (visibleCount === 0) {
+        let msg = document.getElementById('itinFilteredEmptyMsg');
+        if (!msg) {
+            msg = document.createElement('div');
+            msg.id = 'itinFilteredEmptyMsg';
+        }
+        msg.className = "flex flex-col items-center justify-center py-16 text-center px-6";
+        msg.innerHTML = `
+            <i class="fa-regular fa-star text-3xl text-slate-700 mb-4"></i>
+            <p class="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">No starred itineraries</p>
+            <p class="text-[11px] text-slate-600 font-medium">Star an itinerary to save it here.</p>
+            <button onclick="setItinFilterState(false)" class="mt-5 px-5 py-2 bg-slate-900 border border-slate-800 rounded-xl text-[10px] font-black text-slate-400 active:bg-slate-800 transition-colors">
+                Show All
+            </button>`;
+        masterList.appendChild(msg);
+        return;
+    }
+
     const footer = document.createElement('div');
     footer.className = "text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4";
     footer.textContent = "End of Filtered Itinerary List";
     masterList.appendChild(footer);
 
-    // Populate weather strips async — runs after the DOM is painted
+    // Populate weather strips async — respect same filters as the card loop
     savedItineraries.forEach(itin => {
+        if (itinShowStarredOnly && !itin.starred) return;
         if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(itin.city)) return;
         if (itin.city) _populateItineraryWeatherStrip(itin.id, itin.city, itin.days);
     });
@@ -1450,11 +1488,11 @@ function renderDetailViewTimeline() {
         // padding-left pushes the card into the right column.
         // min-height keeps proportional time-mark spacing even on short activities.
         const block = document.createElement('div');
+        block.dataset.itinBlock = `${activeItineraryDayTracker}-${spotIndex}`;
         block.style.cssText = `
             position:relative;
             padding:${CARD_TOP}px 16px ${CARD_TOP}px ${RULER_W + 6}px;
             min-height:${Math.max(propH, MIN_BLOCK_H)}px;`;
-
         // 1px right-border of the ruler column — visual vertical spine
         const spine = document.createElement('div');
         spine.style.cssText = `
@@ -1471,55 +1509,87 @@ function renderDetailViewTimeline() {
             _addMark(block, m, Math.round((m - startMins) * PX_PER_MIN), false);
         }
 
-        // ── Card — normal-flow child; grows to fit its own content ────────────
-        const card = document.createElement('div');
-        card.className = `bg-slate-900 border border-slate-800 rounded-2xl p-4 relative transition-all cursor-pointer ${spot.isDone ? 'itin-done-card border-slate-900' : ''}`;
+        // Done state: dim only the timeline chrome (spine + ruler marks) so they don't
+        // appear noisy behind the card. We intentionally do NOT apply a block-level
+        // filter/opacity because that would also dim the Undo and Delete buttons —
+        // those should remain fully visible as the card's only active actions.
+        if (spot.isDone) {
+            Array.from(block.children).forEach(el => { el.style.opacity = '0.22'; });
+        }
 
+        // ── Card — normal-flow child; grows to fit its own content ────────────
         // Resolve category icon — same helper used by the Saved Spots list
         const _catIconCls = (typeof getCategoryIconClass === 'function')
             ? getCategoryIconClass(spot.category)
             : 'fa-location-dot text-slate-400';
 
+        // Star state — same check used across the whole app
+        const _isHigh = ['high', '🔥', 'must do', 'starred']
+            .includes((spot.priority || '').toLowerCase());
+
+        const card = document.createElement('div');
+        // Base card — itin-timeline-card drives the border/glow CSS transition.
+        // Done cards: itin-done-card supplies a faint border + semi-transparent bg so the
+        // card reads as greyed-out without a parent filter (which would also dim Undo/Delete).
+        card.className = `itin-timeline-card border rounded-2xl p-4 relative cursor-pointer ${spot.isDone ? 'itin-done-card' : 'bg-slate-900 ' + (_isHigh ? 'starred-gold-glow' : 'border-slate-800')}`;
+
+        // ── Per-element done-state helpers ──────────────────────────────────────
+        // Apply independently to each element so Undo/Delete can carry their own styles.
+        const _catPillCls   = spot.isDone
+            ? 'bg-slate-900/30 text-slate-600 border-slate-700/30 itin-done-text'
+            : 'bg-slate-950 text-slate-400 border-slate-800';
+        const _timeBadgeCls = spot.isDone
+            ? 'text-slate-600 bg-slate-800/20 border-slate-700/30 itin-done-text'
+            : 'text-pink-400 bg-pink-500/10 border-pink-500/20';
+        const _wxBadgeCls   = spot.isDone ? 'opacity-30' : '';
+        const _deleteBtnCls = spot.isDone
+            ? 'bg-red-950/15 text-red-700 active:bg-red-900/25'
+            : 'bg-red-950/20 text-red-500 active:bg-red-900/60';
+        const _nameCls      = spot.isDone ? 'text-slate-500 itin-done-text' : 'text-slate-200';
+
         card.innerHTML = `
-            <div class="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-pink-500 to-purple-600 opacity-80 rounded-l-2xl"></div>
+            <div class="absolute top-0 bottom-0 left-0 w-1 bg-gradient-to-b from-pink-500 to-purple-600 rounded-l-2xl ${spot.isDone ? 'opacity-10' : 'opacity-80'}"></div>
 
             <div class="pl-2">
-                <!-- Row 1: category pill · time badge · delete -->
+                <!-- Row 1: category pill · time badge · weather · delete -->
                 <div class="flex items-center gap-1.5 mb-2">
-                    <span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800 shrink-0">
+                    <span class="inline-flex items-center gap-1 text-[9px] px-2 py-0.5 rounded-lg font-bold border shrink-0 ${_catPillCls}">
                         <i class="fa-solid ${_catIconCls} text-[8px]"></i>
                         <span class="uppercase tracking-wider">${spot.category || 'General'}</span>
                         ${spot.isAnchored ? '<i class="fa-solid fa-lock text-amber-400 text-[7px] ml-0.5"></i>' : ''}
                     </span>
-                    <span class="text-[9px] font-mono font-bold text-pink-400 bg-pink-500/10 px-1.5 py-0.5 rounded border border-pink-500/20 shadow-inner shrink-0">
+                    <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border shadow-inner shrink-0 ${_timeBadgeCls}">
                         ${formatMinutesToTime(spot.sch_start)} – ${formatMinutesToTime(spot.sch_end)}
                     </span>
                     <span id="wba-${itin.id}-${activeItineraryDayTracker}-${spotIndex}"
-                          class="inline-flex items-center justify-center gap-0.5 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-lg min-w-[2.75rem] bg-sky-500/10 text-sky-300 shrink-0">
+                          class="inline-flex items-center justify-center gap-0.5 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-lg min-w-[2.75rem] bg-sky-500/10 text-sky-300 shrink-0 ${_wxBadgeCls}">
                         <i class="fa-solid fa-cloud text-[8px] opacity-25 animate-pulse"></i>
                     </span>
-                    <button onclick="removeActivityFromTimeline(${activeItineraryDayTracker}, ${spotIndex})"
-                            class="ml-auto w-6 h-6 flex items-center justify-center bg-red-950/20 text-red-500 rounded-lg shrink-0 text-[10px] hover:bg-red-900/60 transition-colors">
+                    <button onclick="removeActivityWithAnimation(${activeItineraryDayTracker}, ${spotIndex})"
+                            class="ml-auto w-6 h-6 flex items-center justify-center rounded-lg shrink-0 text-[10px] transition-colors ${_deleteBtnCls}">
                         <i class="fa-solid fa-trash-can"></i>
                     </button>
                 </div>
 
                 <!-- Row 2: spot name -->
-                <h3 class="text-[13px] font-black text-slate-200 truncate mb-2 ${spot.isDone ? 'itin-done-text' : ''}">${spot.spot_name}</h3>
+                <h3 class="text-[13px] font-black truncate mb-2 ${_nameCls}">${spot.spot_name}</h3>
 
                 <!-- Notes (optional) -->
                 ${spot.notes ? `<div class="mb-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60"><p class="text-[10px] leading-relaxed font-medium text-slate-400 line-clamp-2 ${spot.isDone ? 'itin-done-text' : ''}">${spot.notes}</p></div>` : ''}
 
-                <!-- Action row: Reference · Directions · Mark Done · Swap -->
+                <!-- Action row: when done → only Undo and Delete (in row 1) are active -->
                 <div class="flex gap-1.5 items-center">
+                    <!-- Ref — always disabled on done -->
                     <a href="${spot.instagram_url || spot.reference_link || '#'}" target="_blank"
-                       class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-[10px] font-bold py-2 rounded-xl text-white flex items-center justify-center gap-1 shadow-md active:opacity-80 transition-opacity ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
+                       class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-[10px] font-bold py-2 rounded-xl text-white flex items-center justify-center gap-1 shadow-md active:opacity-80 transition-opacity ${spot.isDone ? 'opacity-40 pointer-events-none' : ''}">
                         <i class="fa-solid fa-link text-[9px]"></i> Ref
                     </a>
+                    <!-- Dir — always disabled on done -->
                     <button data-row-id="${spot.rowid}" onclick="handleAdaptiveDirectionClick(this, event)"
-                            class="flex-1 bg-slate-950 border border-slate-800 text-slate-300 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 active:bg-slate-900 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
+                            class="flex-1 bg-slate-950 border border-slate-800 text-slate-300 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 active:bg-slate-900 transition-colors ${spot.isDone ? 'opacity-40 pointer-events-none' : ''}">
                         <i class="fa-solid fa-map text-[9px]"></i> Dir
                     </button>
+                    <!-- Done / Undo — always active -->
                     <button onclick="toggleActivityDoneState(${activeItineraryDayTracker}, ${spotIndex})"
                             class="flex-1 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 border transition-colors
                                    ${spot.isDone ? 'bg-pink-600/10 border-pink-600/20 text-pink-400 active:bg-pink-600/20' : 'bg-slate-950 border-slate-800 text-slate-400 active:bg-slate-900'}">
@@ -1527,15 +1597,29 @@ function renderDetailViewTimeline() {
                             ? '<i class="fa-solid fa-arrow-rotate-left text-[9px]"></i> Undo'
                             : '<i class="fa-solid fa-check text-[9px]"></i> Done'}
                     </button>
+                    <!-- Star: matches Saved Spots tray convention exactly —
+                         fa-star (full)        amber = not yet starred → tap to star
+                         fa-star-half-stroke   amber = currently starred → tap to unstar
+                         Disabled on done — only Undo and Delete are active on a done card. -->
+                    <button onclick="toggleItinerarySpotStar(${activeItineraryDayTracker}, ${spotIndex})"
+                            class="w-9 h-9 flex items-center justify-center rounded-xl border transition-colors active:scale-90
+                                   ${spot.isDone
+                                     ? 'opacity-40 pointer-events-none bg-slate-950 border-slate-800 text-slate-700'
+                                     : 'bg-amber-500/10 border-amber-500/20 text-amber-400 active:bg-amber-500/20'}">
+                        <i class="fa-solid fa-${_isHigh ? 'star-half-stroke' : 'star'} text-[11px]"></i>
+                    </button>
+                    <!-- Swap — disabled on done -->
                     <button onclick="swapActivityInTimeline(${activeItineraryDayTracker}, ${spotIndex})"
-                            class="flex-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] font-bold py-2 rounded-xl flex items-center justify-center gap-1 active:bg-indigo-500/20 transition-colors ${spot.isDone ? 'opacity-50 pointer-events-none' : ''}">
-                        <i class="fa-solid fa-arrows-rotate text-[9px]"></i> Swap
+                            class="w-9 h-9 flex items-center justify-center bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-xl active:bg-indigo-500/20 transition-colors ${spot.isDone ? 'opacity-40 pointer-events-none' : ''}">
+                        <i class="fa-solid fa-arrows-rotate text-[11px]"></i>
                     </button>
                 </div>
             </div>`;
 
-        // Tap on the card body (not a button or link) → open full map info tray
+        // Tap on the card body (not a button or link) → open full map info tray.
+        // Done cards are not tappable — only their Undo and Delete buttons work.
         card.addEventListener('click', function (e) {
+            if (spot.isDone) return;
             if (e.target.closest('button, a')) return;
             openSpotTrayFromItinerary(spot);
         });
@@ -1574,6 +1658,54 @@ function renderDetailViewTimeline() {
     container.appendChild(tlFooter);
 }
 
+/**
+ * Toggles the star (priority) state of a saved spot within the itinerary timeline.
+ * Mirrors the exact same star/unstar logic used in the Saved Spots list:
+ *   - Updates the itinerary's in-memory copy (so re-render reflects the change)
+ *   - Calls updateCloudAction to sync travelSpots in memory + write to the cloud sheet
+ *   - Saves the updated itinerary to localStorage
+ */
+function toggleItinerarySpotStar(dayIndex, spotIndex) {
+    const itin = getActiveItinerary();
+    if (!itin || !itin.days[dayIndex] || !itin.days[dayIndex].timeline[spotIndex]) return;
+    const spot = itin.days[dayIndex].timeline[spotIndex];
+    const isCurrentlyStarred = ['high', '🔥', 'must do', 'starred']
+        .includes((spot.priority || '').toLowerCase());
+    const newPriority = isCurrentlyStarred ? 'Normal' : 'Starred';
+
+    // ── 1. Update the itinerary copy ─────────────────────────────────────────
+    spot.priority = newPriority;
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+
+    // ── 2. Mirror priority into travelSpots in-memory ────────────────────────
+    // IMPORTANT: we intentionally do NOT call updateCloudAction() here because
+    // that helper calls renderItineraryMasterDashboardWorkspace(), which
+    // unconditionally hides itineraryDetailView — collapsing the expanded tray.
+    // Instead we patch travelSpots directly and fire the POST ourselves.
+    if (typeof travelSpots !== 'undefined') {
+        const masterSpot = travelSpots.find(s => s.rowid === spot.rowid);
+        if (masterSpot) masterSpot.priority = newPriority;
+    }
+
+    // ── 3. Fire cloud POST without touching any view state ───────────────────
+    (function () {
+        const api = (typeof API_URL !== 'undefined') ? API_URL : null;
+        if (!api) return;
+        const meta = (typeof cachedHardwareString !== 'undefined') ? cachedHardwareString : '';
+        fetch(api, {
+            method: 'POST', mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                rowId: spot.rowid, action: 'toggle_priority', value: newPriority,
+                spot: spot.spot_name || '', deviceMeta: meta
+            })
+        }).catch(() => {});
+    })();
+
+    // ── 4. Re-render only the timeline — detail view stays open ──────────────
+    renderDetailViewTimeline();
+}
+
 function toggleActivityDoneState(dayIndex, spotIndex) {
     const itin = getActiveItinerary();
     if(!itin) return;
@@ -1581,6 +1713,42 @@ function toggleActivityDoneState(dayIndex, spotIndex) {
     localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
     syncItineraryToCloud(itin, 'save');
     renderDetailViewTimeline();
+}
+
+/**
+ * Animated delete: slingshot right → slide left → block collapses → data mutation.
+ * Falls back to instant removal if the block element can't be found.
+ */
+function removeActivityWithAnimation(dayIndex, spotIndex) {
+    const block = document.querySelector(`[data-itin-block="${dayIndex}-${spotIndex}"]`);
+    if (!block) {
+        removeActivityFromTimeline(dayIndex, spotIndex);
+        return;
+    }
+    const card = block.querySelector('.itin-timeline-card');
+    if (!card) {
+        removeActivityFromTimeline(dayIndex, spotIndex);
+        return;
+    }
+
+    // Phase 1: slingshot right (130ms)
+    card.classList.add('itin-deleting-slingshot');
+
+    setTimeout(() => {
+        // Phase 2: slide left off-screen (270ms)
+        card.classList.remove('itin-deleting-slingshot');
+        card.classList.add('itin-deleting-exit');
+
+        setTimeout(() => {
+            // Phase 3: collapse the block so the rest of the timeline reflows (290ms)
+            block.classList.add('itin-block-collapsing');
+
+            setTimeout(() => {
+                // Data mutation fires after all animation frames are done
+                removeActivityFromTimeline(dayIndex, spotIndex);
+            }, 300);
+        }, 280);
+    }, 140);
 }
 
 function removeActivityFromTimeline(dayIndex, spotIndex) {

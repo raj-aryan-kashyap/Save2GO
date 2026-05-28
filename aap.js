@@ -512,9 +512,14 @@ function switchMasterMenuDashboardTab(targetTabID) {
     const priorityEl = document.getElementById('priorityFilterContainer');
     const typeEl = document.getElementById('filterMenuTriggerBtn');
     if (targetTabID === 'itinerary') {
-        if (priorityEl) priorityEl.classList.add('opacity-35', 'pointer-events-none');
+        // The HUD "All / Starred" toggle is active on the itinerary tab too —
+        // it filters itinerary master cards instead of saved spots.
+        if (priorityEl) priorityEl.classList.remove('opacity-35', 'pointer-events-none');
+        // Type/category filter is still saved-spots–only; keep it dimmed.
         if (typeEl) typeEl.classList.add('opacity-35', 'pointer-events-none');
         closeAllActiveHUDDropdownOverlays();
+        // Reflect the remembered itinerary filter state in the shared toggle UI.
+        syncPriorityFilterViewModeUI();
 
         const masterListView = document.getElementById('itineraryMasterListView');
         if (masterListView) masterListView.classList.remove('hidden');
@@ -665,19 +670,31 @@ function toggleFormPriorityState() {
 
 // ----------------- FILTERS & LIST VIEW -----------------
 function setPriorityFilterState(shouldShowStarredOnly) {
-    if (activeTabID === 'itinerary') return;
     killLiveSpeechBubbleHUDState();
+    if (activeTabID === 'itinerary') {
+        // On the itinerary tab the toggle filters itinerary master cards,
+        // not saved spots — delegate to the itinerary-specific setter.
+        if (typeof setItinFilterState === 'function') setItinFilterState(shouldShowStarredOnly);
+        syncPriorityFilterViewModeUI();
+        return;
+    }
     showStarredOnly = shouldShowStarredOnly;
     localStorage.setItem('compass_starred_only', JSON.stringify(showStarredOnly));
-    syncPriorityFilterViewModeUI(); 
-    renderList(); 
+    syncPriorityFilterViewModeUI();
+    renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
 }
 
 function syncPriorityFilterViewModeUI() {
     const showAllBtn = document.getElementById('toggleOptionShowAll');
     const starredBtn = document.getElementById('toggleOptionStarred');
-    if (showStarredOnly) {
+    if (!showAllBtn || !starredBtn) return;
+    // On the itinerary tab, reflect the itinerary-specific star filter;
+    // on all other tabs, reflect the saved-spots star filter.
+    const isStarred = (activeTabID === 'itinerary')
+        ? (typeof itinShowStarredOnly !== 'undefined' ? itinShowStarredOnly : false)
+        : showStarredOnly;
+    if (isStarred) {
         showAllBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500 bg-transparent";
         starredBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10";
     } else {
