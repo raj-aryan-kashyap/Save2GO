@@ -24,7 +24,12 @@ if (currentMapStyleKey === 'street') {
     localStorage.setItem('compass_map_style', 'terrain');
 }
 
-let userLat = 38.7223; let userLon = -9.1393; // Lisbon city-centre — global cold-boot fallback
+// Seed from last session if available; overwritten by live GPS on first fix.
+// Falls back to Lisbon city-centre so distance math never operates on undefined.
+const _storedLat = parseFloat(localStorage.getItem('compass_user_live_lat'));
+const _storedLon = parseFloat(localStorage.getItem('compass_user_live_lng'));
+let userLat = (!isNaN(_storedLat) && _storedLat !== 0) ? _storedLat : 38.7223;
+let userLon = (!isNaN(_storedLon) && _storedLon !== 0) ? _storedLon : -9.1393;
 let cachedHardwareString = "Unknown Device Model";
 let gpsStatusCachedBool = false; 
 let activeTabID = 'map';
@@ -33,7 +38,16 @@ let liveGpsWatchId = null;
 let speechBubbleHideTimer = null;
 let continuousGpsFailsafeIntervalId = null; 
 let lastGpsSuccessTime = 0; 
-let cachedUserCoords = null; 
+// Pre-populate from the last session so recenter is instant on first load,
+// even before the GPS stream delivers its first fix this session.
+// GPS success callbacks overwrite these values with live coordinates.
+let cachedUserCoords = (() => {
+    const lat = parseFloat(localStorage.getItem('compass_user_live_lat'));
+    const lng = parseFloat(localStorage.getItem('compass_user_live_lng'));
+    return (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0)
+        ? { lat, lon: lng }
+        : null;
+})();
 let isCameraLocked = false;
 let gpsLastKnownDenied = false; // true only after a PERMISSION_DENIED error — enables instant modal-show
 let _gpsSyncingInProgress = false; // true while a GPS request is in-flight — prevents duplicate pings

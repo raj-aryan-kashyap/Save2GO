@@ -650,7 +650,15 @@ function _pollGpsForModalRecovery() {
     );
 }
 
-// ── Main recenter entry-point — routes to the correct state handler ───────────
+// ── Main recenter entry-point ─────────────────────────────────────────────────
+// Design contract:
+//   1. Button animation   — always fires, zero delay, every tap.
+//   2. Instant map snap   — always fires when cached coords exist, NO debounce.
+//      cachedUserCoords is seeded from localStorage on startup so this works
+//      even before the GPS stream delivers its first fix this session.
+//   3. Background refresh — micro-adjust if stream is running; start stream only
+//      if it is stopped AND not already syncing (_gpsSyncingInProgress).
+// The debounce only gates the stream-start call — never the snap.
 function triggerRecenterToGpsHardwareAction(event) {
     if (event) event.stopPropagation();
 
@@ -659,7 +667,7 @@ function triggerRecenterToGpsHardwareAction(event) {
     const modal       = document.getElementById('gpsInstructionsOverlayModal');
     const isModalOpen = modal && !modal.classList.contains('hidden');
 
-    // ── Button press animation (always, every tap) ────────────────────────────
+    // ── 1. Button press animation (always, every tap) ─────────────────────────
     if (compassBtn) {
         compassBtn.classList.remove('recenter-button-press');
         void compassBtn.offsetWidth;
@@ -667,7 +675,7 @@ function triggerRecenterToGpsHardwareAction(event) {
         setTimeout(() => compassBtn.classList.remove('recenter-button-press'), 420);
     }
 
-    // ── State D: Error modal is open — verify hardware and attempt recovery ───
+    // ── State D: Error modal is open — attempt recovery poll ─────────────────
     if (isModalOpen) {
         _pollGpsForModalRecovery();
         return;
@@ -680,11 +688,26 @@ function triggerRecenterToGpsHardwareAction(event) {
         return;
     }
 
-    // ── Debounce: ignore taps while a GPS sync is already in-flight ───────────
-    if (_gpsSyncingInProgress) return;
-
-    // ── Visual feedback: compass spin or pink glow ────────────────────────────
+    // Snapshot lock state BEFORE the snap mutates isCameraLocked below
     const wasAlreadyCentered = isCameraLocked;
+
+    // ── 2. Instant snap to cached coords (synchronous, zero hardware latency) ──
+    // No GPS wait, no debounce — this block always runs when coords are available.
+    if (cachedUserCoords && leafletMapInstance) {
+        leafletMapInstance.setView([cachedUserCoords.lat, cachedUserCoords.lon], 18);
+        isCameraLocked = true;
+        syncCameraLockVisualUIState();
+
+        if (userPositionPulseCircle) {
+            userPositionPulseCircle.setLatLng([cachedUserCoords.lat, cachedUserCoords.lon]);
+        } else {
+            userPositionPulseCircle = L.circleMarker([cachedUserCoords.lat, cachedUserCoords.lon], {
+                radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2
+            }).addTo(leafletMapInstance);
+        }
+    }
+
+    // ── Compass animation: spin (repositioning) or pink glow (re-locking) ─────
     if (wasAlreadyCentered) {
         if (compassBtn) {
             compassBtn.classList.remove('thematic-pink-glow');
@@ -705,25 +728,53 @@ function triggerRecenterToGpsHardwareAction(event) {
         }
     }
 
-    // ── Instant map snap to cached coords (zero-latency visual feedback) ──────
-    // The user sees their position on the map immediately while the fresh GPS
-    // ping resolves in the background.
-    if (cachedUserCoords && leafletMapInstance) {
-        leafletMapInstance.setView([cachedUserCoords.lat, cachedUserCoords.lon], 18);
-        isCameraLocked = true;
-        syncCameraLockVisualUIState();
+    // ── 3. Background GPS refresh ─────────────────────────────────────────────
+    if (liveGpsWatchId !== null && navigator.geolocation) {
+        // Stream is running — fire a silent getCurrentPosition to fine-tune.
+        // Only pans the map if the user has physically moved more than ~5 m
+        // (0.00005° ≈ 5.5 m) to filter GPS noise and prevent jarring micro-snaps.
+        const snapLat = cachedUserCoords ? cachedUserCoords.lat : null;
+        const snapLon = cachedUserCoords ? cachedUserCoords.lon : null;
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                const freshLat = pos.coords.latitude;
+                const freshLon = pos.coords.longitude;
 
-        if (userPositionPulseCircle) {
-            userPositionPulseCircle.setLatLng([cachedUserCoords.lat, cachedUserCoords.lon]);
-        } else {
-            userPositionPulseCircle = L.circleMarker([cachedUserCoords.lat, cachedUserCoords.lon], {
-                radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2
-            }).addTo(leafletMapInstance);
-        }
+                userLat             = freshLat;
+                userLon             = freshLon;
+                cachedUserCoords    = { lat: freshLat, lon: freshLon };
+                gpsStatusCachedBool = true;
+                lastGpsSuccessTime  = Date.now();
+                localStorage.setItem('compass_user_live_lat', freshLat);
+                localStorage.setItem('compass_user_live_lng', freshLon);
+                localStorage.setItem('compass_user_live_ts',  Date.now());
+
+                const moved = snapLat !== null && (
+                    Math.abs(freshLat - snapLat) > 0.00005 ||
+                    Math.abs(freshLon - snapLon) > 0.00005
+                );
+                if (moved) {
+                    if (userPositionPulseCircle) userPositionPulseCircle.setLatLng([freshLat, freshLon]);
+                    if (userAccuracyRadiusCircle) {
+                        userAccuracyRadiusCircle.setLatLng([freshLat, freshLon])
+                                                .setRadius(pos.coords.accuracy || 0);
+                    }
+                    if (leafletMapInstance && isCameraLocked) {
+                        leafletMapInstance.panTo([freshLat, freshLon], { animate: true, duration: 0.5 });
+                    }
+                }
+            },
+            () => { /* silent — cached snap coords are still valid */ },
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+        );
+    } else if (!_gpsSyncingInProgress) {
+        // Stream is not running and nothing is syncing — start it.
+        // Debounce only applies here: the snap above always ran regardless.
+        startLiveHardwareGPSTracking();
     }
-
-    // ── Re-ping GPS — updates HUD to Syncing → Active/Off with full error handling
-    startLiveHardwareGPSTracking();
+    // If _gpsSyncingInProgress: a stream is already starting (e.g. from app load
+    // or GPS badge tap). Its success callback will update the marker shortly.
+    // The cached snap already gave the user zero-latency visual feedback.
 }
 
 function syncCameraLockVisualUIState() {
