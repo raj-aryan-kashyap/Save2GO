@@ -70,12 +70,12 @@
 
     <div id="gpsInstructionsOverlayModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-center justify-center p-6 hidden">
         <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl text-center">
-            <div class="text-3xl text-red-500"><i class="fa-solid fa-location-crosshairs"></i></div>
-            <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider mt-2">Location Error</h3>
-            <p class="text-xs text-slate-400 leading-relaxed font-medium">
+            <div id="gpsModalIcon" class="text-3xl text-red-500"><i class="fa-solid fa-location-crosshairs"></i></div>
+            <h3 id="gpsModalTitle" class="text-sm font-black text-slate-200 uppercase tracking-wider mt-2">Location Error</h3>
+            <p id="gpsModalMessage" class="text-xs text-slate-400 leading-relaxed font-medium">
                 Your device location setting is turned off or blocked. Please enable device location inside your phone settings dashboard and try again.
             </p>
-            <button onclick="document.getElementById('gpsInstructionsOverlayModal').classList.add('hidden')" class="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 font-bold text-xs uppercase tracking-wider rounded-xl text-white">Got It</button>
+            <button id="gpsModalPrimaryBtn" onclick="document.getElementById('gpsInstructionsOverlayModal').classList.add('hidden')" class="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 font-bold text-xs uppercase tracking-wider rounded-xl text-white">Got It</button>
         </div>
     </div>
 

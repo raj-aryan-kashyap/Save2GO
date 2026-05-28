@@ -83,6 +83,59 @@ async function fetchItineraryForecast(city) {
     }
 }
 
+// ── 3-hour interval forecast cache ──────────────────────────────────────────
+// Keyed by lowercase city name. Each entry: { slots: [{dt_txt, date, hour, iconClass, temp}], fetchedAt }
+// OWM's 3-hour forecast updates every 3 h, so we match the TTL.
+const itinForecast3hCache    = new Map();
+const ITIN_FORECAST_3H_CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
+
+/**
+ * Fetches a 5-day / 3-hour interval forecast for a city via the Apps Script proxy.
+ * Returns { slots: [{dt_txt, date, hour, iconClass, temp}] } from cache or network,
+ * or null if the city is invalid / the network request fails.
+ * The backend action is "get_forecast_3h" — see Apps Script for the implementation.
+ */
+async function fetchItineraryForecast3h(city) {
+    if (!city || !city.trim()) return null;
+    const cacheKey = city.trim().toLowerCase();
+    const cached   = itinForecast3hCache.get(cacheKey);
+    if (cached && (Date.now() - cached.fetchedAt) < ITIN_FORECAST_3H_CACHE_TTL) return cached;
+
+    try {
+        const base = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL
+                   : (typeof API_URL    !== 'undefined') ? API_URL : null;
+        if (!base) return null;
+
+        const res  = await fetch(`${base}?action=get_forecast_3h&city=${encodeURIComponent(city.trim())}`);
+        const data = await res.json();
+        if (data.error || !Array.isArray(data.slots) || data.slots.length === 0) return null;
+
+        const result = {
+            slots: data.slots.map(s => {
+                // dt_txt format from OWM: "2025-05-28 15:00:00"
+                const parts    = (s.dt_txt || '').split(' ');
+                const datePart = parts[0] || '';
+                const timePart = parts[1] || '';
+                const hour     = timePart ? parseInt(timePart.split(':')[0], 10) : 0;
+                return {
+                    dt_txt:    s.dt_txt,
+                    date:      datePart,
+                    hour,
+                    iconClass: (typeof getWeatherFAIconClass === 'function')
+                                   ? getWeatherFAIconClass(s.icon)
+                                   : 'fa-cloud text-slate-400',
+                    temp:      s.temp,
+                };
+            }),
+            fetchedAt: Date.now(),
+        };
+        itinForecast3hCache.set(cacheKey, result);
+        return result;
+    } catch (e) {
+        return null;
+    }
+}
+
 // ── Missing utility functions ────────────────────────────────────────────────
 
 /** Returns the currently active itinerary object or null. */
@@ -1102,9 +1155,37 @@ async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayInde
         }
     }
 
-    // ── Path B: future date or no coordinates → city-level daily forecast ─────
-    // All activities on the same future day will share the same daily snapshot;
-    // 3-hour granularity would require a backend change to get_forecast.
+    // ── Path B: 3-hour slot forecast ─────────────────────────────────────────
+    // Calls the get_forecast_3h backend action, which returns up to 40 slots
+    // (5 days × 8 slots/day) at 3-hour intervals.  We pick the slot whose hour
+    // is closest to the activity's scheduled start hour so each spot gets a
+    // genuinely time-matched forecast rather than the day's single average.
+    const forecast3h = await fetchItineraryForecast3h(city);
+    if (forecast3h && Array.isArray(forecast3h.slots) && forecast3h.slots.length > 0) {
+        const daySlots = forecast3h.slots.filter(s => s.date === targetDate);
+        if (daySlots.length > 0) {
+            // Convert sch_start (minutes since midnight) → hour of day; noon fallback
+            const actHour = (spotObj && typeof spotObj.sch_start === 'number')
+                ? Math.floor(spotObj.sch_start / 60)
+                : 12;
+            let best     = daySlots[0];
+            let bestDiff = Math.abs(best.hour - actHour);
+            for (let i = 1; i < daySlots.length; i++) {
+                const diff = Math.abs(daySlots[i].hour - actHour);
+                if (diff < bestDiff) { best = daySlots[i]; bestDiff = diff; }
+            }
+            const temp3h = best.temp !== undefined ? `${Math.round(best.temp)}°` : '';
+            el.innerHTML = `<i class="fa-solid ${best.iconClass} text-[8px]"></i>${temp3h ? `<span>${temp3h}</span>` : ''}`;
+            return;
+        }
+        // If we have 3h data but no slots for this specific date (beyond the 5-day
+        // window), fall through to the daily-forecast path below.
+    }
+
+    // ── Path C: no 3h data or date out of range → city-level daily forecast ──
+    // All activities on the same day share one daily snapshot.  This path acts
+    // as a reliable fallback when the 3h endpoint is unavailable or the date is
+    // too far out for the 5-day/3h window.
     const forecast = await fetchItineraryForecast(city);
     if (!forecast || !forecast.days || forecast.days.length === 0) {
         el.innerHTML = `<i class="fa-solid fa-cloud text-[8px] opacity-30"></i>`;

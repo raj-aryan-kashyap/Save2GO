@@ -36,6 +36,8 @@ let lastGpsSuccessTime = 0;
 let cachedUserCoords = null; 
 let isCameraLocked = false;
 let gpsLastKnownDenied = false; // true only after a PERMISSION_DENIED error — enables instant modal-show
+let _gpsSyncingInProgress = false; // true while a GPS request is in-flight — prevents duplicate pings
+let _gpsSyncTimeoutId     = null;  // handle for the hard-timeout that auto-resolves a stuck "Syncing…" HUD
 let currentMapBearingAngle = 0;
 let mapTileCleanupTimerId = null;
 let hasInitialGpsLockRendered = false;
@@ -2038,17 +2040,15 @@ window.onload = function() {
     
     if (typeof initLeafletMapEngineCanvas === 'function') initLeafletMapEngineCanvas();
 
-    // Auto-start GPS stream if permission was already granted on a previous visit.
-    // We lock the camera first so the watchPosition callback moves the map to the
-    // user's location on the first fix (the callback won't setView without this).
-    if (navigator.permissions) {
-        navigator.permissions.query({ name: 'geolocation' }).then(result => {
-            if (result.state === 'granted' && typeof startLiveHardwareGPSTracking === 'function') {
-                isCameraLocked = true; // allow first fix to centre the viewport
-                if (typeof syncCameraLockVisualUIState === 'function') syncCameraLockVisualUIState();
-                startLiveHardwareGPSTracking();
-            }
-        }).catch(() => { /* permissions API unsupported — GPS stays opt-in */ });
+    // Always attempt GPS on load — shows "GPS Syncing…" immediately and resolves to
+    // GPS Active or GPS Off once the browser responds. On first visit this triggers
+    // the browser's native location request; on repeat visits (already granted) it
+    // starts silently. monitorNativeGpsPermissions() handles mid-session revocation.
+    // Camera is pre-locked so the first successful fix centres the map viewport.
+    if (typeof startLiveHardwareGPSTracking === 'function') {
+        isCameraLocked = true;
+        if (typeof syncCameraLockVisualUIState === 'function') syncCameraLockVisualUIState();
+        startLiveHardwareGPSTracking();
     }
 
     // Safety net: if the tile-load event never fires (offline / map init error),

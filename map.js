@@ -267,18 +267,16 @@ function setMapBaseLayerProviderSource(styleKey) {
 }
 
 function updateGpsHudStatus(statusKey, labelText) {
-    const btn = document.getElementById('gpsBadgeButton');
+    const btn       = document.getElementById('gpsBadgeButton');
     const iconFrame = document.getElementById('gpsIconFrame');
     const textFrame = document.getElementById('gpsBadgeText');
     if (!btn || !iconFrame || !textFrame) return;
 
-    if (statusKey === 'syncing') {
-        textFrame.innerText = "GPS Syncing...";
-    } else if (statusKey === 'active') {
-        textFrame.innerText = "GPS Active";
-    } else {
-        textFrame.innerText = "GPS Off";
-    }
+    // Use the provided label; fall back to sensible defaults per state
+    textFrame.innerText = labelText
+        || (statusKey === 'active'  ? 'GPS Active'
+          : statusKey === 'syncing' ? 'GPS Syncing...'
+          :                           'GPS Off');
 
     if (statusKey === 'active') {
         btn.className = "h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-emerald-500/10 border-emerald-500/40 text-emerald-400 cursor-pointer relative z-[60] transition-colors";
@@ -292,11 +290,63 @@ function updateGpsHudStatus(statusKey, labelText) {
     }
 }
 
+/**
+ * Populates and opens the GPS error modal with content appropriate for the
+ * given error type:
+ *   'permission_denied' — user blocked location; needs to change OS/browser settings
+ *   'signal_timeout'    — GPS fix timed out; Retry button re-pings
+ *   'unavailable'       — position unavailable (indoor, no satellite); Retry button
+ */
+function _showGpsErrorModal(errorType) {
+    const modal = document.getElementById('gpsInstructionsOverlayModal');
+    if (!modal) return;
+
+    const iconEl  = document.getElementById('gpsModalIcon');
+    const titleEl = document.getElementById('gpsModalTitle');
+    const msgEl   = document.getElementById('gpsModalMessage');
+    const btnEl   = document.getElementById('gpsModalPrimaryBtn');
+
+    // Graceful fallback: if injectable slots are missing just show the modal as-is
+    if (!iconEl || !titleEl || !msgEl || !btnEl) {
+        modal.classList.remove('hidden');
+        return;
+    }
+
+    if (errorType === 'permission_denied') {
+        iconEl.className      = 'text-3xl text-red-500';
+        iconEl.innerHTML      = '<i class="fa-solid fa-ban"></i>';
+        titleEl.textContent   = 'Location Access Blocked';
+        msgEl.textContent     = 'Location permission has been denied. Please enable it in your device or browser Settings, then tap the GPS button to try again.';
+        btnEl.textContent     = 'Got It';
+        btnEl.onclick         = () => modal.classList.add('hidden');
+    } else if (errorType === 'signal_timeout') {
+        iconEl.className      = 'text-3xl text-amber-400';
+        iconEl.innerHTML      = '<i class="fa-solid fa-satellite-dish"></i>';
+        titleEl.textContent   = 'GPS Signal Timeout';
+        msgEl.textContent     = 'Could not get a GPS fix in time. Try moving to an open area with a clear view of the sky, then tap Retry.';
+        btnEl.textContent     = 'Retry';
+        btnEl.onclick         = () => { modal.classList.add('hidden'); startLiveHardwareGPSTracking(); };
+    } else {
+        // 'unavailable' or any unknown type
+        iconEl.className      = 'text-3xl text-red-500';
+        iconEl.innerHTML      = '<i class="fa-solid fa-location-crosshairs"></i>';
+        titleEl.textContent   = 'Location Unavailable';
+        msgEl.textContent     = 'Your device could not determine its location. Check that Location Services are enabled, then tap Retry.';
+        btnEl.textContent     = 'Retry';
+        btnEl.onclick         = () => { modal.classList.add('hidden'); startLiveHardwareGPSTracking(); };
+    }
+
+    modal.classList.remove('hidden');
+}
+
 function handleGpsBadgeClickAction(event) {
     if (event) event.stopPropagation();
-    
+
     const deck = document.getElementById('mapLayerStyleDropdownDeck');
     if (deck) deck.classList.add('hidden');
+
+    // Debounce: ignore taps while a GPS request is already in-flight
+    if (_gpsSyncingInProgress) return;
 
     startLiveHardwareGPSTracking();
 }
@@ -318,20 +368,57 @@ function monitorNativeGpsPermissions() {
 function startLiveHardwareGPSTracking() {
     if (!navigator.geolocation) {
         gpsStatusCachedBool = false;
-        updateGpsHudStatus('off', "Unsupported");
+        updateGpsHudStatus('off', 'Unsupported');
         return;
     }
-    
+
+    // ── Debounce: ignore calls while a GPS request is already in-flight ────────
+    // Prevents duplicate pings from rapid taps on the GPS badge or recenter button.
+    if (_gpsSyncingInProgress) return;
+    _gpsSyncingInProgress = true;
+
+    // Clear any previous watch before starting a fresh one
     if (liveGpsWatchId !== null) {
         navigator.geolocation.clearWatch(liveGpsWatchId);
+        liveGpsWatchId = null;
     }
-    
-    updateGpsHudStatus('syncing', "Syncing...");
+
+    // Clear any previous hard-timeout
+    if (_gpsSyncTimeoutId !== null) {
+        clearTimeout(_gpsSyncTimeoutId);
+        _gpsSyncTimeoutId = null;
+    }
+
+    updateGpsHudStatus('syncing', 'GPS Syncing...');
+
+    // ── Hard timeout: resolve to GPS Off if no callback arrives within 20 s ────
+    // Prevents the HUD from being permanently stuck on "Syncing…" in edge cases
+    // where the Geolocation API hangs without calling success or error.
+    _gpsSyncTimeoutId = setTimeout(() => {
+        _gpsSyncTimeoutId = null;
+        if (!gpsStatusCachedBool) {
+            _gpsSyncingInProgress = false;
+            if (liveGpsWatchId !== null) {
+                navigator.geolocation.clearWatch(liveGpsWatchId);
+                liveGpsWatchId = null;
+            }
+            gpsStatusCachedBool = false;
+            isCameraLocked      = false;
+            syncCameraLockVisualUIState();
+            updateGpsHudStatus('off', 'GPS Off');
+            _showGpsErrorModal('signal_timeout');
+        }
+    }, 20000);
 
     liveGpsWatchId = navigator.geolocation.watchPosition(
+        // ── Success: GPS fix received ─────────────────────────────────────────
         (pos) => {
+            // Clear the hard timeout — a fix arrived, no need to force GPS Off
+            if (_gpsSyncTimeoutId !== null) { clearTimeout(_gpsSyncTimeoutId); _gpsSyncTimeoutId = null; }
+            _gpsSyncingInProgress = false;
+
             gpsStatusCachedBool  = true;
-            gpsLastKnownDenied   = false; // clear any previous denied state on success
+            gpsLastKnownDenied   = false;
             lastGpsSuccessTime   = Date.now();
             userLat              = pos.coords.latitude;
             userLon              = pos.coords.longitude;
@@ -342,25 +429,17 @@ function startLiveHardwareGPSTracking() {
             localStorage.setItem('compass_user_live_lng', userLon);
             localStorage.setItem('compass_user_live_ts',  Date.now());
 
-            // Check whether the user has moved near spots hidden by active filters
             if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
-
-            // Update the proximity ripple on the user dot (100 m threshold)
             updateProximityRippleState();
-
-            // Refresh map weather widget — internally throttled to ≤1 call / 15 min
             refreshMapWeatherWidget();
 
-            updateGpsHudStatus('active', "GPS Active");
+            updateGpsHudStatus('active', 'GPS Active');
             // NOTE: do NOT forcefully set isCameraLocked = true here.
             // Camera lock is an intentional user action (recenter tap / auto-start).
-            // If the user navigated away manually (e.g. magnifying glass city zoom),
-            // isCameraLocked will be false — honour that and update the position
-            // marker silently without hijacking the viewport.
+            // If the user navigated away manually the lock is false — honour that.
             syncCameraLockVisualUIState();
 
             if (leafletMapInstance) {
-                // Always keep the position marker accurate regardless of lock state
                 if (userPositionPulseCircle) {
                     userPositionPulseCircle.setLatLng([userLat, userLon]);
                 } else {
@@ -374,37 +453,56 @@ function startLiveHardwareGPSTracking() {
                     userAccuracyRadiusCircle.setLatLng([userLat, userLon]).setRadius(accuracy);
                 } else {
                     userAccuracyRadiusCircle = L.circle([userLat, userLon], {
-                        radius: accuracy,
-                        fillColor: '#3b82f6',
-                        fillOpacity: 0.12,
-                        stroke: false,
-                        pointerEvents: 'none'
+                        radius: accuracy, fillColor: '#3b82f6', fillOpacity: 0.12,
+                        stroke: false, pointerEvents: 'none'
                     }).addTo(leafletMapInstance);
                 }
 
-                // Only pan the viewport when the user has explicitly locked onto GPS.
-                // This prevents the map snapping back after a magnifying-glass city zoom
-                // or any other intentional manual navigation.
                 if (isCameraLocked) {
                     leafletMapInstance.setView([userLat, userLon], leafletMapInstance.getZoom());
                 }
             }
         },
+        // ── Error: GPS could not get a fix ────────────────────────────────────
         (err) => {
+            // Clear hard timeout — error callback resolves the state definitively
+            if (_gpsSyncTimeoutId !== null) { clearTimeout(_gpsSyncTimeoutId); _gpsSyncTimeoutId = null; }
+            _gpsSyncingInProgress = false;
+
             if (err.code === err.PERMISSION_DENIED) {
+                // User explicitly denied location — cannot recover without OS/browser settings change
                 gpsLastKnownDenied  = true;
                 gpsStatusCachedBool = false;
                 isCameraLocked      = false;
                 syncCameraLockVisualUIState();
-                updateGpsHudStatus('off', "GPS Off");
-                document.getElementById('gpsInstructionsOverlayModal').classList.remove('hidden');
+                updateGpsHudStatus('off', 'GPS Off');
+                _showGpsErrorModal('permission_denied');
                 if (liveGpsWatchId !== null) {
                     navigator.geolocation.clearWatch(liveGpsWatchId);
                     liveGpsWatchId = null;
                 }
+            } else if (err.code === err.TIMEOUT) {
+                // Fix timed out — signal weak or absent; clear stream, show retry popup
+                gpsStatusCachedBool = false;
+                isCameraLocked      = false;
+                syncCameraLockVisualUIState();
+                if (liveGpsWatchId !== null) {
+                    navigator.geolocation.clearWatch(liveGpsWatchId);
+                    liveGpsWatchId = null;
+                }
+                updateGpsHudStatus('off', 'GPS Off');
+                _showGpsErrorModal('signal_timeout');
             } else {
-                // Transient error (timeout / position unavailable) — stay syncing, watchPosition retries
-                updateGpsHudStatus('syncing', "GPS Syncing...");
+                // POSITION_UNAVAILABLE or unknown — device cannot determine position
+                gpsStatusCachedBool = false;
+                isCameraLocked      = false;
+                syncCameraLockVisualUIState();
+                if (liveGpsWatchId !== null) {
+                    navigator.geolocation.clearWatch(liveGpsWatchId);
+                    liveGpsWatchId = null;
+                }
+                updateGpsHudStatus('off', 'GPS Off');
+                _showGpsErrorModal('unavailable');
             }
         },
         { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
@@ -478,18 +576,34 @@ function _executeInstantRecenterSnap() {
     }
 }
 
-// ── Recovery poll: verify hardware state when GPS modal is already open ───────
+// ── Recovery poll: verify hardware state when GPS modal is already open ────────
 // Fires a single getCurrentPosition to check if the user re-enabled GPS in Settings.
-// Success: dismiss modal, lock camera, snap to confirmed position.
+// Success: dismiss modal, lock camera, snap to confirmed position, start stream.
 // Failure: keep modal open, keep HUD red, map stays exactly as-is.
 function _pollGpsForModalRecovery() {
     if (!navigator.geolocation) return;
 
-    updateGpsHudStatus('syncing', "GPS Syncing...");
+    // Debounce: ignore if already polling
+    if (_gpsSyncingInProgress) return;
+    _gpsSyncingInProgress = true;
+
+    updateGpsHudStatus('syncing', 'GPS Syncing...');
+
+    // Hard timeout — if the poll hangs, reset to GPS Off and keep modal visible
+    const recoveryTimeoutId = setTimeout(() => {
+        if (!gpsStatusCachedBool) {
+            _gpsSyncingInProgress = false;
+            gpsStatusCachedBool   = false;
+            updateGpsHudStatus('off', 'GPS Off');
+            // Keep modal open — user still needs to fix their settings
+        }
+    }, 12000);
 
     navigator.geolocation.getCurrentPosition(
         (pos) => {
-            // GPS is now active — reset denied flag and update all state
+            clearTimeout(recoveryTimeoutId);
+            _gpsSyncingInProgress = false;
+
             gpsLastKnownDenied  = false;
             gpsStatusCachedBool = true;
             lastGpsSuccessTime  = Date.now();
@@ -505,11 +619,10 @@ function _pollGpsForModalRecovery() {
             const modal = document.getElementById('gpsInstructionsOverlayModal');
             if (modal) modal.classList.add('hidden');
 
-            updateGpsHudStatus('active', "GPS Active");
+            updateGpsHudStatus('active', 'GPS Active');
             isCameraLocked = true;
             syncCameraLockVisualUIState();
 
-            // Snap map to confirmed hardware position
             if (leafletMapInstance) {
                 leafletMapInstance.setView([userLat, userLon], 18);
                 if (userPositionPulseCircle) {
@@ -521,17 +634,19 @@ function _pollGpsForModalRecovery() {
                 }
             }
 
-            // Start continuous watchPosition stream now that permission is granted
+            // Start continuous stream now that permission is confirmed
             startLiveHardwareGPSTracking();
         },
         (err) => {
-            // GPS still off or denied — keep modal open, no map changes
+            clearTimeout(recoveryTimeoutId);
+            _gpsSyncingInProgress = false;
+
             if (err.code === err.PERMISSION_DENIED) gpsLastKnownDenied = true;
             gpsStatusCachedBool = false;
-            updateGpsHudStatus('off', "GPS Off");
-            // Modal stays visible, camera stays unlocked, map tiles unchanged
+            updateGpsHudStatus('off', 'GPS Off');
+            // Modal stays visible — user still needs to change their settings
         },
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
 }
 
@@ -544,7 +659,7 @@ function triggerRecenterToGpsHardwareAction(event) {
     const modal       = document.getElementById('gpsInstructionsOverlayModal');
     const isModalOpen = modal && !modal.classList.contains('hidden');
 
-    // ── Button press animation (always, every tap) ───────────────────────────
+    // ── Button press animation (always, every tap) ────────────────────────────
     if (compassBtn) {
         compassBtn.classList.remove('recenter-button-press');
         void compassBtn.offsetWidth;
@@ -552,25 +667,24 @@ function triggerRecenterToGpsHardwareAction(event) {
         setTimeout(() => compassBtn.classList.remove('recenter-button-press'), 420);
     }
 
-    // ── State D: Error modal is open — verify hardware and attempt recovery ──
+    // ── State D: Error modal is open — verify hardware and attempt recovery ───
     if (isModalOpen) {
         _pollGpsForModalRecovery();
         return;
     }
 
-    // ── State C: GPS hardware is known denied/off — intercept, preserve map ──
-    // Map viewport is NOT touched — tiles stay on whatever coordinates were
-    // already displaying, preventing any risk of undefined coordinate writes
+    // ── State C: GPS known denied — show correct modal, no map changes ────────
     if (!navigator.geolocation || gpsLastKnownDenied) {
-        if (modal) modal.classList.remove('hidden');
-        updateGpsHudStatus('off', "GPS Off");
+        _showGpsErrorModal('permission_denied');
+        updateGpsHudStatus('off', 'GPS Off');
         return;
     }
 
-    // Snapshot centering state BEFORE any async side-effects can change it
-    const wasAlreadyCentered = isCameraLocked;
+    // ── Debounce: ignore taps while a GPS sync is already in-flight ───────────
+    if (_gpsSyncingInProgress) return;
 
-    // ── Visual feedback: compass spin (new location) or pink glow (already locked)
+    // ── Visual feedback: compass spin or pink glow ────────────────────────────
+    const wasAlreadyCentered = isCameraLocked;
     if (wasAlreadyCentered) {
         if (compassBtn) {
             compassBtn.classList.remove('thematic-pink-glow');
@@ -591,14 +705,24 @@ function triggerRecenterToGpsHardwareAction(event) {
         }
     }
 
-    // ── State A: Cached coords available — instant snap + background refresh ─
-    if (cachedUserCoords) {
-        _executeInstantRecenterSnap();
-        return;
+    // ── Instant map snap to cached coords (zero-latency visual feedback) ──────
+    // The user sees their position on the map immediately while the fresh GPS
+    // ping resolves in the background.
+    if (cachedUserCoords && leafletMapInstance) {
+        leafletMapInstance.setView([cachedUserCoords.lat, cachedUserCoords.lon], 18);
+        isCameraLocked = true;
+        syncCameraLockVisualUIState();
+
+        if (userPositionPulseCircle) {
+            userPositionPulseCircle.setLatLng([cachedUserCoords.lat, cachedUserCoords.lon]);
+        } else {
+            userPositionPulseCircle = L.circleMarker([cachedUserCoords.lat, cachedUserCoords.lon], {
+                radius: 8, fillColor: '#3b82f6', fillOpacity: 0.8, color: '#ffffff', weight: 2
+            }).addTo(leafletMapInstance);
+        }
     }
 
-    // ── State B: No cached coords yet — start live stream normally ───────────
-    // The stream's success callback will fire setView once a position is acquired
+    // ── Re-ping GPS — updates HUD to Syncing → Active/Off with full error handling
     startLiveHardwareGPSTracking();
 }
 
