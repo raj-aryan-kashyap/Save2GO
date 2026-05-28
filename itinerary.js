@@ -1,3 +1,322 @@
+// ── Itinerary state globals ──────────────────────────────────────────────────
+// All itinerary logic shares these; they are intentionally module-level so
+// every function in this file (and callers from aap.js / map.js) can read them.
+
+let savedItineraries         = JSON.parse(localStorage.getItem('compass_saved_itineraries')) || [];
+let itineraryItems           = JSON.parse(localStorage.getItem('compass_itinerary_cache'))    || { '1': [], '2': [], '3': [] };
+let activeItineraryId        = null;
+let activeItineraryDayTracker = 0;
+let itinSelectedCategorySequence = [];
+let itinPacingMode           = 'max';
+let selectedMultiDatesArray  = [];
+let calMonth                 = new Date().getMonth();
+let calYear                  = new Date().getFullYear();
+let finalGeneratedSequenceRowIds = [null, null, null, null];
+let isEditingMode            = false;
+let editingItinId            = null;
+let pendingConfirmCallback   = null;
+
+// Duration (minutes) and operating hours per category keyword.
+// Used by getCategoryLogic() when scheduling time slots.
+const CATEGORY_DEFAULTS = {
+    'food':        { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 22 },
+    'restaurant':  { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 22 },
+    'cafe':        { durationMax: 45,  durationRelaxed: 75,  open:  7, close: 21 },
+    'coffee':      { durationMax: 45,  durationRelaxed: 60,  open:  7, close: 20 },
+    'attraction':  { durationMax: 90,  durationRelaxed: 120, open:  9, close: 18 },
+    'museum':      { durationMax: 90,  durationRelaxed: 120, open:  9, close: 17 },
+    'gallery':     { durationMax: 60,  durationRelaxed: 90,  open: 10, close: 18 },
+    'shopping':    { durationMax: 60,  durationRelaxed: 90,  open: 10, close: 21 },
+    'market':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 20 },
+    'park':        { durationMax: 60,  durationRelaxed: 90,  open:  6, close: 20 },
+    'garden':      { durationMax: 60,  durationRelaxed: 90,  open:  8, close: 18 },
+    'beach':       { durationMax: 120, durationRelaxed: 180, open:  6, close: 20 },
+    'nature':      { durationMax: 90,  durationRelaxed: 120, open:  6, close: 19 },
+    'hotel':       { durationMax: 30,  durationRelaxed: 30,  open:  0, close: 24 },
+    'bar':         { durationMax: 60,  durationRelaxed: 90,  open: 17, close: 24 },
+    'nightlife':   { durationMax: 90,  durationRelaxed: 120, open: 20, close: 24 },
+    'club':        { durationMax: 90,  durationRelaxed: 120, open: 21, close: 24 },
+    'sport':       { durationMax: 90,  durationRelaxed: 120, open:  8, close: 20 },
+    'spa':         { durationMax: 90,  durationRelaxed: 120, open:  9, close: 20 },
+    'default':     { durationMax: 60,  durationRelaxed: 90,  open:  9, close: 18 }
+};
+
+// ── Itinerary weather cache ──────────────────────────────────────────────────
+// Keyed by lowercase city name. Each entry: { days: [{date, iconClass, temp}], fetchedAt }
+const itinWeatherCache    = new Map();
+const ITIN_WEATHER_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Fetches a 5-day weather forecast for a city via the Apps Script proxy.
+ * Returns { days: [{date, iconClass, temp}] } from cache or network,
+ * or null if the city is invalid / the network request fails.
+ */
+async function fetchItineraryForecast(city) {
+    if (!city || !city.trim()) return null;
+    const cacheKey = city.trim().toLowerCase();
+    const cached   = itinWeatherCache.get(cacheKey);
+    if (cached && (Date.now() - cached.fetchedAt) < ITIN_WEATHER_CACHE_TTL) return cached;
+
+    try {
+        const base = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL
+                   : (typeof API_URL    !== 'undefined') ? API_URL : null;
+        if (!base) return null;
+
+        const res  = await fetch(`${base}?action=get_forecast&city=${encodeURIComponent(city.trim())}`);
+        const data = await res.json();
+        if (data.error || !Array.isArray(data.days) || data.days.length === 0) return null;
+
+        const result = {
+            days:      data.days.map(d => ({
+                date:      d.date,
+                iconClass: (typeof getWeatherFAIconClass === 'function')
+                               ? getWeatherFAIconClass(d.icon)
+                               : 'fa-cloud text-slate-400',
+                temp:      d.temp,
+            })),
+            fetchedAt: Date.now(),
+        };
+        itinWeatherCache.set(cacheKey, result);
+        return result;
+    } catch (e) {
+        return null;
+    }
+}
+
+// ── Missing utility functions ────────────────────────────────────────────────
+
+/** Returns the currently active itinerary object or null. */
+function getActiveItinerary() {
+    if (!activeItineraryId) return null;
+    return savedItineraries.find(i => i.id === activeItineraryId) || null;
+}
+
+/**
+ * Validates the itinerary creation form on every keystroke in the title field
+ * or change to any other required field.
+ *
+ * Rules for the title:
+ *   • Empty      → hide both warnings, button disabled
+ *   • < 3 chars  → yellow "Minimum 3 characters" warning, button disabled
+ *   • ≥ 3 chars  → check for case-insensitive duplicate among savedItineraries
+ *                  for the current user (scoped by itin.user === currentUser):
+ *                  - duplicate found → red "already exists" warning, button disabled
+ *                  - no duplicate    → clear both warnings, enable if all other
+ *                                      fields are also complete
+ */
+function validateItineraryForm() {
+    const btn           = document.getElementById('buildItinerarySubmitBtn');
+    const minCharWarn   = document.getElementById('itinTitleMinCharWarning');
+    const dupWarn       = document.getElementById('itinTitleDuplicateWarning');
+    if (!btn || !minCharWarn || !dupWarn) return;
+
+    const title = (document.getElementById('itin-new-name')?.value || '').trim();
+    const city  = document.getElementById('itin-new-city')?.value  || '';
+    const otherFieldsReady = city && selectedMultiDatesArray.length > 0 && itinSelectedCategorySequence.length > 0;
+
+    // Helper: put the button into disabled state
+    function _disable() {
+        btn.disabled = true;
+        btn.classList.add('opacity-50', 'grayscale', 'cursor-not-allowed');
+        btn.classList.remove('active:scale-95');
+    }
+    // Helper: put the button into enabled state
+    function _enable() {
+        btn.disabled = false;
+        btn.classList.remove('opacity-50', 'grayscale', 'cursor-not-allowed');
+        btn.classList.add('active:scale-95');
+    }
+
+    // ── Empty ────────────────────────────────────────────────────────────────
+    if (title.length === 0) {
+        minCharWarn.classList.add('hidden');
+        dupWarn.classList.add('hidden');
+        _disable();
+        return;
+    }
+
+    // ── Under 3 chars ────────────────────────────────────────────────────────
+    if (title.length < 3) {
+        minCharWarn.classList.remove('hidden');
+        dupWarn.classList.add('hidden');
+        _disable();
+        return;
+    }
+
+    // ── 3+ chars — check for duplicate ──────────────────────────────────────
+    minCharWarn.classList.add('hidden');
+
+    const lowerTitle  = title.toLowerCase();
+    const user        = typeof currentUser !== 'undefined' ? currentUser : null;
+    const isDuplicate = (savedItineraries || []).some(itin => {
+        const sameUser  = !user || !itin.user || itin.user === user;
+        const sameTitle = (itin.title || '').trim().toLowerCase() === lowerTitle;
+        // When editing, exclude the itinerary currently being edited
+        const notSelf   = !isEditingMode || itin.id !== editingItinId;
+        return sameUser && sameTitle && notSelf;
+    });
+
+    if (isDuplicate) {
+        dupWarn.classList.remove('hidden');
+        _disable();
+        return;
+    }
+
+    // ── All title rules pass — gate on remaining fields ───────────────────
+    dupWarn.classList.add('hidden');
+    if (otherFieldsReady) {
+        _enable();
+    } else {
+        _disable();
+    }
+}
+
+/**
+ * Resets the title validation UI to its initial (empty / disabled) state.
+ * Call this every time the creation drawer is opened or closed.
+ */
+function resetItineraryTitleValidationUI() {
+    const nameInput   = document.getElementById('itin-new-name');
+    const minCharWarn = document.getElementById('itinTitleMinCharWarning');
+    const dupWarn     = document.getElementById('itinTitleDuplicateWarning');
+    const btn         = document.getElementById('buildItinerarySubmitBtn');
+    if (nameInput)   nameInput.value = '';
+    if (minCharWarn) minCharWarn.classList.add('hidden');
+    if (dupWarn)     dupWarn.classList.add('hidden');
+    if (btn) {
+        btn.disabled = true;
+        btn.classList.add('opacity-50', 'grayscale', 'cursor-not-allowed');
+        btn.classList.remove('active:scale-95');
+    }
+}
+
+/**
+ * Fetches all itineraries for the current user from the ItineraryVault cloud
+ * sheet, merges with any locally-stored itineraries that haven't been synced
+ * yet, and updates both the in-memory array and localStorage.
+ *
+ * Falls back to localStorage-only if the network request fails.
+ */
+async function loadUserItineraries() {
+    const localData = JSON.parse(localStorage.getItem('compass_saved_itineraries')) || [];
+    const user      = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
+
+    if (!user) {
+        savedItineraries = localData;
+        return;
+    }
+
+    try {
+        const backendBase = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL : (typeof API_URL !== 'undefined' ? API_URL : null);
+        if (!backendBase) { savedItineraries = localData; return; }
+
+        const res      = await fetch(`${backendBase}?action=get_itineraries&user=${encodeURIComponent(user)}`);
+        const cloudRows = await res.json();
+
+        if (Array.isArray(cloudRows) && cloudRows.length > 0) {
+            // Each cloud row: { user, itin_id, data: <itinerary object>, last_updated }
+            const cloudItins = cloudRows.map(row => ({
+                ...row.data,
+                id:   row.itin_id || (row.data && row.data.id),
+                user: row.user    || (row.data && row.data.user),
+            }));
+
+            // Keep any local itineraries that haven't been uploaded to cloud yet
+            // (cloud is source of truth; local-only items are appended)
+            const cloudIds  = new Set(cloudItins.map(i => i.id));
+            const localOnly = localData.filter(i => !cloudIds.has(i.id));
+
+            savedItineraries = [...cloudItins, ...localOnly];
+        } else {
+            // Cloud returned nothing — trust local data (may be first run or offline)
+            savedItineraries = localData;
+        }
+    } catch (err) {
+        console.warn('[ItinerarySync] cloud fetch failed, using localStorage:', err);
+        savedItineraries = localData;
+    }
+
+    // Keep localStorage in sync with whatever we resolved
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+}
+
+/**
+ * Persists a single itinerary to the ItineraryVault cloud sheet and updates
+ * localStorage.  `action` must be 'save' or 'delete'.
+ *
+ * Uses mode:'no-cors' (same pattern as all other backend POSTs in this app)
+ * so the response body is opaque — errors are silent to the user but logged.
+ */
+async function syncItineraryToCloud(itin, action) {
+    // Always update localStorage immediately so the UI stays consistent even
+    // if the network call fails or the user is offline.
+    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+
+    if (!itin || !itin.id) return;
+    const user = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
+    if (!user) return; // nothing to key the cloud row against without a user
+
+    const backendBase = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL : (typeof API_URL !== 'undefined' ? API_URL : null);
+    if (!backendBase) return;
+
+    const payload = {
+        action:  'sync_itinerary',
+        user,
+        itin_id: itin.id,
+        method:  action === 'delete' ? 'delete' : 'save',
+        data:    action !== 'delete' ? itin : undefined,
+    };
+
+    try {
+        await fetch(backendBase, {
+            method:  'POST',
+            mode:    'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(payload),
+        });
+    } catch (err) {
+        console.warn('[ItinerarySync] cloud POST failed (offline?):', err);
+    }
+}
+
+/**
+ * Opens the creation drawer pre-filled with an existing itinerary's data
+ * so the user can edit and re-generate it.
+ */
+function openEditItineraryModal(itinId) {
+    const itin = savedItineraries.find(i => i.id === itinId);
+    if (!itin) return;
+    isEditingMode = true;
+    editingItinId = itinId;
+    openItineraryCreationDrawerForm();
+    const nameEl = document.getElementById('itin-new-name');
+    if (nameEl) nameEl.value = itin.title;
+    if (itin.config) {
+        selectedMultiDatesArray      = [...(itin.config.dates      || [])];
+        itinSelectedCategorySequence = [...(itin.config.categories || [])];
+        if (itin.config.pacing) setItinPacingMode(itin.config.pacing);
+        const startEl = document.getElementById('itin-new-start');
+        const endEl   = document.getElementById('itin-new-end');
+        if (startEl && itin.config.start != null) startEl.value = minutesToHHMM(itin.config.start);
+        if (endEl   && itin.config.end   != null) endEl.value   = minutesToHHMM(itin.config.end);
+    }
+    updateMultiDateUILabel();
+    renderItineraryFormCategoriesAndQueryRows();
+    validateItineraryForm();
+}
+
+/**
+ * Stub for the inline spot-picker drawer (to be implemented).
+ * Shows a friendly toast until the full UI is wired up.
+ */
+function openInlineUnscheduledSpotDrawer() {
+    if (typeof showFormErrorSpeechBubble === 'function') {
+        showFormErrorSpeechBubble(['Spot picker coming soon!']);
+    }
+}
+
+// ── End of globals / stubs block ─────────────────────────────────────────────
+
 function isItineraryCacheWhollyEmpty() {
     return (!itineraryItems["1"] || itineraryItems["1"].length === 0) &&
            (!itineraryItems["2"] || itineraryItems["2"].length === 0) &&
@@ -164,6 +483,7 @@ function toggleItineraryCreationDrawerForm(show) {
 
 function openItineraryCreationDrawerForm() {
     toggleItineraryCreationDrawerForm(true);
+    resetItineraryTitleValidationUI();
     itinSelectedCategorySequence = [];
     
     let defaultFoodCategory = 'Food Spot'; 
@@ -443,70 +763,234 @@ function promptDeleteItinerary() {
     }, 'red');
 }
 
-function renderItineraryMasterDashboardWorkspace() {
-    const masterList = document.getElementById('itineraryMasterListScroll');
-    const container = document.getElementById('itineraryMasterListView');
-    
-    if (container) container.classList.remove('hidden');
-    const detailView = document.getElementById('itineraryDetailView');
-    if (detailView) detailView.classList.add('hidden');
-    
-    if (!masterList) return;
-    masterList.innerHTML = '';
+/**
+ * Toggles the starred state of an itinerary, then persists it locally and
+ * fires a cloud sync so the ItineraryVault sheet's `starred` column is updated.
+ * Works from both the master card and the expanded detail view.
+ */
+function toggleItineraryStar(itinId) {
+    const itin = savedItineraries.find(i => i.id === itinId);
+    if (!itin) return;
+    itin.starred = !itin.starred;
+    syncItineraryToCloud(itin, 'save');   // updates localStorage + fires cloud POST
 
-    const topHeaderBar = container ? container.querySelector('.flex.justify-between.items-center') : null;
+    // renderItineraryMasterDashboardWorkspace() unconditionally hides the detail
+    // view as its first action, so we must not call it while the detail view is
+    // open — doing so would collapse the expanded tray.  Only call it when the
+    // user is actually looking at the master list.
+    const detailView = document.getElementById('itineraryDetailView');
+    const inDetailView = detailView && !detailView.classList.contains('hidden');
+    if (inDetailView) {
+        // Just update the star icon in the header — leave everything else alone
+        _syncDetailViewStarBtn(itin);
+    } else {
+        renderItineraryMasterDashboardWorkspace();
+    }
+}
+
+/** Syncs the star button icon/colour in the expanded detail view header. */
+function _syncDetailViewStarBtn(itin) {
+    const btn = document.getElementById('detailItinStarBtn');
+    if (!btn || !itin) return;
+    const icon = btn.querySelector('i');
+    if (!icon) return;
+    if (itin.starred) {
+        icon.className = 'fa-solid fa-star text-[11px] text-amber-400';
+        btn.classList.replace('text-slate-300', 'text-amber-400');
+    } else {
+        icon.className = 'fa-regular fa-star text-[11px]';
+        btn.classList.replace('text-amber-400', 'text-slate-300');
+    }
+}
+
+function renderItineraryMasterDashboardWorkspace() {
+    const masterList  = document.getElementById('itineraryMasterListScroll');
+    const container   = document.getElementById('itineraryMasterListView');
+    const headerBar   = document.getElementById('itineraryMasterListHeader');
+    const emptyState  = document.getElementById('itineraryEmptyStateLanding');
+    const detailView  = document.getElementById('itineraryDetailView');
+
+    if (container)  container.classList.remove('hidden');
+    if (detailView) detailView.classList.add('hidden');
+
+    if (!masterList) return;
 
     if (!savedItineraries || savedItineraries.length === 0) {
-        if (topHeaderBar) topHeaderBar.classList.add('hidden');
-
-        masterList.innerHTML = `
-            <div class="flex flex-col justify-center items-center py-12 text-center px-6">
-                <div class="max-w-xs space-y-4">
-                    <div class="w-16 h-16 rounded-full bg-pink-500/10 border border-pink-500/20 flex items-center justify-center text-pink-500 text-2xl mx-auto">
-                        <i class="fa-solid fa-route"></i>
-                    </div>
-                    <h2 class="text-lg font-black text-slate-200">Build Your First Itinerary</h2>
-                    <p class="text-sm text-slate-400">Create daily schedules using saved spots.</p>
-                    <button onclick="toggleItineraryCreationDrawerForm(true)" class="w-full py-3 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-xs font-black uppercase text-white shadow-lg">
-                        + New Itinerary
-                    </button>
-                </div>
-            </div>`;
+        // Show the static landing page, hide the data header
+        if (headerBar)  headerBar.classList.add('hidden');
+        if (emptyState) emptyState.classList.remove('hidden');
+        // Remove any previously rendered itinerary cards
+        Array.from(masterList.children).forEach(el => {
+            if (el.id !== 'itineraryEmptyStateLanding') el.remove();
+        });
         return;
     }
-    if (topHeaderBar) topHeaderBar.classList.remove('hidden');
+
+    // At least one itinerary — show header, hide empty state
+    if (headerBar)  headerBar.classList.remove('hidden');
+    if (emptyState) emptyState.classList.add('hidden');
+
+    // Clear previous cards (keep the emptyState node in DOM so toggle is cheap)
+    Array.from(masterList.children).forEach(el => {
+        if (el.id !== 'itineraryEmptyStateLanding') el.remove();
+    });
 
     savedItineraries.forEach(itin => {
         if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(itin.city)) {
             return; 
         }
 
-        let pendingCount = 0;
-        itin.days.forEach(d => d.timeline.forEach(s => { if(!s.isDone) pendingCount++; }));
-        
+        let doneCount  = 0;
+        let totalCount = 0;
+        itin.days.forEach(d => d.timeline.forEach(s => { totalCount++; if (s.isDone) doneCount++; }));
+        const allDone    = totalCount > 0 && doneCount === totalCount;
+        const coverageColor = allDone ? 'text-emerald-400' : 'text-slate-300';
+        const coverageIcon  = allDone
+            ? '<i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i>'
+            : '<i class="fa-solid fa-map-pin text-pink-400 mr-1"></i>';
+        const isStarred = !!itin.starred;
+
         const card = document.createElement('div');
         card.className = "bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col gap-2 cursor-pointer active:scale-[0.98] transition-transform shadow-lg";
         card.onclick = () => openItineraryDetailView(itin.id);
         card.innerHTML = `
             <div class="flex justify-between items-start">
-                <h3 class="text-sm font-black text-slate-200">${itin.title}</h3>
-                <span class="text-[9px] font-bold px-2 py-1 bg-slate-800 border border-slate-700 rounded-md text-slate-400 shadow-inner">${itin.days.length} Days</span>
+                <h3 class="text-sm font-black text-slate-200 flex-1 min-w-0 pr-2 truncate">${itin.title}</h3>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button onclick="event.stopPropagation(); toggleItineraryStar('${itin.id}')"
+                            class="w-6 h-6 flex items-center justify-center transition-colors active:scale-90">
+                        <i class="fa-${isStarred ? 'solid' : 'regular'} fa-star text-sm ${isStarred ? 'text-amber-400' : 'text-slate-600'}"></i>
+                    </button>
+                    <span class="text-[9px] font-bold px-2 py-1 bg-slate-800 border border-slate-700 rounded-md text-slate-400 shadow-inner">${itin.days.length} Day${itin.days.length !== 1 ? 's' : ''}</span>
+                </div>
             </div>
             <div class="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
                 <i class="fa-solid fa-location-dot text-pink-500"></i> ${itin.city}
             </div>
+            <div class="mt-1 overflow-hidden rounded-lg bg-slate-950/60 border border-slate-800/60" style="height:22px">
+                <div id="itinWeatherStrip-${itin.id}" class="h-full flex items-center px-2">
+                    <span class="text-[9px] text-slate-700 font-bold tracking-wide flex items-center gap-1.5">
+                        <i class="fa-solid fa-cloud-sun text-slate-700 text-[8px]"></i> Loading forecast…
+                    </span>
+                </div>
+            </div>
             <div class="mt-2 flex items-center justify-between border-t border-slate-800 pt-3">
-                <span class="text-[10px] font-black ${pendingCount > 0 ? 'text-amber-400' : 'text-emerald-400'}">${pendingCount === 0 ? '<i class="fa-solid fa-check-circle mr-1"></i> Completed' : pendingCount + ' Pending Spots'}</span>
+                <span class="text-[10px] font-black ${coverageColor}">${coverageIcon}${doneCount}/${totalCount} Spots Covered</span>
                 <i class="fa-solid fa-chevron-right text-slate-600"></i>
             </div>
         `;
         masterList.appendChild(card);
     });
 
-    masterList.innerHTML += `
-        <div class="text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4">
-            End of Filtered Itinerary List
+    const footer = document.createElement('div');
+    footer.className = "text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4";
+    footer.textContent = "End of Filtered Itinerary List";
+    masterList.appendChild(footer);
+
+    // Populate weather strips async — runs after the DOM is painted
+    savedItineraries.forEach(itin => {
+        if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(itin.city)) return;
+        if (itin.city) _populateItineraryWeatherStrip(itin.id, itin.city, itin.days);
+    });
+}
+
+// ── Weather: master card bus-sign strip ──────────────────────────────────────
+/**
+ * Fetches forecast for `city`, then updates the weather strip for a master card.
+ * `days` is the itinerary days array — used to match forecast dates to actual
+ * trip dates so we show only the days the user will be there.
+ */
+async function _populateItineraryWeatherStrip(itinId, city, days) {
+    const el = document.getElementById(`itinWeatherStrip-${itinId}`);
+    if (!el) return;
+
+    const forecast = await fetchItineraryForecast(city);
+
+    if (!forecast || !forecast.days || forecast.days.length === 0) {
+        // Error / no data state — neutral cloud, no animation
+        el.innerHTML = `
+            <span class="text-[9px] text-slate-700 font-bold flex items-center gap-1.5">
+                <i class="fa-solid fa-cloud text-slate-700 text-[8px]"></i> No forecast
+            </span>`;
+        return;
+    }
+
+    // Match forecast days to the itinerary trip dates
+    const tripDates = (days || []).map(d => {
+        // Normalise to YYYY-MM-DD (handles both Date objects and ISO strings)
+        return (d.date instanceof Date)
+            ? d.date.toISOString().slice(0, 10)
+            : String(d.date).slice(0, 10);
+    });
+    const matchedDays = forecast.days.filter(fd => tripDates.includes(fd.date));
+    // Fall back to all available forecast days if none overlap (e.g. future trip)
+    const displayDays = matchedDays.length > 0 ? matchedDays : forecast.days.slice(0, 5);
+
+    if (displayDays.length === 0) {
+        el.innerHTML = `<span class="text-[9px] text-slate-700 font-bold flex items-center gap-1.5"><i class="fa-solid fa-cloud text-slate-700 text-[8px]"></i> No forecast</span>`;
+        return;
+    }
+
+    // Build bus-sign segment string — doubled for seamless loop
+    const buildSegment = () => displayDays.map((fd, i) => {
+        const label = `D${i + 1}`;
+        const temp  = fd.temp !== undefined ? `${Math.round(fd.temp)}°` : '–';
+        return `<span class="inline-flex items-center gap-1 shrink-0">
+                    <span class="text-slate-500 font-bold text-[9px]">${label}</span>
+                    <i class="fa-solid ${fd.iconClass} text-[9px]"></i>
+                    <span class="text-slate-400 font-bold text-[9px]">${temp}</span>
+                </span>
+                <span class="text-slate-700 mx-2 text-[9px] shrink-0">|</span>`;
+    }).join('');
+
+    const segment = buildSegment();
+    // Decide animation: only scroll if content is wide (more than 3 days)
+    const shouldScroll = displayDays.length > 3;
+
+    el.style.overflow = 'hidden';
+    el.innerHTML = `
+        <div class="${shouldScroll ? 'itin-weather-run' : 'inline-flex items-center gap-0'}"
+             style="${shouldScroll ? '' : 'flex-wrap:nowrap;'}">
+            ${segment}
+            ${shouldScroll ? segment : ''}
         </div>`;
+}
+
+// ── Weather: expanded view day badge ─────────────────────────────────────────
+/**
+ * Updates the #detailDayWeatherBadge for the currently displayed day.
+ * @param {string} city      – itinerary city name
+ * @param {string} dateStr   – ISO date string for the active day (YYYY-MM-DD or Date)
+ */
+async function _fetchAndRenderDetailDayWeather(city, dateStr) {
+    const badge = document.getElementById('detailDayWeatherBadge');
+    if (!badge) return;
+
+    // Show a neutral loading state while we wait
+    badge.innerHTML = `<i class="fa-solid fa-ellipsis text-slate-700 text-[9px] animate-pulse"></i>`;
+
+    if (!city) { badge.innerHTML = ''; return; }
+
+    const forecast = await fetchItineraryForecast(city);
+    if (!forecast || !forecast.days || forecast.days.length === 0) {
+        badge.innerHTML = `<i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>`;
+        return;
+    }
+
+    const targetDate = (dateStr instanceof Date)
+        ? dateStr.toISOString().slice(0, 10)
+        : String(dateStr).slice(0, 10);
+
+    const match = forecast.days.find(fd => fd.date === targetDate);
+    if (!match) {
+        badge.innerHTML = `<i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>`;
+        return;
+    }
+
+    const temp = match.temp !== undefined ? `${Math.round(match.temp)}°C` : '';
+    badge.innerHTML = `
+        <i class="fa-solid ${match.iconClass} text-[11px]"></i>
+        ${temp ? `<span class="text-slate-400 font-bold text-[9px]">${temp}</span>` : ''}`;
 }
 
 function openItineraryDetailView(itinId) {
@@ -539,7 +1023,17 @@ function renderDetailViewTimeline() {
 
     document.getElementById('detailItineraryTitle').innerText = itin.title;
     document.getElementById('detailDayLabel').innerText = `Day ${activeItineraryDayTracker + 1} of ${itin.days.length}`;
-    
+
+    // Hide both nav arrows for single-day itineraries — no navigation needed
+    const prevBtn    = document.getElementById('itinNavPrevBtn');
+    const nextBtn    = document.getElementById('itinNavNextBtn');
+    const isSingleDay = itin.days.length === 1;
+    if (prevBtn) prevBtn.classList.toggle('invisible', isSingleDay);
+    if (nextBtn) nextBtn.classList.toggle('invisible', isSingleDay);
+
+    // Keep the star button in the detail header in sync
+    _syncDetailViewStarBtn(itin);
+
     const activeDay = itin.days[activeItineraryDayTracker];
     document.getElementById('detailDateLabel').innerText = new Date(activeDay.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 
@@ -584,10 +1078,10 @@ function renderDetailViewTimeline() {
         container.appendChild(card);
     });
 
-    container.innerHTML += `
-        <div class="text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4">
-            End of Selected Day Itinerary List
-        </div>`;
+    const tlFooter = document.createElement('div');
+    tlFooter.className = "text-center py-8 text-[10px] font-black text-slate-600 tracking-widest opacity-60 border-t border-slate-800/50 mt-4";
+    tlFooter.textContent = "End of Selected Day Itinerary List";
+    container.appendChild(tlFooter);
 }
 
 function toggleActivityDoneState(dayIndex, spotIndex) {
@@ -744,57 +1238,313 @@ function showFormErrorSpeechBubble(missingFieldsArray) {
 }
 
 function generateIntelligentItinerary() {
-    const title = document.getElementById('itin-new-name').value.trim();
+    const title      = document.getElementById('itin-new-name').value.trim();
     const chosenCity = document.getElementById('itin-new-city').value;
-    const startMins = parseTimeToMinutes(document.getElementById('itin-new-start').value || "09:00");
-    const endMins = parseTimeToMinutes(document.getElementById('itin-new-end').value || "21:00");
+    const startMins  = parseTimeToMinutes(document.getElementById('itin-new-start').value || "09:00");
+    const endMins    = parseTimeToMinutes(document.getElementById('itin-new-end').value   || "21:00");
 
-    let missing = [];
-    if (!title) missing.push("Itinerary Name");
-    if (!chosenCity) missing.push("City Selection");
-    if (selectedMultiDatesArray.length === 0) missing.push("Travel Dates");
+    // ── Validate ──────────────────────────────────────────────────────────────
+    const missing = [];
+    if (!title)                                    missing.push("Itinerary Name");
+    if (!chosenCity)                               missing.push("City Selection");
+    if (selectedMultiDatesArray.length  === 0)     missing.push("Travel Dates");
     if (itinSelectedCategorySequence.length === 0) missing.push("Category Sequence");
-
-    if (missing.length > 0) {
-        showFormErrorSpeechBubble(missing);
-        return; 
-    }
+    if (missing.length > 0) { showFormErrorSpeechBubble(missing); return; }
 
     document.getElementById('buildingItineraryLoaderPopup').classList.remove('hidden');
-    
+
     setTimeout(() => {
-        const bufferMins = itinPacingMode === 'max' ? 15 : 45;
-        
-        let availablePool = travelSpots.filter(s => s.city === chosenCity).map(s => {
-            const logic = getCategoryLogic(s.category);
-            const anchoredMins = detectAnchoredTime(s.booking_requirement);
-            return { 
-                ...s, 
-                isAnchored: anchoredMins !== null, anchoredTime: anchoredMins,
-                logicDur: itinPacingMode === 'max' ? logic.durationMax : logic.durationRelaxed,
-                logicOpen: logic.open * 60, logicClose: logic.close * 60
-            };
-        });
+        try {
+            // ── Config ────────────────────────────────────────────────────────
+            const isMax       = itinPacingMode === 'max';
+            const bufferMins  = isMax ? 15 : 40;          // travel + transition gap
+            const durationKey = isMax ? 'durationMax' : 'durationRelaxed';
 
-        let newItinerary = { 
-            id: isEditingMode ? editingItinId : Date.now().toString(), 
-            title: title, 
-            city: chosenCity, 
-            days: [],
-            config: { 
-                dates: [...selectedMultiDatesArray], 
-                categories: [...itinSelectedCategorySequence], 
-                pacing: itinPacingMode,
-                start: startMins,
-                end: endMins
+            // ── Build enriched spot pool for this city ────────────────────────
+            // Each pool entry is immutable — per-day scheduling reads from it but
+            // only usedSpotIds tracks what has already been placed.
+            const cityPool = (travelSpots || [])
+                .filter(s => s.city === chosenCity)
+                .map(s => {
+                    const logic        = getCategoryLogic(s.category);
+                    const anchoredMins = detectAnchoredTime(s.booking_requirement);
+                    return {
+                        ...s,
+                        isAnchored:   anchoredMins !== null,
+                        anchoredTime: anchoredMins,
+                        logicDur:     logic[durationKey],
+                        logicOpen:    logic.open  * 60,
+                        logicClose:   logic.close * 60,
+                        _lat:         parseFloat(s.latitude)  || null,
+                        _lng:         parseFloat(s.longitude) || null,
+                    };
+                });
+
+            // ── Inner helpers (defined once, shared across all days) ───────────
+
+            /**
+             * Haversine great-circle distance in kilometres between two points.
+             * Returns a large sentinel (9999) when either coordinate is missing.
+             */
+            function _distKm(lat1, lng1, lat2, lng2) {
+                if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return 9999;
+                const R    = 6371;
+                const dLat = (lat2 - lat1) * Math.PI / 180;
+                const dLng = (lng2 - lng1) * Math.PI / 180;
+                const a    = Math.sin(dLat / 2) ** 2
+                           + Math.cos(lat1 * Math.PI / 180)
+                           * Math.cos(lat2 * Math.PI / 180)
+                           * Math.sin(dLng / 2) ** 2;
+                return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
             }
-        };
-        let usedSpotIds = new Set();
-        let sequenceIndex = 0;
 
-        selectedMultiDatesArray.sort().forEach(dateStr => {
-            let dailyTimeline = [];
-            let currentTime = startMins;
-            let lastCoords = null;
-            let sequenceAttempts = 0;
-            let maxAttempts = itinSelectedCategorySequence.length * 3
+            /**
+             * Returns true when a spot's comma-separated category list contains
+             * the sequence target (or vice-versa).  Case-insensitive.
+             */
+            function _catMatches(spotCategory, target) {
+                if (!spotCategory || !target) return false;
+                const t  = target.trim().toLowerCase();
+                return spotCategory.toLowerCase()
+                    .split(',')
+                    .some(c => { const cc = c.trim(); return cc.includes(t) || t.includes(cc); });
+            }
+
+            /**
+             * From the city pool, finds the closest unplaced spot that:
+             *   - matches the target category
+             *   - is open during the requested slot
+             *   - finishes before slotEnd (the window boundary)
+             * Returns null when nothing qualifies.
+             */
+            function _pickClosest(usedIds, targetCat, slotStart, slotEnd, refLat, refLng) {
+                let best      = null;
+                let bestDist  = Infinity;
+
+                for (const s of cityPool) {
+                    if (usedIds.has(s.rowid))                        continue;
+                    if (!_catMatches(s.category, targetCat))         continue;
+                    if (slotStart < s.logicOpen)                     continue;  // venue not open yet
+                    if (slotStart + s.logicDur > s.logicClose)       continue;  // venue closes before we finish
+                    if (slotStart + s.logicDur > slotEnd)            continue;  // overruns the window
+
+                    const d = _distKm(refLat, refLng, s._lat, s._lng);
+                    if (d < bestDist) { bestDist = d; best = s; }
+                }
+                return best;
+            }
+
+            // ── Build itinerary skeleton ──────────────────────────────────────
+            const newItinerary = {
+                id:     isEditingMode ? editingItinId : Date.now().toString(),
+                title,
+                city:   chosenCity,
+                user:   (typeof currentUser !== 'undefined') ? currentUser : null,
+                days:   [],
+                config: {
+                    dates:      [...selectedMultiDatesArray],
+                    categories: [...itinSelectedCategorySequence],
+                    pacing:     itinPacingMode,
+                    start:      startMins,
+                    end:        endMins,
+                },
+            };
+
+            const usedSpotIds = new Set();
+            const sortedDates = [...selectedMultiDatesArray].sort();
+
+            // ── Per-day scheduling ────────────────────────────────────────────
+            sortedDates.forEach(dateStr => {
+                const dailyTimeline = [];
+
+                // ── Phase 1: reserve anchored (booked-time) spots ─────────────
+                // These become fixed time pillars around which the rest of the day
+                // is filled.  Two anchored spots whose windows overlap are both
+                // eligible but a conflict check skips the later one if needed.
+                const anchoredCandidates = cityPool
+                    .filter(s =>
+                        s.isAnchored &&
+                        !usedSpotIds.has(s.rowid) &&
+                        s.anchoredTime >= startMins &&
+                        s.anchoredTime + s.logicDur <= endMins &&
+                        s.anchoredTime >= s.logicOpen &&
+                        s.anchoredTime + s.logicDur <= s.logicClose
+                    )
+                    .sort((a, b) => a.anchoredTime - b.anchoredTime);
+
+                // Insert anchored spots, skipping any that overlap a prior one
+                let lastAnchorEnd = -1;
+                for (const s of anchoredCandidates) {
+                    if (s.anchoredTime < lastAnchorEnd) continue;  // overlap — skip
+                    dailyTimeline.push({
+                        ...s,
+                        sch_start:  s.anchoredTime,
+                        sch_end:    s.anchoredTime + s.logicDur,
+                        isDone:     false,
+                        isAnchored: true,
+                    });
+                    usedSpotIds.add(s.rowid);
+                    lastAnchorEnd = s.anchoredTime + s.logicDur;
+                }
+
+                // ── Phase 2: derive free-time segments around the anchors ──────
+                // Segments are [segStart, segEnd) windows where non-anchored spots
+                // can be placed.  Each edge of an anchor gets a bufferMins gap so
+                // the traveller has time to get there and settle in.
+                const segments = [];
+                let   cursor   = startMins;
+
+                for (const entry of dailyTimeline) {  // already sorted by sch_start
+                    const gapEnd = entry.sch_start - bufferMins;
+                    if (gapEnd > cursor + 30) {        // only worth filling if >30 min free
+                        segments.push([cursor, gapEnd]);
+                    }
+                    cursor = entry.sch_end + bufferMins;
+                }
+                if (cursor < endMins - 30) {
+                    segments.push([cursor, endMins]);
+                }
+
+                // ── Phase 3: fill each free segment with sequence-guided spots ─
+                // seqIdx resets per day so every day starts fresh from the top of
+                // the category sequence (e.g., always breakfast → attraction →
+                // lunch → … regardless of what happened on previous days).
+                let seqIdx  = 0;
+                let refLat  = null;
+                let refLng  = null;
+
+                // Seed proximity reference from the first anchored spot, if any
+                if (dailyTimeline.length > 0) {
+                    refLat = dailyTimeline[0]._lat;
+                    refLng = dailyTimeline[0]._lng;
+                }
+
+                for (const [segStart, segEnd] of segments) {
+                    let t = segStart;
+
+                    // Allow one full rotation through the sequence before giving up
+                    // on this segment — prevents an exhausted category from
+                    // blocking the entire remainder of the day.
+                    let consecutiveSkips = 0;
+                    const maxSkips       = itinSelectedCategorySequence.length;
+
+                    while (t + 30 <= segEnd && consecutiveSkips < maxSkips) {
+                        const targetCat = itinSelectedCategorySequence[seqIdx % itinSelectedCategorySequence.length];
+                        const pick      = _pickClosest(usedSpotIds, targetCat, t, segEnd, refLat, refLng);
+
+                        if (pick) {
+                            dailyTimeline.push({
+                                ...pick,
+                                sch_start:  t,
+                                sch_end:    t + pick.logicDur,
+                                isDone:     false,
+                                isAnchored: false,
+                            });
+                            usedSpotIds.add(pick.rowid);
+                            t           += pick.logicDur + bufferMins;
+                            refLat       = pick._lat;
+                            refLng       = pick._lng;
+                            seqIdx++;
+                            consecutiveSkips = 0;      // success — reset skip counter
+                        } else {
+                            // No spot available for this category right now —
+                            // advance the sequence rather than burning the whole
+                            // loop retrying an exhausted / closed category.
+                            seqIdx++;
+                            consecutiveSkips++;
+                        }
+                    }
+                }
+
+                // Final sort: anchored + free slots ordered by start time
+                dailyTimeline.sort((a, b) => a.sch_start - b.sch_start);
+                newItinerary.days.push({ date: dateStr, timeline: dailyTimeline });
+            });
+
+            // ── Phase 4: day-balance top-up pass ─────────────────────────────
+            // After primary scheduling, days that ended up significantly lighter
+            // than average (e.g. because early days consumed most of the pool)
+            // get a second-chance fill using any remaining unplaced spots.
+            const totalPlaced = newItinerary.days.reduce((s, d) => s + d.timeline.length, 0);
+            const avgPerDay   = totalPlaced / Math.max(1, newItinerary.days.length);
+
+            newItinerary.days.forEach(day => {
+                // Only top-up days below 60 % of average (and only if avg > 1)
+                if (avgPerDay <= 1 || day.timeline.length >= Math.ceil(avgPerDay * 0.6)) return;
+
+                let t      = day.timeline.length > 0
+                               ? day.timeline[day.timeline.length - 1].sch_end + bufferMins
+                               : startMins;
+                let refLat = day.timeline.length > 0 ? day.timeline[day.timeline.length - 1]._lat : null;
+                let refLng = day.timeline.length > 0 ? day.timeline[day.timeline.length - 1]._lng : null;
+
+                for (const cat of itinSelectedCategorySequence) {
+                    if (t + 30 > endMins) break;
+                    const pick = _pickClosest(usedSpotIds, cat, t, endMins, refLat, refLng);
+                    if (pick) {
+                        day.timeline.push({
+                            ...pick,
+                            sch_start:  t,
+                            sch_end:    t + pick.logicDur,
+                            isDone:     false,
+                            isAnchored: false,
+                        });
+                        usedSpotIds.add(pick.rowid);
+                        t     += pick.logicDur + bufferMins;
+                        refLat = pick._lat;
+                        refLng = pick._lng;
+                    }
+                }
+                day.timeline.sort((a, b) => a.sch_start - b.sch_start);
+            });
+
+            // ── Guard: nothing was scheduled ─────────────────────────────────
+            if (newItinerary.days.every(d => d.timeline.length === 0)) {
+                document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+                if (typeof showFormErrorSpeechBubble === 'function') {
+                    showFormErrorSpeechBubble([`No matching spots found in ${newItinerary.city} for the selected categories.`]);
+                }
+                return;
+            }
+
+            // ── Persist locally + fire cloud sync ─────────────────────────────
+            if (isEditingMode) {
+                const idx = savedItineraries.findIndex(i => i.id === editingItinId);
+                if (idx > -1) savedItineraries[idx] = newItinerary;
+                else          savedItineraries.push(newItinerary);
+            } else {
+                savedItineraries.push(newItinerary);
+            }
+            // syncItineraryToCloud updates localStorage as its first step, then
+            // fires a no-cors POST to the ItineraryVault sheet (fire-and-forget).
+            syncItineraryToCloud(newItinerary, 'save');
+
+            // ── Reset transient form state ────────────────────────────────────
+            isEditingMode                = false;
+            editingItinId                = null;
+            selectedMultiDatesArray      = [];
+            itinSelectedCategorySequence = [];
+
+            document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+            toggleItineraryCreationDrawerForm(false);
+            renderItineraryMasterDashboardWorkspace();
+
+            const totalSpots = newItinerary.days.reduce((sum, d) => sum + d.timeline.length, 0);
+            if (typeof showFormErrorSpeechBubble === 'function') {
+                showFormErrorSpeechBubble([
+                    `"${newItinerary.title}" created — ${newItinerary.days.length} ` +
+                    `day${newItinerary.days.length > 1 ? 's' : ''}, ` +
+                    `${totalSpots} spot${totalSpots !== 1 ? 's' : ''}!`
+                ]);
+            }
+
+        } catch (err) {
+            // Safety net: never leave the loading overlay stuck on screen
+            console.error('[ItineraryEngine] generation failed:', err);
+            document.getElementById('buildingItineraryLoaderPopup').classList.add('hidden');
+            if (typeof showFormErrorSpeechBubble === 'function') {
+                showFormErrorSpeechBubble(['Something went wrong while building the itinerary. Please try again.']);
+            }
+        }
+    }, 800);
+}

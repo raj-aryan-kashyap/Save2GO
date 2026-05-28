@@ -259,17 +259,56 @@
             </div>
         </div>
 
-        <div id="view-itinerary" class="view-panel w-full bg-slate-950 flex flex-col h-full overflow-hidden relative">
+        <div id="view-itinerary" class="view-panel bg-slate-950 overflow-hidden">
             
-            <div id="itineraryMasterListView" class="flex flex-col h-full w-full absolute inset-0 z-10 bg-slate-950">
-                <div class="px-4 py-3 bg-slate-900/60 backdrop-blur border-b border-slate-800 shrink-0 flex items-center justify-between">
+            <div id="itineraryMasterListView" class="flex flex-col w-full absolute inset-0 z-10 bg-slate-950">
+                <!-- Header: hidden until JS confirms at least one itinerary exists -->
+                <div id="itineraryMasterListHeader" class="hidden px-4 py-3 bg-slate-900/60 backdrop-blur border-b border-slate-800 shrink-0 flex items-center justify-between">
                     <h2 class="text-xs font-black uppercase tracking-widest text-slate-300">Your Itinerary</h2>
                     <button onclick="openItineraryCreationDrawerForm()" class="px-4 py-2 bg-gradient-to-r from-pink-600 to-purple-600 rounded-xl text-[10px] font-black uppercase text-white shadow-lg shadow-pink-600/20 active:scale-95 transition-transform flex items-center gap-1.5">
                         <i class="fa-solid fa-plus"></i> New Itinerary
                     </button>
                 </div>
+                <!-- Scroll area: pre-populated with landing page so it shows before JS runs -->
                 <div id="itineraryMasterListScroll" class="flex-1 overflow-y-auto subtle-scrollbar px-4 pt-4 pb-24 space-y-3">
+                    <div id="itineraryEmptyStateLanding" class="flex flex-col items-center justify-center min-h-full py-16 text-center px-6">
+                        <div class="space-y-6 max-w-xs w-full">
+                            <!-- Illustration cluster -->
+                            <div class="flex items-end justify-center gap-3 mb-2">
+                                <div class="w-10 h-10 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 text-lg rotate-[-8deg]">
+                                    <i class="fa-solid fa-map-location-dot"></i>
+                                </div>
+                                <div class="w-14 h-14 rounded-2xl bg-pink-500/15 border border-pink-500/25 flex items-center justify-center text-pink-400 text-2xl shadow-lg shadow-pink-500/10">
+                                    <i class="fa-solid fa-route"></i>
+                                </div>
+                                <div class="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 text-lg rotate-[8deg]">
+                                    <i class="fa-solid fa-calendar-days"></i>
+                                </div>
+                            </div>
+                            <!-- Text -->
+                            <div class="space-y-2">
+                                <h2 class="text-lg font-black text-slate-100 tracking-tight">Build Your First Itinerary</h2>
+                                <p class="text-xs text-slate-400 leading-relaxed font-medium">Turn your saved spots into smart daily schedules — automatically organised by time, category, and city.</p>
+                            </div>
+                            <!-- Feature pills -->
+                            <div class="flex flex-wrap gap-2 justify-center">
+                                <span class="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
+                                    <i class="fa-solid fa-clock text-pink-400 text-[9px]"></i> Auto Time-Slots
+                                </span>
+                                <span class="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
+                                    <i class="fa-solid fa-bolt text-amber-400 text-[9px]"></i> Smart Pacing
+                                </span>
+                                <span class="inline-flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
+                                    <i class="fa-solid fa-calendar-check text-emerald-400 text-[9px]"></i> Multi-Day
+                                </span>
+                            </div>
+                            <!-- CTA -->
+                            <button onclick="openItineraryCreationDrawerForm()" class="w-full py-3.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-2xl text-xs font-black uppercase tracking-wider text-white shadow-lg shadow-pink-600/25 active:scale-95 transition-transform flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-plus"></i> New Itinerary
+                            </button>
+                        </div>
                     </div>
+                </div>
             </div>
 
             <div id="itineraryDetailView" class="flex flex-col h-full w-full absolute inset-0 z-20 hidden bg-slate-950">
@@ -278,6 +317,9 @@
                         <button onclick="closeItineraryDetailView()" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300"><i class="fa-solid fa-arrow-left"></i></button>
                         <h2 id="detailItineraryTitle" class="text-[13px] font-black text-slate-200 truncate"></h2>
                         <div class="flex items-center gap-2">
+                            <button id="detailItinStarBtn" onclick="toggleItineraryStar(activeItineraryId)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300 transition-colors">
+                                <i class="fa-regular fa-star text-[11px]"></i>
+                            </button>
                             <button onclick="openEditItineraryModal(activeItineraryId)" class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-full text-slate-300">
                                 <i class="fa-solid fa-pencil text-[10px]"></i>
                             </button>
@@ -288,11 +330,15 @@
                     </div>
                     
                     <div class="flex items-center justify-between bg-slate-950 p-1.5 rounded-xl border border-slate-800">
-                        <button onclick="navigateItineraryDay(-1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-left text-xs text-slate-400"></i></button>
+                        <button id="itinNavPrevBtn" onclick="navigateItineraryDay(-1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-left text-xs text-slate-400"></i></button>
                         <div class="flex flex-col items-center">
                             <span id="detailDayLabel" class="text-[11px] font-black text-pink-400 uppercase">Day 1</span>
+                            <span id="detailDateLabel" class="text-[9px] text-slate-500 font-bold mt-0.5"></span>
+                            <span id="detailDayWeatherBadge" class="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 mt-1">
+                                <i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>
+                            </span>
                         </div>
-                        <button onclick="navigateItineraryDay(1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-right text-xs text-slate-400"></i></button>
+                        <button id="itinNavNextBtn" onclick="navigateItineraryDay(1)" class="px-4 py-1.5"><i class="fa-solid fa-chevron-right text-xs text-slate-400"></i></button>
                     </div>
 
                     <div class="flex gap-2 justify-center">
@@ -653,6 +699,14 @@
                 <div>
                     <label class="block text-slate-400 font-bold mb-1 tracking-wide text-[10px]">Name</label>
                     <input type="text" id="itin-new-name" oninput="validateItineraryForm()" placeholder="e.g., Paris Exploration" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-200 focus:outline-none text-xs font-semibold">
+                    <div id="itinTitleMinCharWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-amber-400/75 pl-0.5 mt-1.5">
+                        <i class="fa-solid fa-triangle-exclamation text-[9px]"></i>
+                        <span>Minimum 3 characters required</span>
+                    </div>
+                    <div id="itinTitleDuplicateWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5 mt-1.5">
+                        <i class="fa-solid fa-circle-xmark text-[9px]"></i>
+                        <span>An itinerary with this title already exists</span>
+                    </div>
                 </div>
 
                 <div>
@@ -700,7 +754,7 @@
                     <div id="itinModalSequenceQueryRowBox" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 min-h-[80px] flex gap-1.5 items-center flex-wrap subtle-scrollbar shadow-inner items-start content-start"></div>
                 </div>
 
-                <button id="buildItinerarySubmitBtn" onclick="generateIntelligentItinerary()" class="w-full mt-2 bg-gradient-to-r from-pink-600 to-purple-600 text-center font-black py-3.5 rounded-xl text-white shadow-lg shadow-pink-600/20 text-xs uppercase tracking-wider active:scale-95 transition-transform opacity-50 grayscale">
+                <button id="buildItinerarySubmitBtn" onclick="generateIntelligentItinerary()" disabled class="w-full mt-2 bg-gradient-to-r from-pink-600 to-purple-600 text-center font-black py-3.5 rounded-xl text-white shadow-lg shadow-pink-600/20 text-xs uppercase tracking-wider active:scale-95 transition-transform opacity-50 grayscale cursor-not-allowed">
                     <i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i> Build Itinerary
                 </button>
             </div>
@@ -791,6 +845,25 @@
                         class="w-full bg-gradient-to-r from-pink-600 to-purple-600 text-white text-[12px] font-black tracking-wide rounded-xl py-3 active:opacity-80 transition-opacity shadow-lg shadow-pink-500/20">
                     <i class="fa-solid fa-eye mr-2"></i>Unhide All
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ THEMATIC CONFIRM MODAL ══════════════════════════════════════════
+         Used by openThematicConfirm() in itinerary.js for delete / recalculate
+         confirmations. Separate from the settings confirm modal so itinerary
+         actions don't bleed into the settings flow.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="thematicConfirmModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[99998] flex items-center justify-center p-4 hidden opacity-0 pointer-events-none transition-all duration-300">
+        <div id="thematicConfirmBox" class="bg-slate-900 border border-slate-800 p-5 rounded-2xl max-w-xs w-full shadow-2xl flex flex-col items-center text-center gap-3 scale-95 transition-transform duration-300">
+            <div id="thematicConfirmIcon" class="w-16 h-16 rounded-full bg-pink-500/10 flex items-center justify-center text-pink-500 text-2xl mx-auto border border-pink-500/20">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+            </div>
+            <h3 id="thematicConfirmTitle" class="text-sm font-black text-slate-200"></h3>
+            <p id="thematicConfirmDesc" class="text-xs text-slate-400 leading-relaxed font-medium"></p>
+            <div class="flex gap-2 w-full mt-1">
+                <button onclick="closeThematicConfirm()" class="flex-1 py-3 bg-slate-800 text-slate-300 rounded-xl text-[10px] font-black uppercase tracking-widest active:bg-slate-700 transition-colors">Cancel</button>
+                <button id="thematicConfirmActionBtn" class="flex-1 py-3.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-pink-600/20 active:scale-95 transition-transform">Confirm</button>
             </div>
         </div>
     </div>

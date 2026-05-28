@@ -3,7 +3,8 @@ const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ
 const BACKEND_URL = API_URL;
 
 // ── OpenWeatherMap ───────────────────────────────────────────────────────────
-const OWM_API_KEY         = '49a30e093edf979096a108d11417df90';
+// API key is stored in Google Apps Script Script Properties (key: OWM_API_KEY).
+// The frontend never holds the key — it requests weather via the backend proxy.
 const weatherCache        = new Map(); // key: "lat,lon" → { iconClass, temp, fetchedAt }
 const WEATHER_CACHE_TTL   = 30 * 60 * 1000; // 30 minutes
 
@@ -1006,13 +1007,15 @@ async function fetchWeatherForCoords(lat, lon) {
     const cached = weatherCache.get(key);
     if (cached && (Date.now() - cached.fetchedAt) < WEATHER_CACHE_TTL) return cached;
     try {
+        // Route through the Apps Script backend — the OWM key never touches the client.
         const res  = await fetch(
-            `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${OWM_API_KEY}`
+            `${BACKEND_URL}?action=get_weather&lat=${lat}&lon=${lon}`
         );
         const data = await res.json();
-        const iconClass  = getWeatherFAIconClass(data.weather?.[0]?.icon || '');
-        const temp       = Math.round(data.main?.temp       ?? 0);
-        const feelsLike  = Math.round(data.main?.feels_like ?? data.main?.temp ?? 0);
+        if (data.error) return null;
+        const iconClass  = getWeatherFAIconClass(data.icon || '');
+        const temp       = Math.round(data.temp       ?? 0);
+        const feelsLike  = Math.round(data.feels_like ?? data.temp ?? 0);
         const result     = { iconClass, temp, feelsLike, fetchedAt: Date.now() };
         weatherCache.set(key, result);
         return result;
