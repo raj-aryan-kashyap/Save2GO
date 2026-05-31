@@ -17,6 +17,9 @@ let checkedFilterStateArray = JSON.parse(localStorage.getItem('compass_active_fi
 let checkedCitiesStateArray = JSON.parse(localStorage.getItem('compass_active_cities')) || [];
 let showStarredOnly = JSON.parse(localStorage.getItem('compass_starred_only')) || false;
 let hideCompletedSpotsStateBool = localStorage.getItem('compass_hide_completed') !== null ? JSON.parse(localStorage.getItem('compass_hide_completed')) : true;
+// Active itinerary-day filter — { itineraryId, dayIndex } | null
+// Persists across sessions; cleared automatically if the referenced itinerary is deleted.
+let activeItineraryFilter = JSON.parse(localStorage.getItem('compass_itinerary_filter')) || null;
 let currentMapStyleKey = localStorage.getItem('compass_map_style') || 'dark';
 
 if (currentMapStyleKey === 'street') {
@@ -270,9 +273,26 @@ async function handleInitialLoginSubmit() {
         }
         selectedUser = newName;
 
+        // New users have no cloud itineraries — mark sync as done immediately
+        // so the empty state shows the "create first itinerary" UI right away
+        // without a "fetching..." loading phase.
+        const _newUserSyncKey = `compass_itin_sync_${selectedUser.trim().toLowerCase().replace(/\s+/g, '_')}`;
+        localStorage.setItem(_newUserSyncKey, JSON.stringify({ status: 'done', ts: Date.now() }));
+
     } else if (dropdownVal !== '') {
         // ── EXISTING USER PATH ─────────────────────────────────────────────
         selectedUser = dropdownVal;
+
+        // Pre-mark itinerary sync as in-progress so that if the user reaches
+        // the Itinerary tab before the background fetch completes, they see
+        // "Fetching saved data..." rather than the "create first" empty state.
+        // Only set if not already tracked (avoid overwriting a recent 'done' state
+        // which would indicate the user has a local cache that's already current).
+        const _existSyncKey = `compass_itin_sync_${selectedUser.trim().toLowerCase().replace(/\s+/g, '_')}`;
+        const _existSyncRaw = localStorage.getItem(_existSyncKey);
+        if (!_existSyncRaw) {
+            localStorage.setItem(_existSyncKey, JSON.stringify({ status: 'syncing', ts: Date.now() }));
+        }
 
     } else {
         // Nothing valid selected — button should be disabled so we never reach here
@@ -372,7 +392,10 @@ function _setBeginBtnState(btn, enabled) {
 
 function initializeSessionDashboard() {
     syncData(true);
-    updateNetworkStatusHUD(); 
+    updateNetworkStatusHUD();
+    updateUserGreetingCapsule();
+    // Start the HUD cycle slot — will snap to GPS row immediately if GPS is not yet active
+    _hudStartCycle();
 }
 
 async function syncData(isManualForce) {
@@ -384,6 +407,7 @@ async function syncData(isManualForce) {
 
     if (syncText && isManualForce) syncText.innerText = "Checking cloud...";
     if (syncIconFrame && isManualForce) syncIconFrame.classList.add('animate-spin');
+    if (isManualForce) hudCycleLockForSync();
     
     try {
         const response = await fetch(API_URL);
@@ -391,7 +415,12 @@ async function syncData(isManualForce) {
         if(Array.isArray(cloudData)) {
             travelSpots = cloudData;
             localStorage.setItem('compass_cache', JSON.stringify(travelSpots));
-            calculateSmartCityDefaultFilters(); 
+            // Start geocoding city centres for spots with missing coordinates as early
+            // as possible — before the user navigates to the map tab.  The guard handles
+            // the case where map.js hasn't defined the function yet (shouldn't happen in
+            // normal page load order, but safe to check).
+            if (typeof prefetchMissingCityCenters === 'function') prefetchMissingCityCenters();
+            calculateSmartCityDefaultFilters();
             renderList(); 
             
             // Only recalculate the viewport if the user has no saved position from a prior
@@ -418,12 +447,13 @@ async function syncData(isManualForce) {
                 prefetchBordersCountryTilesMapEngine();
             }
         }
-    } catch (e) { 
-        if(syncText) syncText.innerText = "Offline Mode"; 
+    } catch (e) {
+        if(syncText) syncText.innerText = "Offline Mode";
     } finally {
         if (syncIconFrame) {
             setTimeout(() => { syncIconFrame.classList.remove('animate-spin'); }, 400);
         }
+        hudCycleUnlockAfterSync();
     }
 }
 
@@ -503,6 +533,7 @@ async function submitNewSpotToCloud() {
 function switchMasterMenuDashboardTab(targetTabID) {
     killLiveSpeechBubbleHUDState();
     if(typeof dismissMapDetailTrayHUDCard === 'function') dismissMapDetailTrayHUDCard();
+    if(typeof closeUnifiedFilterSheet === 'function') closeUnifiedFilterSheet();
 
     if(targetTabID === activeTabID) return;
     
@@ -657,12 +688,418 @@ function toggleFilterDropdownOverlayMenu(event) {
 }
 
 function closeAllActiveHUDDropdownOverlays() {
+    // Snapshot whether the type-filter dropdown was actually open BEFORE hiding it.
+    // autoFitMapToItineraryDaySpots should only fire when the dropdown was genuinely
+    // being closed — not on every arbitrary tap (e.g. the map-tray X button, Mark Done,
+    // or any other backdrop click).  The document-level click handler calls this
+    // function for ALL taps, so without this guard the auto-fit fires every time the
+    // user interacts with the map tray while an itinerary day filter is active.
+    const _typeFilterWasOpen = !document.getElementById('filterCategoryDropdownPopupBox')
+                                         .classList.contains('hidden');
+
     document.getElementById('cityHUDDropdownPopupBox').classList.add('hidden');
     document.getElementById('filterCategoryDropdownPopupBox').classList.add('hidden');
     document.getElementById('dropdownBlurBackdrop').classList.add('hidden');
+
+    // Only auto-pan if the type filter was the thing that was just closed.
+    if (_typeFilterWasOpen && activeItineraryFilter && typeof autoFitMapToItineraryDaySpots === 'function') {
+        setTimeout(autoFitMapToItineraryDaySpots, 120);
+    }
 }
 
 function toggleQuickAddModal(show) { document.getElementById('quickAddModal').classList.toggle('hidden', !show); }
+
+/* ── AI Assist Notepad Modal ─────────────────────────────────────────────────
+   Opened from fabSat3 (AI wand satellite).
+   Two-step GAS flow:
+     Step 1 → aiAssistProcessWithGemini(text)   — Gemini API call + JSON parse
+     Step 2 → aiAssistWriteSpotToSheet(data)    — sheet append
+   Draft auto-saved to localStorage across open/close cycles.
+   App is locked (close blocked, backdrop click blocked) during processing.
+   Retry is smart: AI failure retries from Step 1; DB failure retries Step 2
+   only (Gemini result is preserved in _aiAssistParsedData).
+   ─────────────────────────────────────────────────────────────────────────── */
+
+let _aiAssistIsProcessing = false;
+let _aiAssistParsedData   = null;   // survives between step 1 completion and step 2
+let _aiAssistRetryFn      = null;   // set to the right retry closure on failure
+const _AI_ASSIST_DRAFT_KEY = 'ai_assist_notepad_draft';
+
+const _AI_ASSIST_STEPS = {
+    1: { title: 'Sending to AI…',      sub: 'Gemini is analyzing your travel data'    },
+    2: { title: 'Response received',        sub: 'Verifying extracted data structure…' },
+    3: { title: 'Saving to database…', sub: 'Writing your spot to Mastervalue'         },
+};
+
+/* ── Public ─────────────────────────────────────────────────────────────── */
+
+function openAIAssistNotepad() {
+    const modal = document.getElementById('aiAssistNotepadModal');
+    if (!modal) return;
+
+    // Restore unsaved draft from previous session
+    const input = document.getElementById('aiAssistNotepadInput');
+    if (input) {
+        try { input.value = localStorage.getItem(_AI_ASSIST_DRAFT_KEY) || ''; }
+        catch (e) { input.value = ''; }
+    }
+
+    _aiAssistHideStatus();
+    _aiAssistSyncSubmitBtn();
+    _aiAssistShowPanel('form');
+    modal.classList.remove('hidden');
+    // Small defer so soft keyboard doesn't fight the open animation
+    setTimeout(function() { if (input) input.focus(); }, 120);
+}
+
+function closeAIAssistNotepad() {
+    // Blocked while a GAS call is in flight — backdrop click and X both hit this
+    if (_aiAssistIsProcessing) return;
+    const modal = document.getElementById('aiAssistNotepadModal');
+    if (modal) modal.classList.add('hidden');
+    // Clear transient state; draft stays in localStorage until successful submit
+    _aiAssistRetryFn    = null;
+    _aiAssistParsedData = null;
+}
+
+function submitAIAssistNotepad() {
+    const input = document.getElementById('aiAssistNotepadInput');
+    const text  = input ? input.value.trim() : '';
+    if (!text) {
+        _aiAssistShowStatus('error', '⚠', 'Please paste or type some travel data before submitting.');
+        return;
+    }
+    _aiAssistParsedData = null;
+    _aiAssistRetryFn    = null;
+    _aiAssistStep1(text);
+}
+
+/* ── Step 1: Gemini API ─────────────────────────────────────────────────── */
+
+async function _aiAssistStep1(text) {
+    _aiAssistShowPanel('progress');
+    _aiAssistSetProgressStep(1);
+
+    try {
+        const resp = await fetch(API_URL, {
+            method : 'POST',
+            mode   : 'cors',
+            body   : JSON.stringify({ action: 'ai_assist_process', input: text }),
+        });
+        const json = await resp.json();
+
+        if (!json || json.result !== 'success') {
+            _aiAssistRetryFn = function() { _aiAssistStep1(text); };
+            _aiAssistShowPanel('error');
+            _aiAssistShowError(
+                'AI Processing Failed',
+                (json && json.error)
+                    || 'Gemini could not process your input. Try rephrasing or adding more detail.',
+                true
+            );
+            return;
+        }
+
+        _aiAssistParsedData = json.data; // array of spot objects
+        _aiAssistSetProgressStep(2);
+        const countLabel = (json.count && json.count > 1)
+            ? json.count + ' spots extracted'
+            : '1 spot extracted';
+        const subEl = document.getElementById('aiAssistProgressSub');
+        if (subEl) subEl.textContent = countLabel + ' — verifying data structure…';
+        setTimeout(function() { _aiAssistStep3(text); }, 900);
+
+    } catch (err) {
+        _aiAssistRetryFn = function() { _aiAssistStep1(text); };
+        const msg   = err && err.message ? err.message : String(err);
+        const isNet = /network|timeout|connect|fetch/i.test(msg);
+        _aiAssistShowPanel('error');
+        _aiAssistShowError(
+            isNet ? 'No Response from Server' : 'Connection Error',
+            isNet
+                ? 'Could not reach the server. Check your internet connection and try again.'
+                : 'A server error occurred: ' + msg,
+            true
+        );
+    }
+}
+
+/* ── Step 3: Database write ─────────────────────────────────────────────── */
+
+async function _aiAssistStep3(text) {
+    _aiAssistSetProgressStep(3);
+
+    try {
+        const resp = await fetch(API_URL, {
+            method : 'POST',
+            mode   : 'cors',
+            body   : JSON.stringify({ action: 'ai_assist_write', data: _aiAssistParsedData }),
+        });
+        const json = await resp.json();
+
+        if (!json || json.result !== 'success') {
+            // AI data still in _aiAssistParsedData — retry DB only, no Gemini re-call
+            _aiAssistRetryFn = function() { _aiAssistStep3(text); };
+            _aiAssistShowPanel('error');
+            _aiAssistShowError(
+                'Database Write Failed',
+                (json && json.error)
+                    || 'AI processed your data but saving to the sheet failed. Your AI result is preserved — tap Retry to try again.',
+                true
+            );
+            return;
+        }
+
+        _aiAssistShowSuccess(json.count || 1, json.newIds || []);
+        try { localStorage.removeItem(_AI_ASSIST_DRAFT_KEY); } catch (e) {}
+        _aiAssistParsedData = null;
+        _aiAssistRetryFn    = null;
+        // User must close manually via X or tapping outside.
+
+    } catch (err) {
+        _aiAssistRetryFn = function() { _aiAssistStep3(text); };
+        const msg = err && err.message ? err.message : String(err);
+        _aiAssistShowPanel('error');
+        _aiAssistShowError(
+            'Database Error',
+            'Failed to write to the sheet: ' + msg
+                + '. Your AI result is preserved — tap Retry to try saving again.',
+            true
+        );
+    }
+}
+
+/* ── Retry ──────────────────────────────────────────────────────────────── */
+
+function _aiAssistRetry() {
+    if (typeof _aiAssistRetryFn === 'function') {
+        _aiAssistShowPanel('progress');
+        _aiAssistRetryFn();
+    }
+}
+
+/* ── Panel switcher ─────────────────────────────────────────────────────── */
+
+function _aiAssistShowPanel(panel) {
+    const formEl     = document.getElementById('aiAssistFormPanel');
+    const progressEl = document.getElementById('aiAssistProgressPanel');
+    const errorEl    = document.getElementById('aiAssistErrorPanel');
+    const closeBtn   = document.getElementById('aiAssistCloseBtn');
+
+    if (formEl)     formEl.style.display     = 'none';
+    if (progressEl) progressEl.style.display = 'none';
+    if (errorEl)    errorEl.style.display    = 'none';
+
+    if (panel === 'form') {
+        if (formEl)   formEl.style.display   = 'flex';
+        if (closeBtn) closeBtn.style.display = '';
+        _aiAssistIsProcessing = false;
+    } else if (panel === 'progress') {
+        if (progressEl) progressEl.style.display = 'flex';
+        if (closeBtn)   closeBtn.style.display   = 'none'; // lock app during processing
+        _aiAssistIsProcessing = true;
+    } else if (panel === 'error') {
+        if (errorEl)  errorEl.style.display  = 'flex';
+        if (closeBtn) closeBtn.style.display = '';         // allow close on failure
+        _aiAssistIsProcessing = false;
+    }
+}
+
+/* ── Progress step UI ───────────────────────────────────────────────────── */
+
+function _aiAssistSetProgressStep(step) {
+    const cfg = _AI_ASSIST_STEPS[step];
+    if (!cfg) return;
+
+    const titleEl = document.getElementById('aiAssistProgressTitle');
+    const subEl   = document.getElementById('aiAssistProgressSub');
+    if (titleEl) { titleEl.textContent = cfg.title; titleEl.style.color = ''; }
+    if (subEl)   subEl.textContent   = cfg.sub;
+
+    // Dot states: step 1 → [active,pending,pending]
+    //             step 2 → [done,  active, pending]  (brief transition)
+    //             step 3 → [done,  done,   active]
+    _aiAssistUpdateStepDot(1, step === 1 ? 'active' : 'done');
+    _aiAssistUpdateStepDot(2, step < 2   ? 'pending' : step === 2 ? 'active' : 'done');
+    _aiAssistUpdateStepDot(3, step < 3   ? 'pending' : 'active');
+
+    // Fill connectors progressively
+    const c1 = document.getElementById('aiAssistConnector1');
+    const c2 = document.getElementById('aiAssistConnector2');
+    if (c1) c1.style.width = step >= 2 ? '100%' : '0';
+    if (c2) c2.style.width = step >= 3 ? '100%' : '0';
+
+    // Restore wand icon/animation (in case a previous success changed it)
+    const icon = document.getElementById('aiAssistProgressCenterIcon');
+    if (icon) {
+        icon.className        = 'fa-solid fa-wand-magic-sparkles text-violet-400';
+        icon.style.fontSize   = '22px';
+        icon.style.animation  = 'aiAssistIconFloat 2.4s ease-in-out infinite';
+        icon.style.color      = '';
+    }
+    const wrap = document.getElementById('aiAssistProgressIconWrap');
+    if (wrap) {
+        wrap.style.background = 'linear-gradient(135deg,rgba(124,58,237,0.18),rgba(219,39,119,0.12))';
+        wrap.style.border     = '1px solid rgba(124,58,237,0.22)';
+    }
+}
+
+function _aiAssistShowSuccess(count, newIds) {
+    const titleEl = document.getElementById('aiAssistProgressTitle');
+    const subEl   = document.getElementById('aiAssistProgressSub');
+    const isMulti = count && count > 1;
+    if (titleEl) {
+        titleEl.textContent = isMulti ? count + ' spots added!' : 'Spot added!';
+        titleEl.style.color = '#86efac';
+    }
+    if (subEl) {
+        if (isMulti) {
+            subEl.textContent = count + ' locations saved to MasterVault'
+                + (newIds && newIds.length ? ' (IDs #' + newIds[0] + '–#' + newIds[newIds.length - 1] + ')' : '');
+        } else {
+            subEl.textContent = 'Saved to MasterVault'
+                + (newIds && newIds.length ? ' (Row #' + newIds[0] + ')' : '');
+        }
+    }
+
+    _aiAssistUpdateStepDot(1, 'done');
+    _aiAssistUpdateStepDot(2, 'done');
+    _aiAssistUpdateStepDot(3, 'done');
+    const c1 = document.getElementById('aiAssistConnector1');
+    const c2 = document.getElementById('aiAssistConnector2');
+    if (c1) c1.style.width = '100%';
+    if (c2) c2.style.width = '100%';
+
+    // Swap animated wand for a green checkmark
+    const icon = document.getElementById('aiAssistProgressCenterIcon');
+    if (icon) {
+        icon.className       = 'fa-solid fa-check';
+        icon.style.fontSize  = '22px';
+        icon.style.animation = 'none';
+        icon.style.color     = '#86efac';
+    }
+    const wrap = document.getElementById('aiAssistProgressIconWrap');
+    if (wrap) {
+        wrap.style.background = 'rgba(34,197,94,0.12)';
+        wrap.style.border     = '1px solid rgba(34,197,94,0.28)';
+    }
+
+    // Processing is done — re-enable the X button and backdrop dismiss
+    _aiAssistIsProcessing = false;
+    const closeBtn = document.getElementById('aiAssistCloseBtn');
+    if (closeBtn) closeBtn.style.display = '';
+}
+
+function _aiAssistUpdateStepDot(n, state) {
+    const dot   = document.getElementById('aiAssistStep'     + n + 'Dot');
+    const icon  = document.getElementById('aiAssistStepIcon' + n);
+    const label = document.getElementById('aiAssistStepLabel' + n);
+    if (!dot) return;
+
+    const ICONS = { 1: 'fa-wand-magic-sparkles', 2: 'fa-database', 3: 'fa-check' };
+
+    if (state === 'active') {
+        dot.style.cssText   = 'background:rgba(124,58,237,0.18);border:2px solid rgba(124,58,237,0.55);animation:aiAssistStepDotPulse 1.2s ease-in-out infinite;width:2rem;height:2rem;border-radius:9999px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;transition:all 0.3s;';
+        if (icon)  { icon.className = 'fa-solid ' + ICONS[n]; icon.style.color = '#a78bfa'; icon.style.fontSize = '9px'; }
+        if (label) label.style.color = '#a78bfa';
+    } else if (state === 'done') {
+        dot.style.cssText   = 'background:rgba(124,58,237,0.22);border:2px solid rgba(124,58,237,0.55);animation:none;width:2rem;height:2rem;border-radius:9999px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;transition:all 0.3s;';
+        if (icon)  { icon.className = 'fa-solid fa-check'; icon.style.color = '#a78bfa'; icon.style.fontSize = '9px'; }
+        if (label) label.style.color = '#a78bfa';
+    } else {
+        dot.style.cssText   = 'background:rgba(30,41,59,0.9);border:2px solid rgba(51,65,85,0.5);animation:none;width:2rem;height:2rem;border-radius:9999px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;transition:all 0.3s;';
+        if (icon)  { icon.className = 'fa-solid ' + ICONS[n]; icon.style.color = '#475569'; icon.style.fontSize = '9px'; }
+        if (label) label.style.color = '#475569';
+    }
+}
+
+/* ── Error panel ────────────────────────────────────────────────────────── */
+
+function _aiAssistShowError(title, detail, showRetry) {
+    const t   = document.getElementById('aiAssistErrorTitle');
+    const d   = document.getElementById('aiAssistErrorDetail');
+    const btn = document.getElementById('aiAssistRetryBtn');
+    if (t)   t.textContent = title;
+    if (d)   d.textContent = detail;
+    if (btn) btn.style.display = (showRetry && typeof _aiAssistRetryFn === 'function') ? '' : 'none';
+}
+
+/* ── Form panel helpers ─────────────────────────────────────────────────── */
+
+function _aiAssistOnInput() {
+    const input = document.getElementById('aiAssistNotepadInput');
+    if (input) {
+        try { localStorage.setItem(_AI_ASSIST_DRAFT_KEY, input.value); } catch (e) {}
+    }
+    _aiAssistSyncSubmitBtn();
+}
+
+function _aiAssistSyncSubmitBtn() {
+    const input = document.getElementById('aiAssistNotepadInput');
+    const btn   = document.getElementById('aiAssistSubmitBtn');
+    if (!btn || !input) return;
+    const hasText = input.value.trim().length > 0;
+    btn.style.opacity       = hasText ? '1'    : '0.45';
+    btn.style.pointerEvents = hasText ? 'auto' : 'none';
+}
+
+function _aiAssistShowStatus(type, icon, text) {
+    const banner = document.getElementById('aiAssistStatusBanner');
+    const iconEl = document.getElementById('aiAssistStatusIcon');
+    const textEl = document.getElementById('aiAssistStatusText');
+    if (!banner) return;
+    banner.classList.remove('hidden');
+    banner.style.background = type === 'success' ? 'rgba(34,197,94,0.08)'           : 'rgba(248,113,113,0.08)';
+    banner.style.border     = type === 'success' ? '1px solid rgba(34,197,94,0.22)' : '1px solid rgba(248,113,113,0.22)';
+    banner.style.color      = type === 'success' ? '#86efac'                        : '#fca5a5';
+    if (iconEl) iconEl.textContent = icon;
+    if (textEl) textEl.textContent = text;
+}
+
+function _aiAssistHideStatus() {
+    const banner = document.getElementById('aiAssistStatusBanner');
+    if (banner) banner.classList.add('hidden');
+}
+
+/* ── FAB Radial Satellite Menu ───────────────────────────────────────────────
+   toggleFabMenu()      — toggled by the main + button; opens / closes the arc.
+   closeFabMenuIfOpen() — call from any code that should dismiss the menu as a
+                          side-effect (e.g. tab switches, overlay opens).
+   Outside-tap listener — capture-phase so it fires before any child onclick;
+                          skips the event if the target lives inside the FAB group.
+────────────────────────────────────────────────────────────────────────────── */
+let _fabMenuOpen = false;
+
+function toggleFabMenu() {
+    _fabMenuOpen = !_fabMenuOpen;
+
+    // Toggle .fab-open on every satellite
+    document.querySelectorAll('.fab-satellite').forEach(el =>
+        el.classList.toggle('fab-open', _fabMenuOpen)
+    );
+
+    // Cone glow
+    const glow = document.getElementById('fabConeGlow');
+    if (glow) glow.classList.toggle('fab-open', _fabMenuOpen);
+
+    // Rotate + icon 45° → becomes × when open; reset when closed
+    const icon = document.getElementById('fabPlusIcon');
+    if (icon) icon.style.transform = _fabMenuOpen ? 'rotate(45deg)' : '';
+}
+
+function closeFabMenuIfOpen() {
+    if (_fabMenuOpen) toggleFabMenu();
+}
+
+// Dismiss the FAB menu on any tap outside the FAB group
+document.addEventListener('click', function _fabOutsideClose(e) {
+    if (!_fabMenuOpen) return;
+    const mainBtn = document.getElementById('globalFloatingActionPlusButton');
+    const sats    = Array.from(document.querySelectorAll('.fab-satellite'));
+    const inGroup = (mainBtn && mainBtn.contains(e.target))
+                 || sats.some(s => s.contains(e.target));
+    if (!inGroup) toggleFabMenu();
+}, true /* capture phase — fires before child onclick handlers */);
 
 function toggleFormPriorityState() {
     const btn = document.getElementById('form-priority-btn');
@@ -692,22 +1129,45 @@ function setPriorityFilterState(shouldShowStarredOnly) {
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
 }
 
+// ── Priority capsule toggle — bounce animation ──────────────────────────────
+let _priorityToggleLocked = false;
+
+function _setPriorityToggleCell(el, isStarred) {
+    const track = document.getElementById('priorityToggleTrack');
+    if (!track) return;
+    if (isStarred) {
+        track.classList.add('is-starred');
+    } else {
+        track.classList.remove('is-starred');
+    }
+}
+
+function togglePriorityFilterCapsule() {
+    if (_priorityToggleLocked) return;
+    _priorityToggleLocked = true;
+
+    const isItinTab  = activeTabID === 'itinerary';
+    const curStarred = isItinTab
+        ? (typeof itinShowStarredOnly !== 'undefined' ? itinShowStarredOnly : false)
+        : showStarredOnly;
+    const nextStarred = !curStarred;
+
+    // Commit state immediately — _setPriorityToggleCell (called via
+    // syncPriorityFilterViewModeUI inside setPriorityFilterState) updates
+    // the pill content and the border glow in the same synchronous frame.
+    setPriorityFilterState(nextStarred);
+
+    // Release lock after the thumb slide animation completes (280ms + margin).
+    setTimeout(() => { _priorityToggleLocked = false; }, 320);
+}
+
 function syncPriorityFilterViewModeUI() {
-    const showAllBtn = document.getElementById('toggleOptionShowAll');
-    const starredBtn = document.getElementById('toggleOptionStarred');
-    if (!showAllBtn || !starredBtn) return;
-    // On the itinerary tab, reflect the itinerary-specific star filter;
-    // on all other tabs, reflect the saved-spots star filter.
+    // On the itinerary tab reflect the itinerary-specific star filter;
+    // on all other tabs reflect the saved-spots star filter.
     const isStarred = (activeTabID === 'itinerary')
         ? (typeof itinShowStarredOnly !== 'undefined' ? itinShowStarredOnly : false)
         : showStarredOnly;
-    if (isStarred) {
-        showAllBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500 bg-transparent";
-        starredBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10";
-    } else {
-        showAllBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10";
-        starredBtn.className = "flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500 bg-transparent";
-    }
+    _setPriorityToggleCell(null, isStarred);
 }
 
 function calculateSmartCityDefaultFilters() {
@@ -775,12 +1235,14 @@ function updateCityHUDTriggerButtonLabelText() {
     const btn = document.getElementById('cityFilterHUDTriggerBtn');
     const count = checkedCitiesStateArray.length;
     if (count === 0) {
-        textNode.innerText = "All Cities";
-        btn.className = "w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 truncate shadow-inner";
+        if (textNode) textNode.innerText = "All Cities";
+        if (btn) btn.className = "w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 truncate shadow-inner";
     } else {
-        textNode.innerText = count === 1 ? checkedCitiesStateArray[0] : `Cities (${count})`;
-        btn.className = "w-full bg-pink-500/10 border border-pink-500/30 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-pink-400 flex items-center justify-center gap-1 truncate shadow-inner";
+        if (textNode) textNode.innerText = count === 1 ? checkedCitiesStateArray[0] : `Cities (${count})`;
+        if (btn) btn.className = "w-full bg-pink-500/10 border border-pink-500/30 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-pink-400 flex items-center justify-center gap-1 truncate shadow-inner";
     }
+    // Sync the unified filter capsule badge whenever the city filter changes
+    if (typeof updateFilterCapsuleBadge === 'function') updateFilterCapsuleBadge();
 }
 
 function buildDynamicShoppingCheckboxList() {
@@ -811,6 +1273,13 @@ function handleCheckboxToggleEvent(checkboxElement) {
     const val = checkboxElement.value;
     if (checkboxElement.checked) { if(!checkedFilterStateArray.includes(val)) checkedFilterStateArray.push(val); }
     else { checkedFilterStateArray = checkedFilterStateArray.filter(i => i !== val); }
+    // Selecting a category is mutually exclusive with an itinerary day filter — clear it
+    // and also reset the city filter that was auto-applied alongside it.
+    if (activeItineraryFilter) {
+        activeItineraryFilter = null;
+        localStorage.removeItem('compass_itinerary_filter');
+        clearAllSelectedCityCheckboxes();
+    }
     localStorage.setItem('compass_active_filters', JSON.stringify(checkedFilterStateArray));
     updateHeaderBadgeHUDCounters(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
@@ -826,28 +1295,767 @@ function handleHideCompletedStateToggleCheckboxEvent(checkboxElement) {
 }
 
 function clearAllFilterCheckboxes() {
+    // Capture before clearing — city filter should only be reset when the itinerary
+    // filter was active (it auto-applied the city).  Pure category filters should
+    // leave the city filter untouched.
+    const _hadItinFilter = !!activeItineraryFilter;
     checkedFilterStateArray = [];
+    activeItineraryFilter = null;
     localStorage.setItem('compass_active_filters', JSON.stringify([]));
+    localStorage.removeItem('compass_itinerary_filter');
     const checkboxes = document.getElementById('checkboxScrollRegionContainer').querySelectorAll('input[type="checkbox"]');
     checkboxes.forEach(cb => cb.checked = false);
+    if (_hadItinFilter) clearAllSelectedCityCheckboxes();
     updateHeaderBadgeHUDCounters(); renderList();
     if(typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
     // Type filter cleared — no hidden spots possible, dismiss any active HUD
     if (typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
 }
 
+/**
+ * Apply an itinerary-day filter from the bottom-sheet selector.
+ * Called by itinerary.js after the user picks a day with spots.
+ *
+ * Side-effects:
+ *  - Clears category checkboxes (mutually exclusive with itinerary filter)
+ *  - Auto-applies the itinerary's city if no city filter is currently active
+ *  - Persists both filter states to localStorage
+ *  - Re-renders the list + map markers
+ *  - Triggers map auto-pan (delayed to let the sheet close animation finish)
+ */
+function applyItineraryDayFilter(itineraryId, dayIndex) {
+    // Clear category filter — mutually exclusive
+    checkedFilterStateArray = [];
+    localStorage.setItem('compass_active_filters', JSON.stringify([]));
+    const _cbs = document.getElementById('checkboxScrollRegionContainer')?.querySelectorAll('input[type="checkbox"]');
+    if (_cbs) _cbs.forEach(cb => cb.checked = false);
+
+    // Set itinerary filter
+    activeItineraryFilter = { itineraryId, dayIndex };
+    localStorage.setItem('compass_itinerary_filter', JSON.stringify(activeItineraryFilter));
+
+    // Auto-apply city if no city filter is currently active
+    if (checkedCitiesStateArray.length === 0 && typeof savedItineraries !== 'undefined') {
+        const _itin = savedItineraries.find(i => i.id === itineraryId);
+        if (_itin?.city) {
+            checkedCitiesStateArray = [_itin.city];
+            localStorage.setItem('compass_active_cities', JSON.stringify(checkedCitiesStateArray));
+            if (typeof updateCityHUDTriggerButtonLabelText === 'function') updateCityHUDTriggerButtonLabelText();
+            // Sync city checkbox UI if the city dropdown is open
+            const _cityBoxes = document.querySelectorAll('#cityHUDChecklistContainer input[type="checkbox"]');
+            _cityBoxes.forEach(cb => { cb.checked = checkedCitiesStateArray.includes(cb.value); });
+        }
+    }
+
+    // Re-render
+    updateHeaderBadgeHUDCounters();
+    renderList();
+    if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+
+    // Close both sheets
+    if (typeof closeItineraryFilterSheets === 'function') closeItineraryFilterSheets();
+
+    // Auto-pan map after sheet close animation completes (380 ms)
+    setTimeout(() => {
+        if (typeof autoFitMapToItineraryDaySpots === 'function') autoFitMapToItineraryDaySpots();
+    }, 380);
+}
+
 function updateHeaderBadgeHUDCounters() {
     const badge = document.getElementById('activeFilterBadgeCount');
     const btn = document.getElementById('filterMenuTriggerBtn');
-    if(!btn) return;
-    const count = checkedFilterStateArray.length;
+    // btn may be a ghost element (display:none) — guard defensively
+    const count = checkedFilterStateArray.length + (activeItineraryFilter ? 1 : 0);
     if(count > 0) {
         if(badge) { badge.innerText = count; badge.classList.remove('hidden'); }
-        btn.className = "w-full bg-pink-500/10 border border-pink-500/30 rounded-xl h-[38px] text-center text-[11px] font-black text-pink-400 flex items-center justify-center gap-1 shadow-inner";
+        if(btn) btn.className = "w-full bg-pink-500/10 border border-pink-500/30 rounded-xl h-[38px] text-center text-[11px] font-black text-pink-400 flex items-center justify-center gap-1 shadow-inner";
     } else {
         if(badge) badge.classList.add('hidden');
-        btn.className = "w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 shadow-inner";
+        if(btn) btn.className = "w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 shadow-inner";
     }
+    // Itinerary-specific badge on the Type Filter dropdown row
+    const itinBadge = document.getElementById('itinTypeBadge');
+    if (itinBadge) {
+        if (activeItineraryFilter) { itinBadge.classList.remove('hidden'); }
+        else { itinBadge.classList.add('hidden'); }
+    }
+    // Sync the unified filter capsule badge whenever type/itin filter changes
+    if (typeof updateFilterCapsuleBadge === 'function') updateFilterCapsuleBadge();
+}
+
+// ── Unified Filter Bottom Sheet ───────────────────────────────────────────────
+// City icon map — FA solid class for popular destinations (text-only fallback
+// for any city not listed here).
+const _CITY_FILTER_ICONS = {
+    'Paris':        'fa-tower-observation',
+    'London':       'fa-crown',
+    'Rome':         'fa-landmark-dome',
+    'New York':     'fa-city',
+    'Tokyo':        'fa-torii-gate',
+    'Barcelona':    'fa-sun',
+    'Amsterdam':    'fa-bicycle',
+    'Dubai':        'fa-star-and-crescent',
+    'Sydney':       'fa-opera',
+    'Bangkok':      'fa-bahai',
+    'Vienna':       'fa-music',
+    'Prague':       'fa-chess-rook',
+    'Istanbul':     'fa-mosque',
+    'Lisbon':       'fa-tram',
+    'Berlin':       'fa-tv',
+    'Madrid':       'fa-guitar',
+    'Athens':       'fa-building-columns',
+    'Cairo':        'fa-monument',
+    'Singapore':    'fa-map-pin',
+    'Mumbai':       'fa-gopuram',
+    'Delhi':        'fa-gopuram',
+};
+
+let _filterSheetCurrentPage = 1;
+
+function openUnifiedFilterSheet(event) {
+    if (event) event.stopPropagation();
+    killLiveSpeechBubbleHUDState();
+    closeFabMenuIfOpen();
+    closeAllActiveHUDDropdownOverlays();
+
+    // Always open on page 1 so the user sees and can change the city
+    _filterSheetCurrentPage = 1;
+    const page1 = document.getElementById('filterSheetPage1Scroll');
+    if (page1) page1.scrollTop = 0;        // reset scroll so top fade starts hidden
+    _buildFilterSheetCityGrid();           // → calls _filterSheetSyncFades via rAF
+    const inner = document.getElementById('filterSheetPagesInner');
+    if (inner) inner.style.transform = 'translateX(0)';
+    const headerIcon = document.getElementById('filterSheetHeaderIcon');
+    if (headerIcon) headerIcon.style.display = '';
+    const title = document.getElementById('filterSheetTitle');
+    if (title) title.textContent = 'Filters';
+
+    // Sync Apply button so it's correct the moment the sheet becomes visible
+    _filterSheetSyncApplyBtn();
+
+    const overlay = document.getElementById('unifiedFilterSheetOverlay');
+    const sheet   = document.getElementById('unifiedFilterSheet');
+    if (!overlay || !sheet) return;
+    overlay.classList.remove('hidden');
+    // Double rAF ensures the translate-100 starting value is painted before
+    // we remove it — same pattern used by the itinerary filter sheet.
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            sheet.style.transform = 'translateY(0)';
+        });
+    });
+}
+
+function closeUnifiedFilterSheet() {
+    const sheet   = document.getElementById('unifiedFilterSheet');
+    const overlay = document.getElementById('unifiedFilterSheetOverlay');
+    if (!sheet || !overlay) return;
+    sheet.style.transform = 'translateY(100%)';
+    setTimeout(() => overlay.classList.add('hidden'), 310);
+}
+
+function _filterSheetNavBack() {
+    const inner      = document.getElementById('filterSheetPagesInner');
+    const headerIcon = document.getElementById('filterSheetHeaderIcon');
+    const title      = document.getElementById('filterSheetTitle');
+
+    if (_filterSheetCurrentPage === 1) {
+        // Already on page 1 — back button closes the sheet
+        closeUnifiedFilterSheet();
+    } else if (_filterSheetCurrentPage === 4) {
+        // Page 4 → Page 3 (day list → itinerary list)
+        _filterSheetCurrentPage = 3;
+        if (inner) inner.style.transform = 'translateX(-50%)';
+        if (headerIcon) headerIcon.style.display = 'none';
+        if (title) title.textContent = 'Itineraries';
+        requestAnimationFrame(() => {
+            const el = document.getElementById('filterSheetPage3Scroll');
+            if (el) _filterSheetSyncFades(el);
+        });
+    } else if (_filterSheetCurrentPage === 3) {
+        // Page 3 → Page 2 (itinerary list → categories)
+        _filterSheetCurrentPage = 2;
+        if (inner) inner.style.transform = 'translateX(-25%)';
+        if (headerIcon) headerIcon.style.display = 'none';
+        const cityName = checkedCitiesStateArray.length ? checkedCitiesStateArray[0] : '';
+        if (title) title.textContent = cityName || 'Filters';
+        requestAnimationFrame(() => {
+            const el = document.getElementById('filterSheetPage2Scroll');
+            if (el) _filterSheetSyncFades(el);
+        });
+    } else {
+        // Page 2 → Page 1 (categories → city grid)
+        _filterSheetCurrentPage = 1;
+        if (inner) inner.style.transform = 'translateX(0)';
+        if (headerIcon) headerIcon.style.display = '';
+        if (title) title.textContent = 'Filters';
+        // Rebuild grid so the currently selected city tile reflects the live state
+        _buildFilterSheetCityGrid(); // already calls _filterSheetSyncFades via rAF
+    }
+}
+
+function _buildFilterSheetCityGrid() {
+    const grid = document.getElementById('filterSheetCityGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    // Collect unique cities from the appropriate data source
+    const citySet = new Set();
+    if (activeTabID === 'itinerary') {
+        if (typeof savedItineraries !== 'undefined') {
+            savedItineraries.forEach(it => {
+                if (it.city && String(it.city).trim()) citySet.add(it.city.trim());
+            });
+        }
+    } else {
+        travelSpots.forEach(spot => {
+            if (spot.city && String(spot.city).trim()) citySet.add(spot.city.trim());
+        });
+    }
+
+    // No "All Cities" tile — clearing city selection is done via "Clear All Filters"
+    citySet.forEach(city => {
+        const isActive = checkedCitiesStateArray.includes(city);
+        const iconKey  = _CITY_FILTER_ICONS[city];
+        const iconHtml = iconKey
+            ? `<i class="fa-solid ${iconKey} text-[11px] shrink-0"></i>`
+            : '';
+        const btn = document.createElement('button');
+        btn.className = 'filter-city-capsule' + (isActive ? ' fs-active' : '');
+        btn.style.cssText = '-webkit-tap-highlight-color:transparent';
+        btn.onclick = () => _filterSheetSelectCity(city);
+        btn.innerHTML = `${iconHtml}<span class="text-[11px] font-black truncate">${city}</span>`;
+        grid.appendChild(btn);
+    });
+
+    _filterSheetSyncCityBadge();
+    // Sync fades after the grid has been painted — rAF ensures layout is ready
+    requestAnimationFrame(() => {
+        const el = document.getElementById('filterSheetPage1Scroll');
+        if (el) _filterSheetSyncFades(el);
+    });
+}
+
+function _filterSheetSelectCity(city) {
+    if (city === null) {
+        // Clear city filter — stay on page 1
+        checkedCitiesStateArray = [];
+        localStorage.setItem('compass_active_cities', JSON.stringify([]));
+    } else {
+        // Detect whether the city actually changed
+        const _prevCity = checkedCitiesStateArray.length ? checkedCitiesStateArray[0] : null;
+        const _cityChanged = _prevCity !== city;
+
+        // Single-select: replace whatever was selected
+        checkedCitiesStateArray = [city];
+        localStorage.setItem('compass_active_cities', JSON.stringify(checkedCitiesStateArray));
+
+        // If the city changed, downstream filters (categories + itinerary) no longer
+        // apply to the new city — clear them automatically so stale data can't bleed through
+        if (_cityChanged && (checkedFilterStateArray.length > 0 || activeItineraryFilter)) {
+            checkedFilterStateArray = [];
+            activeItineraryFilter   = null;
+            localStorage.setItem('compass_active_filters', JSON.stringify([]));
+            localStorage.removeItem('compass_itinerary_filter');
+        }
+    }
+
+    // Keep ghost checkbox container in sync so legacy clear functions work
+    document.querySelectorAll('#cityHUDChecklistContainer input[type="checkbox"]')
+        .forEach(cb => { cb.checked = checkedCitiesStateArray.includes(cb.value); });
+
+    // updateCityHUDTriggerButtonLabelText also calls updateFilterCapsuleBadge (patched below)
+    updateCityHUDTriggerButtonLabelText();
+
+    if (activeTabID === 'itinerary') {
+        if (typeof renderItineraryMasterDashboardWorkspace === 'function')
+            renderItineraryMasterDashboardWorkspace();
+    } else {
+        renderList();
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+        if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+    }
+
+    if (city !== null && activeTabID !== 'itinerary') {
+        // Navigate to page 2: build categories for the chosen city, then slide
+        const page2 = document.getElementById('filterSheetPage2Scroll');
+        if (page2) page2.scrollTop = 0;    // reset scroll so top fade starts hidden
+        _buildFilterSheetCategoryList(city); // → calls _filterSheetSyncFades via rAF
+        _filterSheetCurrentPage = 2;
+        const inner = document.getElementById('filterSheetPagesInner');
+        if (inner) inner.style.transform = 'translateX(-25%)';
+        // On page 2 the sliders icon is replaced by the back chevron — hide it
+        const headerIcon = document.getElementById('filterSheetHeaderIcon');
+        if (headerIcon) headerIcon.style.display = 'none';
+        const title = document.getElementById('filterSheetTitle');
+        if (title) title.textContent = city;
+    } else if (city !== null && activeTabID === 'itinerary') {
+        // On the itinerary tab, category filters don't apply — just close the sheet
+        closeUnifiedFilterSheet();
+    } else {
+        // city === null: refresh the grid (no tile to highlight — clear via footer button)
+        _buildFilterSheetCityGrid();
+    }
+}
+
+/**
+ * Builds the innerHTML for a single category row.
+ * Left side:  category icon (same getCategoryIconClass helper used everywhere
+ *             in the app) + category name.
+ * Right side: pink check mark when active, empty checkbox outline when not.
+ * Kept in one place so both _buildFilterSheetCategoryList (initial render)
+ * and _filterSheetSelectCategory (in-place toggle) stay in sync.
+ */
+function _filterSheetCatRowHTML(cat, isActive) {
+    const iconCls = (typeof getCategoryIconClass === 'function')
+        ? getCategoryIconClass(cat)
+        : 'fa-location-dot text-slate-400';
+    const left  = `<span class="flex items-center gap-2 flex-1 min-w-0 pr-2">`
+                + `<i class="fa-solid ${iconCls} text-[13px] shrink-0"></i>`
+                + `<span class="text-[12px] font-semibold truncate">${cat}</span>`
+                + `</span>`;
+    const right = isActive
+        ? `<i class="fa-solid fa-check text-pink-400 text-[11px] shrink-0"></i>`
+        : `<div class="w-4 h-4 rounded-md border border-slate-600 shrink-0"></div>`;
+    return left + right;
+}
+
+function _buildFilterSheetCategoryList(city) {
+    const container = document.getElementById('filterSheetCategoryList');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Gather categories from spots in the selected city
+    const catSet = new Set();
+    travelSpots.forEach(spot => {
+        const spotCity = spot.city ? String(spot.city).trim() : '';
+        if (!city || spotCity === city) {
+            if (spot.category) {
+                spot.category.split(',').forEach(c => { if (c.trim()) catSet.add(c.trim()); });
+            }
+        }
+    });
+
+    if (catSet.size === 0) {
+        container.innerHTML = '<div class="text-slate-500 text-[11px] p-3 text-center">No categories found for this city</div>';
+    } else {
+        catSet.forEach(cat => {
+            const isActive = checkedFilterStateArray.includes(cat);
+            const btn = document.createElement('button');
+            btn.className = 'filter-category-row w-full text-left' + (isActive ? ' fs-active' : '');
+            btn.style.cssText = '-webkit-tap-highlight-color:transparent';
+            btn.onclick = () => _filterSheetSelectCategory(cat, btn);
+            btn.innerHTML = _filterSheetCatRowHTML(cat, isActive);
+            container.appendChild(btn);
+        });
+    }
+
+    _filterSheetSyncCategoryBadge();
+    _filterSheetSyncItinBadge();
+    // Sync fades after the list has been painted — rAF ensures layout is ready
+    requestAnimationFrame(() => {
+        const el = document.getElementById('filterSheetPage2Scroll');
+        if (el) _filterSheetSyncFades(el);
+    });
+}
+
+function _filterSheetSelectCategory(cat, btnEl) {
+    const idx = checkedFilterStateArray.indexOf(cat);
+    if (idx === -1) {
+        checkedFilterStateArray.push(cat);
+        // Category and itinerary day filters are mutually exclusive
+        if (activeItineraryFilter) {
+            activeItineraryFilter = null;
+            localStorage.removeItem('compass_itinerary_filter');
+        }
+    } else {
+        checkedFilterStateArray.splice(idx, 1);
+    }
+    localStorage.setItem('compass_active_filters', JSON.stringify(checkedFilterStateArray));
+
+    // Update the tapped row in-place — avoids rebuilding the whole list
+    const isActive = checkedFilterStateArray.includes(cat);
+    btnEl.className = 'filter-category-row w-full text-left' + (isActive ? ' fs-active' : '');
+    btnEl.innerHTML = _filterSheetCatRowHTML(cat, isActive);
+
+    _filterSheetSyncCategoryBadge();
+    _filterSheetSyncItinBadge();
+    // updateHeaderBadgeHUDCounters also calls updateFilterCapsuleBadge (patched below)
+    updateHeaderBadgeHUDCounters();
+    renderList();
+    if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+    if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
+}
+
+let _filterSheetSelectedItineraryId   = null;
+let _filterSheetSelectedItineraryName = null;
+
+function _filterSheetOpenItinList() {
+    // Navigate to page 3 (itinerary list) inside the unified sheet
+    const page3 = document.getElementById('filterSheetPage3Scroll');
+    if (page3) page3.scrollTop = 0;
+    _buildFilterSheetItineraryList();
+    _filterSheetCurrentPage = 3;
+    const inner = document.getElementById('filterSheetPagesInner');
+    if (inner) inner.style.transform = 'translateX(-50%)';
+    const headerIcon = document.getElementById('filterSheetHeaderIcon');
+    if (headerIcon) headerIcon.style.display = 'none';
+    const title = document.getElementById('filterSheetTitle');
+    if (title) title.textContent = 'Itineraries';
+}
+
+function _buildFilterSheetItineraryList() {
+    const container = document.getElementById('filterSheetItineraryList');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const selectedCity = checkedCitiesStateArray.length ? checkedCitiesStateArray[0] : null;
+    const itins = (typeof savedItineraries !== 'undefined' ? savedItineraries : [])
+        .filter(it => !selectedCity || (it.city && it.city.trim() === selectedCity));
+
+    if (itins.length === 0) {
+        container.innerHTML = '<div class="text-slate-500 text-[11px] p-3 text-center">No saved itineraries found' +
+            (selectedCity ? ' for ' + selectedCity : '') + '</div>';
+        requestAnimationFrame(() => {
+            const el = document.getElementById('filterSheetPage3Scroll');
+            if (el) _filterSheetSyncFades(el);
+        });
+        return;
+    }
+
+    itins.forEach(itin => {
+        const realDays = (itin.days || []).filter(d => !d?.isSuggested);
+        const isActive = activeItineraryFilter && activeItineraryFilter.itineraryId === itin.id;
+
+        const btn = document.createElement('button');
+        btn.style.cssText = '-webkit-tap-highlight-color:transparent';
+        btn.className = 'w-full text-left flex items-center gap-3 px-4 py-3.5 rounded-2xl border transition-all '
+            + (isActive
+                ? 'bg-pink-500/10 border-pink-500/30'
+                : 'bg-slate-900/60 border-slate-800/60');
+        btn.onclick = () => _filterSheetSelectItinerary(itin);
+
+        const iconPill = `<div class="flex items-center justify-center w-10 h-10 rounded-xl bg-pink-500/15 shrink-0">
+            <i class="fa-solid fa-route text-pink-400 text-[16px]"></i>
+        </div>`;
+        const textBlock = `<div class="flex-1 min-w-0">
+            <div class="text-[13px] font-black text-slate-200 truncate">${itin.title || 'Untitled'}</div>
+            <div class="text-[10px] text-slate-500 font-semibold mt-0.5">${realDays.length} day${realDays.length !== 1 ? 's' : ''}${itin.city ? ' · ' + itin.city : ''}</div>
+        </div>`;
+        const chevron = `<i class="fa-solid fa-chevron-right text-[10px] text-slate-500 shrink-0 opacity-60"></i>`;
+
+        btn.innerHTML = iconPill + textBlock + chevron;
+        container.appendChild(btn);
+    });
+
+    // Sync the page 3 badge on the banner (reuse itinBadge in page 2 is separate — add page3 badge)
+    const p3badge = document.getElementById('filterSheetItinListBadge');
+    if (p3badge) {
+        p3badge.classList.toggle('hidden', !activeItineraryFilter);
+    }
+
+    requestAnimationFrame(() => {
+        const el = document.getElementById('filterSheetPage3Scroll');
+        if (el) _filterSheetSyncFades(el);
+    });
+}
+
+function _filterSheetSelectItinerary(itin) {
+    _filterSheetSelectedItineraryId   = itin.id;
+    _filterSheetSelectedItineraryName = itin.title || 'Untitled';
+
+    // Set the page 4 context header
+    const nameEl = document.getElementById('filterSheetDayListItinName');
+    if (nameEl) nameEl.textContent = _filterSheetSelectedItineraryName;
+
+    const page4 = document.getElementById('filterSheetPage4Scroll');
+    if (page4) page4.scrollTop = 0;
+    _buildFilterSheetDayList(itin);
+
+    _filterSheetCurrentPage = 4;
+    const inner = document.getElementById('filterSheetPagesInner');
+    if (inner) inner.style.transform = 'translateX(-75%)';
+    const headerIcon = document.getElementById('filterSheetHeaderIcon');
+    if (headerIcon) headerIcon.style.display = 'none';
+    const title = document.getElementById('filterSheetTitle');
+    if (title) title.textContent = _filterSheetSelectedItineraryName;
+}
+
+function _buildFilterSheetDayList(itin) {
+    const container = document.getElementById('filterSheetDayList');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const realDays = (itin.days || []).filter(d => !d?.isSuggested);
+
+    if (realDays.length === 0) {
+        // Speech bubble empty state — mirrors existing itinerary filter empty state
+        container.innerHTML = `<div class="flex flex-col items-center justify-center gap-3 py-8 px-4">
+            <div class="w-12 h-12 rounded-full bg-slate-800/80 flex items-center justify-center">
+                <i class="fa-regular fa-comment-dots text-slate-500 text-[20px]"></i>
+            </div>
+            <div class="text-center">
+                <div class="text-[12px] font-black text-slate-400">No days yet</div>
+                <div class="text-[10px] text-slate-600 mt-1">Add days to this itinerary to filter by them.</div>
+            </div>
+        </div>`;
+        requestAnimationFrame(() => {
+            const el = document.getElementById('filterSheetPage4Scroll');
+            if (el) _filterSheetSyncFades(el);
+        });
+        return;
+    }
+
+    realDays.forEach((day, visIdx) => {
+        const realIdx   = itin.days.indexOf(day);
+        const isActive  = activeItineraryFilter &&
+                          activeItineraryFilter.itineraryId === itin.id &&
+                          activeItineraryFilter.dayIndex    === realIdx;
+
+        // Parse date for display
+        let dateLabel = '';
+        try {
+            if (day.date) {
+                const d = new Date(day.date);
+                dateLabel = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+            }
+        } catch(e) {}
+
+        const spotCount = (day.timeline || []).length;
+        const isEmpty   = spotCount === 0;
+
+        const btn = document.createElement('button');
+        btn.style.cssText = '-webkit-tap-highlight-color:transparent';
+        btn.className = 'w-full text-left flex items-center gap-3 px-4 py-3.5 rounded-2xl border transition-all '
+            + (isActive
+                ? 'bg-pink-500/10 border-pink-500/30'
+                : 'bg-slate-900/60 border-slate-800/60');
+
+        // Tapping an empty day does nothing (show speech bubble row but not clickable)
+        if (!isEmpty) {
+            btn.onclick = () => {
+                applyItineraryDayFilter(itin.id, realIdx);
+                closeUnifiedFilterSheet();
+            };
+        } else {
+            btn.style.opacity = '0.5';
+            btn.style.cursor  = 'default';
+        }
+
+        const iconPill = `<div class="flex items-center justify-center w-10 h-10 rounded-xl ${isEmpty ? 'bg-slate-800/60' : 'bg-pink-500/15'} shrink-0">
+            <i class="fa-solid ${isEmpty ? 'fa-comment-dots text-slate-500' : 'fa-calendar-day text-pink-400'} text-[15px]"></i>
+        </div>`;
+        const textBlock = `<div class="flex-1 min-w-0">
+            <div class="text-[13px] font-black text-slate-200">Day ${visIdx + 1}${dateLabel ? ' · ' + dateLabel : ''}</div>
+            <div class="text-[10px] text-slate-500 font-semibold mt-0.5">${isEmpty ? 'No spots yet' : spotCount + ' spot' + (spotCount !== 1 ? 's' : '')}</div>
+        </div>`;
+        const right = isActive
+            ? `<i class="fa-solid fa-check text-pink-400 text-[12px] shrink-0"></i>`
+            : `<i class="fa-solid fa-chevron-right text-[10px] text-slate-500 shrink-0 opacity-60"></i>`;
+
+        btn.innerHTML = iconPill + textBlock + right;
+        container.appendChild(btn);
+    });
+
+    requestAnimationFrame(() => {
+        const el = document.getElementById('filterSheetPage4Scroll');
+        if (el) _filterSheetSyncFades(el);
+    });
+}
+
+function _filterSheetClearAll() {
+    const _hadItinFilter = !!activeItineraryFilter;
+    checkedCitiesStateArray = [];
+    checkedFilterStateArray = [];
+    activeItineraryFilter   = null;
+    localStorage.setItem('compass_active_cities',  JSON.stringify([]));
+    localStorage.setItem('compass_active_filters', JSON.stringify([]));
+    localStorage.removeItem('compass_itinerary_filter');
+
+    // Sync any ghost checkboxes so legacy clear helpers stay consistent
+    document.querySelectorAll('#cityHUDChecklistContainer input[type="checkbox"]').forEach(cb => cb.checked = false);
+    document.querySelectorAll('#checkboxScrollRegionContainer input[type="checkbox"]').forEach(cb => cb.checked = false);
+
+    updateCityHUDTriggerButtonLabelText(); // → updateFilterCapsuleBadge
+    updateHeaderBadgeHUDCounters();        // → updateFilterCapsuleBadge
+
+    if (activeTabID === 'itinerary') {
+        if (typeof renderItineraryMasterDashboardWorkspace === 'function') renderItineraryMasterDashboardWorkspace();
+    } else {
+        renderList();
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+        if (_hadItinFilter && typeof clearHiddenPinsSystemHUD === 'function') clearHiddenPinsSystemHUD();
+    }
+
+    // Jump directly to page 1 (regardless of current depth) and rebuild the grid
+    _filterSheetCurrentPage = 1;
+    const _clrInner = document.getElementById('filterSheetPagesInner');
+    if (_clrInner) _clrInner.style.transform = 'translateX(0)';
+    const _clrIcon = document.getElementById('filterSheetHeaderIcon');
+    if (_clrIcon) _clrIcon.style.display = '';
+    const _clrTitle = document.getElementById('filterSheetTitle');
+    if (_clrTitle) _clrTitle.textContent = 'Filters';
+    _buildFilterSheetCityGrid();
+}
+
+// Scroll-fade helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Reads scrollTop / clientHeight / scrollHeight of a scrollable page div and
+ * updates the opacity of the two sibling fade overlays (.fs-fade-top-overlay
+ * and .fs-fade-btm-overlay) that live in the same relative wrapper.
+ *
+ * Call on every 'scroll' event AND once after content is (re)built so the
+ * initial state is always correct (e.g. content shorter than the viewport
+ * → both fades hidden; content taller → bottom fade shows immediately).
+ */
+function _filterSheetSyncFades(scrollEl) {
+    const wrap = scrollEl.parentElement;
+    if (!wrap) return;
+    const fadeTop = wrap.querySelector('.fs-fade-top-overlay');
+    const fadeBtm = wrap.querySelector('.fs-fade-btm-overlay');
+    const st       = scrollEl.scrollTop;
+    const atTop    = st <= 2;
+    const atBottom = st + scrollEl.clientHeight >= scrollEl.scrollHeight - 2;
+    if (fadeTop) fadeTop.style.opacity = atTop    ? '0' : '1';
+    if (fadeBtm) fadeBtm.style.opacity = atBottom ? '0' : '1';
+}
+
+// Badge sync helpers ──────────────────────────────────────────────────────────
+
+function _filterSheetSyncCityBadge() {
+    const badge = document.getElementById('filterSheetCityBadge');
+    if (!badge) return;
+    const n = checkedCitiesStateArray.length;
+    badge.textContent = n;
+    badge.classList.toggle('hidden', n === 0);
+}
+
+function _filterSheetSyncCategoryBadge() {
+    const badge = document.getElementById('filterSheetCategoryBadge');
+    if (!badge) return;
+    const n = checkedFilterStateArray.length;
+    badge.textContent = n;
+    badge.classList.toggle('hidden', n === 0);
+}
+
+function _filterSheetSyncItinBadge() {
+    const badge = document.getElementById('filterSheetItinBadge');
+    if (!badge) return;
+    badge.classList.toggle('hidden', !activeItineraryFilter);
+}
+
+/**
+ * Enable or disable the Apply button in the filter sheet footer.
+ * Apply is only meaningful when at least one filter is selected — otherwise
+ * it is visually muted and non-interactive via .fs-apply-disabled.
+ * Called from updateFilterCapsuleBadge (which fires on every filter change)
+ * and once on sheet open so the button always reflects the live state.
+ */
+function _filterSheetSyncApplyBtn() {
+    const btn = document.getElementById('filterSheetApplyBtn');
+    if (!btn) return;
+    const hasFilters = checkedCitiesStateArray.length > 0
+                    || checkedFilterStateArray.length > 0
+                    || !!activeItineraryFilter;
+    btn.classList.toggle('fs-apply-disabled', !hasFilters);
+}
+
+/**
+ * Sync the unified capsule button's label, badge dot, and active styling.
+ * Called from updateCityHUDTriggerButtonLabelText + updateHeaderBadgeHUDCounters
+ * so it stays consistent whenever any filter state changes.
+ */
+function updateFilterCapsuleBadge() {
+    const btn   = document.getElementById('filterUnifiedCapsuleBtn');
+    const badge = document.getElementById('filterCapsuleActiveBadge');
+    const wrap  = document.getElementById('filterCapsuleLabelWrap');
+    if (!btn || !badge || !wrap) return;
+
+    const cityCount  = checkedCitiesStateArray.length;
+    const catCount   = checkedFilterStateArray.length;
+    const itinActive = !!activeItineraryFilter;
+    const isActive   = cityCount > 0 || catCount > 0 || itinActive;
+
+    // Pink glow via CSS class
+    btn.classList.toggle('filter-capsule-active', isActive);
+
+    // ── No filters: restore static "Filter" label ────────────────────────────
+    if (!isActive) {
+        badge.classList.add('hidden');
+        wrap.innerHTML = '<span id="filterCapsuleLabel" class="block text-[11px] font-black whitespace-nowrap">Filter</span>';
+        _filterSheetSyncApplyBtn();
+        return;
+    }
+
+    // ── Build the ordered segment list ───────────────────────────────────────
+    const segments = [];
+
+    // 1. City
+    if (cityCount === 1) segments.push(checkedCitiesStateArray[0]);
+
+    // 2. All selected category names, comma-separated
+    if (catCount > 0) {
+        segments.push(checkedFilterStateArray.join(', '));
+    }
+
+    // 3. Itinerary title + Day
+    if (itinActive) {
+        const itin = (typeof savedItineraries !== 'undefined')
+            ? savedItineraries.find(i => i.id === activeItineraryFilter.itineraryId)
+            : null;
+        if (itin) {
+            segments.push(itin.title || 'Itinerary');
+            // Resolve visual day number (1-based count of non-suggested days)
+            if (typeof activeItineraryFilter.dayIndex === 'number') {
+                const realDays = (itin.days || []).filter(d => !d?.isSuggested);
+                const rawDay   = (itin.days || [])[activeItineraryFilter.dayIndex];
+                const visIdx   = rawDay ? realDays.indexOf(rawDay) + 1 : activeItineraryFilter.dayIndex + 1;
+                if (visIdx > 0) segments.push('Day ' + visIdx);
+            }
+        } else {
+            segments.push('Itinerary');
+        }
+    }
+
+    // Update badge count
+    const total = cityCount + catCount + (itinActive ? 1 : 0);
+    badge.textContent = total;
+    badge.classList.remove('hidden');
+
+    // ── Build label: measure first, then static or animated ─────────────────
+    const fullText = segments.join(' · ');
+
+    // Render a single invisible copy so we can measure its natural pixel width
+    // before committing to either a static or scrolling layout.
+    wrap.innerHTML = '<span id="_fcMeasure" class="text-[11px] font-bold whitespace-nowrap"'
+                   + ' style="display:inline-block;visibility:hidden;">' + fullText + '</span>';
+
+    requestAnimationFrame(() => {
+        const measureEl = document.getElementById('_fcMeasure');
+        const wrapWidth = wrap ? wrap.clientWidth : 0;
+        const textWidth = measureEl ? measureEl.scrollWidth : Infinity;
+
+        if (textWidth <= wrapWidth) {
+            // Fits entirely — show plain static text, no animation needed
+            wrap.innerHTML = '<span class="text-[11px] font-bold whitespace-nowrap"'
+                           + ' style="display:block;width:100%;">' + fullText + '</span>';
+        } else {
+            // Overflows — activate the looping ticker with pipe bookends
+            const paddedText = '|&nbsp;&nbsp;' + fullText + '&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
+            const dur = Math.max(8, Math.min(22, Math.round(fullText.length * 0.38)));
+            wrap.innerHTML =
+                '<div id="filterCapsuleTicker"'
+              + ' style="display:flex;width:max-content;will-change:transform;'
+              + 'animation:filterCapsuleScroll ' + dur + 's linear infinite;white-space:nowrap;">'
+              + '<span class="text-[11px] font-bold">' + paddedText + '</span>'
+              + '<span class="text-[11px] font-bold" aria-hidden="true">' + paddedText + '</span>'
+              + '</div>';
+        }
+    });
+
+    // Keep Apply button in sync with the live filter state
+    _filterSheetSyncApplyBtn();
 }
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -1034,6 +2242,7 @@ function getCategoryIconClass(category) {
     if (s.includes("photo"))     return "fa-camera-retro text-pink-500";
     if (s.includes("food"))      return "fa-utensils text-orange-500";
     if (s.includes("viewpoint")) return "fa-binoculars text-sky-500";
+    if (s.includes("landmark"))  return "fa-landmark text-yellow-500";
     if (s.includes("nature"))    return "fa-leaf text-emerald-500";
     if (s.includes("culture"))   return "fa-landmark text-violet-500";
     if (s.includes("shopping") || s.includes("shop")) return "fa-bag-shopping text-rose-500";
@@ -1332,6 +2541,30 @@ function hiddenPinsDrawerHasRemainingSpots() {
 // ── End Hidden Pins Alert Banner ─────────────────────────────────────────────
 
 function getFilteredDatasetRows() {
+    // ── Itinerary filter guard ────────────────────────────────────────────────
+    // If the referenced itinerary was deleted since the filter was saved, clear
+    // silently so the app doesn't get stuck in an empty-list state.
+    if (activeItineraryFilter) {
+        const _itins = (typeof savedItineraries !== 'undefined') ? savedItineraries : [];
+        const _refItin = _itins.find(i => i.id === activeItineraryFilter.itineraryId);
+        if (!_refItin) {
+            activeItineraryFilter = null;
+            localStorage.removeItem('compass_itinerary_filter');
+            // Also clear the city filter that was paired with this itinerary.
+            // State-only update here (no DOM) because we're inside a render cycle.
+            checkedCitiesStateArray = [];
+            localStorage.setItem('compass_active_cities', JSON.stringify([]));
+        }
+    }
+    // Pre-compute the rowid set for the selected day so the filter below is O(1).
+    let _itinDayRowIds = null;
+    if (activeItineraryFilter) {
+        const _itins = (typeof savedItineraries !== 'undefined') ? savedItineraries : [];
+        const _itin  = _itins.find(i => i.id === activeItineraryFilter.itineraryId);
+        const _day   = _itin?.days[activeItineraryFilter.dayIndex];
+        _itinDayRowIds = new Set((_day?.timeline || []).map(s => String(s.rowid)));
+    }
+
     return travelSpots.map(spot => {
         const latStr = spot.latitude ? String(spot.latitude).trim() : "";
         const lngStr = spot.longitude ? String(spot.longitude).trim() : "";
@@ -1361,6 +2594,10 @@ function getFilteredDatasetRows() {
     }).filter(s => {
         if (hideCompletedSpotsStateBool && (s.status || "").toLowerCase().trim() === "done") return false;
         if (showStarredOnly && !['high','🔥','must do','starred'].includes((s.priority || "").toLowerCase())) return false;
+        // Itinerary day filter takes priority over city/category filters — it is a
+        // direct rowId whitelist so city-string mismatches must not block spots.
+        // The done + starred guards above still apply.
+        if (_itinDayRowIds !== null) return _itinDayRowIds.has(String(s.rowid));
         if (checkedCitiesStateArray.length > 0 && !checkedCitiesStateArray.includes(s.city)) return false;
         if (checkedFilterStateArray.length > 0) {
             if (!s.category) return false;
@@ -1580,6 +2817,24 @@ function renderListAnimated(triggeredRowId, action, value) {
     if (action === 'toggle_priority' && value === 'Starred') {
         const cardEl = document.querySelector(`.dynamic-card-node[data-rowid="${strId}"]`);
         if (cardEl) {
+            // ── Instant visual update ─────────────────────────────────────────
+            // The list won't be rebuilt until animationend (~0.52 s later).
+            // Without this, the "Star" button stays frozen during the whole flash,
+            // making the tap feel sluggish.  We update the label and onclick NOW
+            // so the user sees "Unstar" the moment they tap.
+            const _starBtn = [...cardEl.querySelectorAll('button')].find(
+                b => b.textContent.includes('Star')
+            );
+            if (_starBtn) {
+                _starBtn.innerHTML = '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar';
+                // Update onclick so a second tap correctly unstarrs
+                _starBtn.setAttribute('onclick',
+                    `updateCloudAction(${strId}, 'toggle_priority', 'Normal')`);
+            }
+            // Add starred-gold-glow to card faces immediately
+            cardEl.querySelectorAll('.flip-card-front-face, .flip-card-back-face')
+                  .forEach(f => f.classList.add('starred-gold-glow'));
+
             cardEl.classList.add('card-flash-star');
             const frontFace = cardEl.querySelector('.flip-card-front-face');
             (frontFace || cardEl).addEventListener('animationend', () => {
@@ -1783,17 +3038,222 @@ function setupNetworkListeners() {
 }
 
 function updateNetworkStatusHUD() {
-    const indicator = document.getElementById('networkIndicator'); 
+    const indicator = document.getElementById('networkIndicator');
     const syncText = document.getElementById('syncText');
     if(!indicator || !syncText) return;
     if (navigator.onLine) {
-        indicator.className = "w-1.5 h-1.5 rounded-full bg-emerald-500"; 
-        syncText.className = "text-[9px] font-mono text-slate-500"; 
+        indicator.className = "w-1.5 h-1.5 rounded-full bg-emerald-500";
+        syncText.className = "text-[9px] font-mono text-slate-500";
         syncText.innerText = "Synced Live Data";
     } else {
-        indicator.className = "w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"; 
-        syncText.className = "text-[9px] font-mono text-amber-400 font-black tracking-wide"; 
+        indicator.className = "w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse";
+        syncText.className = "text-[9px] font-mono text-amber-400 font-black tracking-wide";
         syncText.innerText = "OFFLINE MODE";
+    }
+}
+
+/* ── User Greeting Capsule ────────────────────────────────────────────────────
+   Shows "Hey! <currentUser>" in the HUD capsule next to the refresh button.
+   If the text overflows the viewport, it enables a seamless marquee using the
+   same doubled-copy translateX(-50%) technique as the weather ticker.
+   Status dot: emerald = online, red + breathing pulse = offline.
+────────────────────────────────────────────────────────────────────────────── */
+function _updateUserStatusDot() {
+    const dot = document.getElementById('userOnlineStatusDot');
+    if (!dot) return;
+    const online = navigator.onLine;
+    dot.style.background = online ? '#10b981' : '#ef4444'; // emerald-500 / red-500
+    dot.classList.toggle('user-dot-offline-pulse', !online);
+}
+
+function updateUserGreetingCapsule() {
+    const name  = (currentUser || 'Guest').trim();
+    // One repeating unit: "Hey! Name  •  " (bullet separator)
+    const copy  = 'Hey! ' + name + '   •   ';
+
+    const ticker = document.getElementById('userGreetingTicker');
+    if (!ticker) return;
+
+    // Always run as a continuous bus-sign marquee.
+    // Two identical copies sit side-by-side; translateX(-50%) scrolls
+    // exactly one copy-width, then the loop restarts invisibly.
+    ticker.style.cssText = 'display:flex;width:max-content;will-change:transform;';
+    ticker.innerHTML =
+        '<span>' + copy + '</span>' +
+        '<span aria-hidden="true">' + copy + '</span>';
+
+    // Derive duration from rendered width so speed stays ~20 px/s.
+    // Minimum 7 s keeps very short names feeling leisurely.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        const oneW = ticker.scrollWidth / 2;
+        const dur  = Math.max(7, (oneW / 20)).toFixed(2);
+        ticker.style.animation = 'userGreetingScroll ' + dur + 's linear infinite';
+        _updateUserStatusDot();
+    }));
+}
+// Keep status dot live when connectivity changes
+window.addEventListener('online',  _updateUserStatusDot);
+window.addEventListener('offline', _updateUserStatusDot);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── HUD CYCLE CONTROLLER ────────────────────────────────────────────────────
+//
+// The slot below the app title cycles between two rows:
+//   Row 0 — Synced Live Data (networkIndicator + syncText)
+//   Row 1 — GPS Status      (compact gpsBadgeButton)
+//
+// A soft vertical translateY transition (defined in style.css on #hudCycleInner)
+// gives the slot-machine / jackpot roll feel.
+//
+// Priority rules:
+//   • GPS NOT active (syncing / off / error)  → GPS row persistent, no cycling
+//   • Manual sync in-flight                   → Sync row locked, no cycling
+//   • GPS badge recently tapped               → GPS row locked until modal closes
+//   • Normal (GPS active, no locks)           → 4 s per row, looping
+//
+// Zero changes to GPS logic, sync logic, or button handlers.
+// The hooks below are called by syncData() and map.js via typeof guards.
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _hudCycleTimer      = null;   // setInterval handle
+let _hudCycleIndex      = 0;      // 0 = sync row, 1 = GPS row
+let _hudCycleSyncLocked = false;  // true while a manual sync is in-flight
+let _hudCycleGpsPaused  = false;  // true while GPS badge interaction is active
+const _HUD_ROW_H        = 16;     // px — must match each row's height in the HTML
+const _HUD_CYCLE_MS     = 4000;   // ms each item stays visible before cycling
+
+/**
+ * Translate the #hudCycleInner wrapper to show the given row.
+ * @param {0|1} index
+ * @param {boolean} [instant]  if true, bypass the CSS transition for immediate snaps
+ */
+function _hudShowSlot(index, instant) {
+    const inner = document.getElementById('hudCycleInner');
+    if (!inner) return;
+    if (instant) {
+        inner.style.transition = 'none';
+        inner.style.transform  = `translateY(${-index * _HUD_ROW_H}px)`;
+        void inner.offsetHeight; // force reflow before re-enabling transition
+        inner.style.transition = '';
+    } else {
+        inner.style.transform = `translateY(${-index * _HUD_ROW_H}px)`;
+    }
+    _hudCycleIndex = index;
+}
+
+/**
+ * Returns true only when cycling is permitted.
+ * GPS must be in 'active' (emerald) state AND no sync/tap locks are active.
+ */
+function _hudCanCycle() {
+    if (_hudCycleSyncLocked || _hudCycleGpsPaused) return false;
+    const btn = document.getElementById('gpsBadgeButton');
+    // updateGpsHudStatus() in map.js sets 'emerald' colour when GPS is active.
+    return !!btn && btn.className.includes('emerald');
+}
+
+/** (Re)start the cycling setInterval. */
+function _hudStartCycle() {
+    _hudStopCycle();
+    _hudCycleTimer = setInterval(() => {
+        if (_hudCanCycle()) {
+            _hudShowSlot((_hudCycleIndex + 1) % 2, false);
+        } else if (_hudCycleIndex !== 1) {
+            // GPS is not active — snap to GPS row and hold there
+            _hudShowSlot(1, false);
+        }
+        // If already on GPS row and GPS is not active, nothing to do
+    }, _HUD_CYCLE_MS);
+}
+
+function _hudStopCycle() {
+    if (_hudCycleTimer) { clearInterval(_hudCycleTimer); _hudCycleTimer = null; }
+}
+
+// ── Public hooks ────────────────────────────────────────────────────────────
+
+/**
+ * Lock the HUD on the sync row while a manual sync is in-flight.
+ * Called by syncData() when isManualForce === true.
+ */
+function hudCycleLockForSync() {
+    _hudCycleSyncLocked = true;
+    _hudStopCycle();
+    _hudShowSlot(0, false); // show sync row ("Checking cloud...")
+}
+
+/**
+ * Release the sync lock once the result has settled.
+ * Shows the sync row for 2 s then resumes normal cycling.
+ * Called by syncData() in its finally block.
+ */
+function hudCycleUnlockAfterSync() {
+    _hudCycleSyncLocked = false;
+    _hudShowSlot(0, true); // snap to sync row (timer restarts from row 0)
+    setTimeout(() => {
+        if (_hudCycleSyncLocked) return; // another sync began — leave it alone
+        if (_hudCanCycle()) {
+            _hudStartCycle();
+        } else {
+            // GPS is not active — go to GPS row persistently
+            _hudShowSlot(1, false);
+            _hudStartCycle(); // keep interval alive to react when GPS goes active
+        }
+    }, 2000);
+}
+
+/**
+ * Pause cycling when the GPS badge is tapped.
+ * Stays paused until the GPS error modal closes, or 4 s if no modal opens
+ * (e.g. a plain recenter tap when GPS is already active).
+ * Called by handleGpsBadgeClickAction() in map.js.
+ */
+function hudCyclePauseForGpsTap() {
+    _hudCycleGpsPaused = true;
+    _hudStopCycle();
+    _hudShowSlot(1, false); // keep GPS row visible while the user is interacting
+
+    const modal = document.getElementById('gpsInstructionsOverlayModal');
+    if (!modal) {
+        // No modal element found — just resume after 4 s
+        setTimeout(() => { _hudCycleGpsPaused = false; if (!_hudCycleSyncLocked) _hudStartCycle(); }, 4000);
+        return;
+    }
+
+    // Give the modal 200 ms to open (it opens synchronously, but this guards
+    // any deferred show logic) then watch for it to close via MutationObserver.
+    setTimeout(() => {
+        if (!modal.classList.contains('hidden')) {
+            // Modal is open — release the pause when it hides
+            const obs = new MutationObserver(() => {
+                if (modal.classList.contains('hidden')) {
+                    obs.disconnect();
+                    _hudCycleGpsPaused = false;
+                    if (!_hudCycleSyncLocked) _hudStartCycle();
+                }
+            });
+            obs.observe(modal, { attributes: true, attributeFilter: ['class'] });
+        } else {
+            // Modal did not open (recenter tap) — resume after 4 s
+            setTimeout(() => { _hudCycleGpsPaused = false; if (!_hudCycleSyncLocked) _hudStartCycle(); }, 4000);
+        }
+    }, 200);
+}
+
+/**
+ * Notification hook called by updateGpsHudStatus() in map.js after every
+ * GPS state change.  Immediately snaps to the GPS row if GPS is not active,
+ * or lets the running interval pick up the active state naturally.
+ */
+function onHudGpsStateChange() {
+    if (!_hudCanCycle()) {
+        // GPS is off / syncing — show GPS row persistently
+        _hudStopCycle();
+        _hudShowSlot(1, false);
+        _hudStartCycle(); // keep running to react when GPS eventually goes active
+    } else {
+        // GPS just became active — ensure the interval is running
+        if (!_hudCycleTimer) _hudStartCycle();
     }
 }
 
@@ -2059,11 +3519,18 @@ function triggerClearItineraryData() {
                 itineraryItems = { '1': [], '2': [], '3': [] };
                 localStorage.setItem('compass_itinerary_cache', JSON.stringify(itineraryItems));
             }
-            // Also wipe saved itineraries list
+            // Also wipe saved itineraries list (both per-user and legacy flat key)
             if (typeof savedItineraries !== 'undefined') {
                 savedItineraries = [];
             }
             localStorage.removeItem('compass_saved_itineraries');
+            // Remove the per-user namespaced key so re-sync starts clean
+            if (currentUser) {
+                const _wipeSlug = currentUser.trim().toLowerCase().replace(/\s+/g, '_');
+                localStorage.removeItem(`compass_itins_${_wipeSlug}`);
+                // Mark sync state as done (not pending/syncing) so create UI shows immediately
+                localStorage.setItem(`compass_itin_sync_${_wipeSlug}`, JSON.stringify({ status: 'done', ts: Date.now() }));
+            }
             toggleSettingsMenu(false);
             if (typeof renderItineraryMasterDashboardWorkspace === 'function') {
                 renderItineraryMasterDashboardWorkspace();
@@ -2094,9 +3561,34 @@ function switchUserSessionViaSettings() {
         callback: () => {
             localStorage.setItem('compass_user', selectedUser);
             currentUser = selectedUser;
+            updateUserGreetingCapsule(); // update greeting + status dot for new user
+
+            // ── Immediately show the new user's cached itineraries (if any) ──
+            // This ensures the previous user's data is never visible to the
+            // incoming user, even for a single render frame.
+            if (typeof savedItineraries !== 'undefined') {
+                const _newKey = `compass_itins_${selectedUser.trim().toLowerCase().replace(/\s+/g, '_')}`;
+                savedItineraries = JSON.parse(localStorage.getItem(_newKey) || '[]');
+                // Reset active itinerary selection — it belongs to the old user
+                if (typeof activeItineraryId !== 'undefined') activeItineraryId = null;
+                if (typeof activeItineraryDayTracker !== 'undefined') activeItineraryDayTracker = 0;
+            }
+
+            // Re-render the itinerary view with the new user's cached data
+            // (or with loading state if they've never been synced on this device).
+            if (typeof renderItineraryMasterDashboardWorkspace === 'function') {
+                renderItineraryMasterDashboardWorkspace();
+            }
+
             toggleSettingsMenu(false);
-            syncData(true);
-            openSettingsResultModal('success', 'Session Switched', `Now signed in as "${selectedUser}". Data reloading...`);
+            openSettingsResultModal('success', 'Session Switched', `Now signed in as "${selectedUser}". Loading your itineraries...`);
+
+            // ── Background itinerary-only sync ────────────────────────────────
+            // travelSpots are shared across users (no need to re-fetch them).
+            // Only the itinerary data is user-specific, so we sync just that.
+            if (typeof loadUserItineraries === 'function') {
+                loadUserItineraries();
+            }
         }
     });
 }
@@ -2216,9 +3708,28 @@ function commitProfileRename() {
             // name immediately — before settings is closed.
             _fillUserDropdowns(registeredUsersList);
 
+            // ── Migrate per-user localStorage keys to the new username ──────
+            // Itinerary cache and sync state are keyed by username; copy them
+            // so cached data isn't lost after a rename.
+            const _oldSlug = oldName.trim().toLowerCase().replace(/\s+/g, '_');
+            const _newSlug = newName.trim().toLowerCase().replace(/\s+/g, '_');
+            const _oldItinKey  = `compass_itins_${_oldSlug}`;
+            const _newItinKey  = `compass_itins_${_newSlug}`;
+            const _oldSyncKey  = `compass_itin_sync_${_oldSlug}`;
+            const _newSyncKey  = `compass_itin_sync_${_newSlug}`;
+            const _cachedItins = localStorage.getItem(_oldItinKey);
+            if (_cachedItins) {
+                localStorage.setItem(_newItinKey, _cachedItins);
+                localStorage.removeItem(_oldItinKey);
+            }
+            // Reset sync state to 'syncing' so we verify cloud data under the new name
+            localStorage.setItem(_newSyncKey, JSON.stringify({ status: 'syncing', ts: Date.now() }));
+            localStorage.removeItem(_oldSyncKey);
+
             resetProfileRenameValidationUI();
             toggleSettingsMenu(false);
-            syncData(true);
+            // Only re-fetch itineraries (spots don't change on rename)
+            if (typeof loadUserItineraries === 'function') loadUserItineraries();
             openSettingsResultModal('success', 'Profile Updated', `Identity profile updated to "${newName}". Syncing resources...`);
         }
     });
@@ -2389,10 +3900,12 @@ window.onload = function() {
              return;
          }
 
-         if (!event.target.closest('#cityHUDDropdownPopupBox') && 
-             !event.target.closest('#filterCategoryDropdownPopupBox') && 
-             !event.target.closest('#cityFilterHUDTriggerBtn') && 
-             !event.target.closest('#filterMenuTriggerBtn')) {
+         if (!event.target.closest('#cityHUDDropdownPopupBox') &&
+             !event.target.closest('#filterCategoryDropdownPopupBox') &&
+             !event.target.closest('#cityFilterHUDTriggerBtn') &&
+             !event.target.closest('#filterMenuTriggerBtn') &&
+             !event.target.closest('#filterUnifiedCapsuleBtn') &&
+             !event.target.closest('#unifiedFilterSheet')) {
              closeAllActiveHUDDropdownOverlays();
          }
          

@@ -48,6 +48,7 @@
 }
 
 #noteExpandedOverlayScrollBox,
+#gesture-touch-container,
 #itineraryMasterListScroll,
 #itineraryTimelineScrollContainer,
 #settingsDrawerContentBody,
@@ -61,6 +62,14 @@
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;
+}
+
+/* Eliminate the iOS 300 ms tap delay on all interactive elements.
+   Without this, iOS Safari waits after every touchend to rule out a
+   double-tap zoom gesture before firing the click event.  Buttons and
+   anchors are never scroll/zoom targets so there is no reason to wait. */
+button, a, [role="button"] {
+    touch-action: manipulation;
 }
 
 body { 
@@ -176,8 +185,50 @@ body {
 /* .itin-done-block is kept for reference but no longer applied — see itinerary.js */
 .itin-done-block { filter: grayscale(80%) opacity(0.45); transition: filter 0.3s ease; }
 
+/* ── Itinerary map pin order badge ──────────────────────────────────────────
+   Small pill that sits top-right of each map marker when an itinerary day
+   filter is active.  Number = timeline position; green check = done spot. */
+.itin-map-badge {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    min-width: 14px;
+    height: 14px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+    color: #fff;
+    font-size: 8px;
+    font-weight: 900;
+    font-family: ui-monospace, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    border: 1.5px solid rgb(2, 6, 23);
+    z-index: 2;
+    line-height: 1;
+    pointer-events: none;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.itin-map-badge-done {
+    background: #10b981;
+    font-size: 7px;
+    min-width: 14px;
+}
+
 /* ── Itinerary timeline card — base transition (glow fade-in/out) ────────── */
-.itin-timeline-card { transition: border-color 0.3s ease, box-shadow 0.3s ease; }
+/* display:block + width:100% + box-sizing:border-box lock the card to its
+   containing block width regardless of badge presence/absence.  Without this,
+   WebKit can shrink-wrap the card to its content when badges appear/disappear,
+   causing visible width jitter.  min-width:0 prevents flex-child overflow blowout
+   if the card is ever placed in a flex row context. */
+.itin-timeline-card {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
 
 /* ── Itinerary card delete animation ────────────────────────────────────────
    Phase 1 (slingshot): card pulls 10px right then snaps back — 130ms.
@@ -292,9 +343,34 @@ body {
     }
 }
 
+/* ── Itinerary sync status — animated trailing dots ─────────────────────────
+   Used in the itineraryEmptyStateLanding when an itinerary fetch is in-flight.
+   Three .itin-sync-dot spans blink in sequence with staggered delays.         */
+@keyframes itinSyncDotBlink {
+    0%, 80%, 100% { opacity: 0.2; }
+    40%           { opacity: 1;   }
+}
+.itin-sync-dot {
+    display: inline-block;
+    animation: itinSyncDotBlink 1.4s infinite ease-in-out;
+}
+.itin-sync-dot:nth-child(2) { animation-delay: 0.2s; }
+.itin-sync-dot:nth-child(3) { animation-delay: 0.4s; }
+
 /* Free Subtle GPS Crosshairs Pulse Keyframes Animation */
 .subtle-gps-pulse {
     animation: crosshairPulseAnimation 1.4s ease-in-out infinite;
+}
+
+/* ── HUD Cycle Slot ─────────────────────────────────────────────────────────
+   The container below the app title that alternates between "Synced Live
+   Data" and "GPS Status" via a soft vertical slot-scroll animation.
+   #hudCycleSlot clips the overflow; #hudCycleInner is the scrollable track. */
+#hudCycleInner {
+    display:          flex;
+    flex-direction:   column;
+    will-change:      transform;
+    transition:       transform 0.45s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 @keyframes crosshairPulseAnimation {
@@ -642,3 +718,443 @@ body {
 .card-flash-star.itin-master-card   { animation: listCardStarFlash 0.52s ease-out forwards; }
 /* Smooth glow transition on itinerary master cards (mirrors itin-timeline-card rule at line 180) */
 .itin-master-card { transition: border-color 0.3s ease, box-shadow 0.3s ease; }
+
+/* ── Itinerary Filter Drawers ────────────────────────────────────────────────
+   Two stacked top-anchored drawers: itinerary selection (z-[300]) and day
+   selection (z-[310]).  Each drawer slides DOWN from the top of the screen —
+   translateY(-100%) → translateY(0).  Spring cubic-bezier on entry; snappy
+   ease-in on exit.  Open state toggled by adding/removing .itin-sheet-open.
+────────────────────────────────────────────────────────────────────────── */
+.itin-filter-sheet-panel {
+    transform: translateY(-100%);
+    transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+    will-change: transform;
+}
+.itin-filter-sheet-panel.itin-sheet-open {
+    transform: translateY(0);
+}
+.itin-filter-sheet-backdrop {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.28s ease;
+}
+.itin-filter-sheet-backdrop.itin-sheet-open {
+    opacity: 1;
+    pointer-events: all;
+}
+
+/* ── FAB Radial Satellite Menu ──────────────────────────────────────────────
+   Three satellite buttons fan out in a circular arc above the main "+" FAB.
+   All satellites start hidden at the + button's centre (transform origin) and
+   translate to their arc positions when .fab-open is added.
+
+   Stagger direction:
+     Opening  → camera first (0 ms), pencil (70 ms), scissors (140 ms)
+     Closing  → scissors first (0 ms), pencil (55 ms), camera (110 ms)
+
+   The cone glow is a fixed radial-gradient div anchored to the viewport
+   bottom-left, centred on the + button position, fading in with the menu.
+────────────────────────────────────────────────────────────────────────── */
+
+/* Cone glow — sits one z-level below satellites.
+   Div is 340×300 px anchored at bottom:0 left:0.
+   + button centre in div coords: x=40px, y=300-120=180px.
+   Ellipse is sized to softly cover the full R=110 px arc. */
+#fabConeGlow {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 340px;
+    height: 300px;
+    background:
+        radial-gradient(ellipse 300px 270px at 40px 180px,
+            rgba(236, 72, 153, 0.20) 0%,
+            rgba(139, 92, 246, 0.10) 44%,
+            transparent 68%);
+    pointer-events: none;
+    z-index: 448;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+}
+#fabConeGlow.fab-open { opacity: 1; }
+
+/* ── Satellite buttons ──────────────────────────────────────────────────── */
+.fab-satellite {
+    position:        fixed;
+    /* Default closed position: centred on the + button (40 px, 120 px from bottom).
+       left = 40 - 20 (half of 40 px satellite) = 20 px
+       bottom: CSS "bottom" = distance from viewport bottom to element's bottom edge
+               = button-centre-from-bottom (120) - half-satellite (20) = 100 px      */
+    left:            20px;
+    bottom:          100px;
+    width:           40px;
+    height:          40px;
+    border-radius:   50%;
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    color:           #e2e8f0;
+    background:      rgba(15, 23, 42, 0.93);
+    border:          1px solid rgba(148, 163, 184, 0.14);
+    box-shadow:      0 6px 20px rgba(0, 0, 0, 0.55), 0 1px 4px rgba(0, 0, 0, 0.35);
+    -webkit-tap-highlight-color: transparent;
+    /* Closed state */
+    transform:       scale(0);
+    opacity:         0;
+    pointer-events:  none;
+    z-index:         451;
+    /* Closing transition — snappy ease-in; reverse stagger via per-ID delays below */
+    transition:      transform 0.22s cubic-bezier(0.4, 0, 1, 1),
+                     opacity   0.18s ease;
+    will-change:     transform, opacity;
+}
+
+/* Per-button arc vectors — all on R ≈ 76 px, evenly spaced at 27° intervals.
+   Angles measured from horizontal (positive-x axis), sweeping CCW:
+     #fabSat1 (camera)  → 101°   tx = 76·cos 101° ≈ -15 px   ty = -76·sin 101° ≈ -75 px
+     #fabSat2 (pencil)  →  74°   tx = 76·cos  74° ≈ +21 px   ty = -76·sin  74° ≈ -73 px
+     #fabSat3 (notepad) →  47°   tx = 76·cos  47° ≈ +52 px   ty = -76·sin  47° ≈ -56 px   */
+/* True quarter-circle, R = 75 px, 45° uniform spacing.
+   Verified centre-to-centre = 57.4 px (edge gap ≈ 17 px) between every pair.
+   Arc sweeps from straight-up (90°) → 45° diagonal → horizontal-right (0°),
+   mirroring the bottom-left corner and curving toward the nav bar.
+     90° → tx=  0  ty=-75   camera  straight up, clears left edge at 20 px
+     45° → tx=+53  ty=-53   pencil  45° diagonal upper-right
+      0° → tx=+75  ty=  0   notepad horizontal right, bottom edge 100 px above nav  */
+#fabSat1 { --fab-tx:   0px; --fab-ty: -75px; }   /* camera  — straight up    (90°) */
+#fabSat2 { --fab-tx:  53px; --fab-ty: -53px; }   /* pencil  — 45° diagonal   (45°) */
+#fabSat3 { --fab-tx:  75px; --fab-ty:   0px; }   /* notepad — horizontal right (0°) */
+
+/* Pencil gets a faint brand-tinted border — it's the primary action */
+#fabSat2 { border-color: rgba(236, 72, 153, 0.28); }
+
+/* ── Closing stagger (reverse: scissors→pencil→camera) ──────────────────── */
+#fabSat3 { transition-delay: 0.00s; }
+#fabSat2 { transition-delay: 0.05s; }
+#fabSat1 { transition-delay: 0.10s; }
+
+/* ── Open state ─────────────────────────────────────────────────────────── */
+.fab-satellite.fab-open {
+    transform:      translate(var(--fab-tx), var(--fab-ty)) scale(1);
+    opacity:        1;
+    pointer-events: auto;
+    /* Opening transition — spring bounce */
+    transition:     transform 0.42s cubic-bezier(0.34, 1.56, 0.64, 1),
+                    opacity   0.28s ease;
+}
+
+/* Opening stagger (outward: camera→pencil→scissors) */
+#fabSat1.fab-open { transition-delay: 0.00s; }
+#fabSat2.fab-open { transition-delay: 0.07s; }
+#fabSat3.fab-open { transition-delay: 0.14s; }
+
+/* Plus icon rotation when the menu is open */
+#fabPlusIcon {
+    display:    inline-block;
+    transition: transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ── User Greeting Capsule ──────────────────────────────────────────────────
+   Ticker: same doubled-copy translateX(-50%) technique as the weather widget.
+   JS sets the animation only when the greeting text overflows the viewport.
+
+   Offline dot: soft breathing pulse between full opacity and ~30%, giving a
+   gentle "disconnected" signal without being alarming.
+────────────────────────────────────────────────────────────────────────── */
+@keyframes userGreetingScroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+
+/* ── Filter Capsule HUD — active-state marquee ticker ───────────────────────
+   Same doubled-copy technique as weather ticker and user greeting: two
+   identical text copies side-by-side; translateX(0 → -50%) scrolls exactly
+   one copy's width so the restart is seamless with no jump or gap.          */
+@keyframes filterCapsuleScroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+
+/* AI Assist notepad modal — submit button spinner */
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* AI Assist — processing panel animations */
+
+/* Expanding / fading ring around the wand icon */
+@keyframes aiAssistRingPulse {
+    0%   { transform: scale(1);    opacity: 0.65; }
+    50%  { transform: scale(1.22); opacity: 0.12; }
+    100% { transform: scale(1);    opacity: 0.65; }
+}
+
+/* Gentle float + tilt for the wand icon */
+@keyframes aiAssistIconFloat {
+    0%, 100% { transform: translateY(0)   rotate(0deg);  }
+    50%       { transform: translateY(-5px) rotate(-10deg); }
+}
+
+/* Pulse glow on the active step dot */
+@keyframes aiAssistStepDotPulse {
+    0%, 100% { box-shadow: 0 0 0 0   rgba(124, 58, 237, 0.55); }
+    50%       { box-shadow: 0 0 0 7px rgba(124, 58, 237, 0);    }
+}
+
+@keyframes userDotOfflinePulse {
+    0%, 100% { opacity: 1;    }
+    50%       { opacity: 0.28; }
+}
+
+.user-dot-offline-pulse {
+    animation: userDotOfflinePulse 1.8s ease-in-out infinite;
+}
+
+/* ── Priority capsule toggle pills ─────────────────────────────────────────
+   Named classes avoid Tailwind CDN JIT scan issues when className is set
+   dynamically from JS.  Sized to never shift the capsule width.
+────────────────────────────────────────────────────────────────────────── */
+
+/* ── Capsule container base state (also governs the EXIT transition) ─────────
+   overflow:hidden clips the inner pill to the border-radius, preventing the
+   semi-transparent background from bleeding through the rounded corners
+   (white/light cast artefact on WebKit / iOS).
+   The transition here is the SLOW fade-out path: it fires when
+   .priority-capsule-starred is REMOVED (Starred → All), so the outer glow
+   dissolves over 1.2 s rather than snapping off. ─────────────────────────── */
+/* ── Sliding star toggle ───────────────────────────────────────────────────
+   Track: fixed-size dark pill — never reflows the layout.
+   Thumb: absolute half-width block that glides L↔R with spring easing.
+   State driven by .is-starred class toggled on #priorityToggleTrack.
+   ──────────────────────────────────────────────────────────────────────── */
+
+/* ── Track ── */
+#priorityToggleTrack {
+    position: relative;
+    width: 100%;
+    height: 30px;
+    background: rgba(2, 6, 23, 0.88);             /* near-black smoked glass */
+    border: 1px solid rgba(51, 65, 85, 0.50);
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    /* slow fade-out on deactivate; snap-on handled by .is-starred below */
+    transition: border-color 1.0s ease, box-shadow 1.0s ease;
+}
+
+/* Amber border glow when starred — fast snap-on (0.20 s) */
+#priorityToggleTrack.is-starred {
+    border-color: rgba(245, 158, 11, 0.58);
+    box-shadow:   0 0 10px rgba(245, 158, 11, 0.32),
+                  0 0  4px rgba(245, 158, 11, 0.18);
+    transition: border-color 0.20s ease, box-shadow 0.20s ease;
+}
+
+/* ── Track labels (always rendered; sit above the thumb via z-index) ── */
+/* Defined separately so each ID appears only once and avoids duplicate-selector warnings */
+#priorityLabelAll {
+    flex: 1;
+    text-align: center;
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 1;
+    position: relative;
+    z-index: 2;
+    pointer-events: none;
+    transition: color 0.22s ease;
+    color: #e2e8f0;   /* slate-200 — active (default state) */
+}
+#priorityLabelStar {
+    flex: 1;
+    text-align: center;
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 1;
+    position: relative;
+    z-index: 2;
+    pointer-events: none;
+    transition: color 0.22s ease;
+    color: #475569;   /* slate-600 — dim (default state) */
+}
+
+/* Starred: flip the brightness */
+#priorityToggleTrack.is-starred #priorityLabelAll  { color: #475569; }
+#priorityToggleTrack.is-starred #priorityLabelStar { color: #ffffff; }
+
+/* ── Sliding thumb ── */
+#priorityToggleThumb {
+    position: absolute;
+    top:    2px;
+    left:   2px;
+    width:  calc(50% - 3px);
+    height: calc(100% - 4px);
+    border-radius: 999px;
+    background: rgba(71, 85, 105, 0.70);          /* neutral slate — "All" state */
+    z-index: 1;
+    transition: left        0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+                background  0.22s ease,
+                box-shadow  0.22s ease;
+}
+
+/* Thumb slides right and glows amber when starred */
+#priorityToggleTrack.is-starred #priorityToggleThumb {
+    left:       calc(50% + 1px);
+    background: #f59e0b;                          /* amber-500 */
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.65),
+                0 0  4px rgba(245, 158, 11, 0.35);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UNIFIED FILTER BOTTOM SHEET
+   Replaces the old city-filter (col-span-6) + type-filter (col-span-3)
+   buttons with one col-span-9 capsule that opens a 2-page sliding sheet.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Capsule button — active (any filter is set) */
+#filterUnifiedCapsuleBtn.filter-capsule-active {
+    background:   rgba(236, 72, 153, 0.10);   /* pink-500/10 */
+    border-color: rgba(236, 72, 153, 0.30);
+    color:        #f472b6;                     /* pink-400   */
+}
+
+/* Sheet overlay + panel */
+#unifiedFilterSheetOverlay {
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+}
+
+#unifiedFilterSheet {
+    /* Sheet slides up from off-screen; JS sets transform directly */
+    transition: transform 0.30s cubic-bezier(0.32, 0.72, 0, 1);
+    left: 0; right: 0;     /* stretch across viewport width */
+    margin: 0 auto;        /* centre within max-width on wide screens */
+}
+
+/* Two-page sliding container */
+#filterSheetPagesInner {
+    transition: transform 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ── City grid tile ──────────────────────────────────────────────────────── */
+.filter-city-capsule {
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    gap:             6px;
+    padding:         10px 12px;
+    border-radius:   12px;
+    background:      rgba(30, 41, 59, 0.70);    /* slate-800/70 */
+    border:          1px solid rgba(51, 65, 85, 0.80);
+    color:           #cbd5e1;                   /* slate-300   */
+    transition:      background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+.filter-city-capsule:active {
+    background: rgba(51, 65, 85, 0.60);
+}
+.filter-city-capsule.fs-active {
+    background:   rgba(236, 72, 153, 0.12);
+    border-color: rgba(236, 72, 153, 0.40);
+    color:        #f472b6;
+}
+
+/* ── Category row ────────────────────────────────────────────────────────── */
+.filter-category-row {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+    padding:         10px 12px;
+    border-radius:   12px;
+    background:      rgba(30, 41, 59, 0.50);
+    border:          1px solid rgba(51, 65, 85, 0.60);
+    color:           #94a3b8;                   /* slate-400 */
+    transition:      background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+.filter-category-row:active {
+    background: rgba(51, 65, 85, 0.50);
+}
+.filter-category-row.fs-active {
+    background:   rgba(236, 72, 153, 0.10);
+    border-color: rgba(236, 72, 153, 0.35);
+    color:        #f472b6;
+}
+
+/* ── Itinerary banner card ───────────────────────────────────────────────── */
+/* Prominent, double-height banner — communicates "tap to open itineraries"  */
+.filter-itin-row {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+    padding:         16px 16px;
+    border-radius:   16px;
+    background:      linear-gradient(
+                         135deg,
+                         rgba(236, 72, 153, 0.16) 0%,
+                         rgba(244, 63,  94, 0.10) 100%
+                     );
+    border:          1px solid rgba(236, 72, 153, 0.32);
+    color:           #f472b6;
+    transition:      background 0.15s ease, border-color 0.15s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+.filter-itin-row:active {
+    background:    rgba(236, 72, 153, 0.26);
+    border-color:  rgba(236, 72, 153, 0.50);
+}
+
+/* ── Filter sheet — scroll-fade edge overlays ────────────────────────────
+   Positioned absolutely inside each page's relative shell.
+   JS drives opacity (0 ↔ 1) so the transition is always smooth.
+   pointer-events:none ensures taps/swipes pass through to the list below.
+   ───────────────────────────────────────────────────────────────────────── */
+.fs-fade-overlay {
+    position:       absolute;
+    left:           0;
+    right:          0;
+    height:         44px;
+    pointer-events: none;
+    z-index:        20;
+    transition:     opacity 0.22s ease;
+}
+/* Top fade — hidden by default (we always open at scroll-top) */
+.fs-fade-top-overlay {
+    top:        0;
+    background: linear-gradient(to bottom, rgb(15, 23, 42) 0%, transparent 100%);
+    opacity:    0;
+}
+/* Bottom fade — starts visible; _filterSheetSyncFades corrects after build */
+.fs-fade-btm-overlay {
+    bottom:     0;
+    background: linear-gradient(to top, rgb(15, 23, 42) 0%, transparent 100%);
+    opacity:    1;
+}
+
+/* ── Filter sheet Apply button ─────────────────────────────────────────── */
+/* Matches the "Swap Active User" button art style: violet→pink gradient, white text */
+#filterSheetApplyBtn {
+    background: linear-gradient(to right, #7c3aed, #db2777); /* violet-600 → pink-600 */
+    color:      #ffffff;
+    border:     none;
+}
+#filterSheetApplyBtn:active {
+    opacity: 0.82;
+}
+/* Disabled state: muted slate — toggled by JS via .fs-apply-disabled */
+#filterSheetApplyBtn.fs-apply-disabled {
+    background:   rgba(15, 23, 42, 0.50);
+    border:       1px solid rgba(51, 65, 85, 0.30);
+    color:        #334155; /* slate-700 */
+    pointer-events: none;
+}
+
+/* ── AI Assist Smart Search input ──────────────────────────────────────── */
+#aiAssistFilterInput::placeholder {
+    color: #475569; /* slate-600 */
+}
+#aiAssistFilterInput:focus {
+    border-color: rgba(139, 92, 246, 0.45);
+    box-shadow:   0 0 0 2px rgba(139, 92, 246, 0.12);
+    outline:      none;
+}

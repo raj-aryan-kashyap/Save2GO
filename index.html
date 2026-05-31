@@ -87,16 +87,49 @@
                     <i class="fa-solid fa-map-pin text-xl bg-clip-text text-transparent bg-gradient-to-tr from-pink-500 to-violet-500 filter drop-shadow-[0_2px_8px_rgba(236,72,153,0.3)] rotate-12 transform origin-bottom-left"></i>
                     <span class="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500 tracking-tight">Save2Go</span>
                 </h1>
-                <div class="flex items-center gap-1.5 mt-0.5 pl-0.5">
-                    <span id="networkIndicator" class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
-                    <span id="syncText" class="text-[9px] font-mono text-slate-500 whitespace-nowrap">Cache Loading...</span>
+                <!-- ── HUD Cycle Slot ──────────────────────────────────────────────────
+                     Cycles between Row 0 (Synced Live Data) and Row 1 (GPS Status)
+                     via a soft vertical translateY animation controlled by aap.js.
+                     overflow:hidden clips the inactive row out of view.           -->
+                <div id="hudCycleSlot" class="mt-0.5 pl-0.5 relative z-[60]" style="height:16px;overflow:hidden;">
+                    <div id="hudCycleInner">
+                        <!-- Row 0 — Synced Live Data -->
+                        <div class="flex items-center gap-1.5" style="height:16px;">
+                            <span id="networkIndicator" class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"></span>
+                            <span id="syncText" class="text-[9px] font-mono text-slate-500 whitespace-nowrap">Cache Loading...</span>
+                        </div>
+                        <!-- Row 1 — GPS Status (compact inline; styled by updateGpsHudStatus) -->
+                        <div class="flex items-center" style="height:16px;">
+                            <button id="gpsBadgeButton" onclick="handleGpsBadgeClickAction(event);" class="flex items-center gap-1.5 text-red-400 cursor-pointer rounded px-1.5 py-px bg-slate-800/60 border border-red-900/40 transition-colors active:bg-slate-700/80" style="-webkit-tap-highlight-color:transparent;">
+                                <span id="gpsIconFrame" class="text-[9px] flex items-center justify-center">
+                                    <i class="fa-solid fa-location-crosshairs"></i>
+                                </span>
+                                <span id="gpsBadgeText" class="text-[9px] font-mono font-black uppercase whitespace-nowrap">GPS Off</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="flex items-center gap-2">
-                <button id="gpsBadgeButton" onclick="handleGpsBadgeClickAction(event);" class="h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-red-500/10 border-red-500/20 text-red-400 cursor-pointer relative z-[60] transition-colors">
-                    <span id="gpsIconFrame" class="text-[11px] flex items-center justify-center"><i class="fa-solid fa-location-crosshairs text-red-400"></i></span>
-                    <span id="gpsBadgeText">GPS Off</span>
-                </button>
+
+                <!-- ── User greeting capsule ────────────────────────────────────────
+                     Person icon (with online/offline status dot) + "Hey! <name>".
+                     Text scrolls as a seamless marquee when the name is too long.  -->
+                <div id="userGreetingCapsule" class="flex items-center gap-1.5 py-2 px-2.5 h-8 rounded-xl bg-slate-800/60 border border-slate-700/50 relative z-[60] max-w-[120px]" style="min-width:0;">
+                    <!-- Person icon + status dot -->
+                    <div class="relative shrink-0 leading-[0]">
+                        <i class="fa-solid fa-circle-user text-slate-400 text-sm leading-none"></i>
+                        <span id="userOnlineStatusDot"
+                              class="absolute -top-[3px] -right-[3px] w-[6px] h-[6px] rounded-full bg-emerald-500"
+                              style="border:1.5px solid rgb(15,23,42);"></span>
+                    </div>
+                    <!-- Scrolling text viewport — soft fade on both edges for bus-sign feel -->
+                    <div id="userGreetingViewport" class="overflow-hidden flex-1 min-w-0"
+                         style="-webkit-mask-image:linear-gradient(to right,transparent 0%,#000 18%,#000 72%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,#000 18%,#000 72%,transparent 100%);">
+                        <div id="userGreetingTicker" class="text-[10px] font-semibold text-slate-300 whitespace-nowrap">Hey!</div>
+                    </div>
+                </div>
+
                 <button id="manualSyncCloudBtn" onclick="syncData(true)" class="p-2 rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs transition-transform duration-200 active:scale-95 relative z-[60]">
                     <div id="syncButtonIconFrame" class="inline-block"><i class="fa-solid fa-arrows-rotate"></i></div>
                 </button>
@@ -107,19 +140,47 @@
         </div>
         
         <div class="grid grid-cols-12 gap-2 items-center relative">
-            <div id="priorityFilterContainer" class="col-span-5 bg-slate-950 p-1 rounded-xl border border-slate-800/80 flex h-[38px] relative overflow-hidden transition-all duration-200">
-                <button onclick="setPriorityFilterState(false)" id="toggleOptionShowAll" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-amber-400 bg-amber-500/10">Show All</button>
-                <button onclick="setPriorityFilterState(true)" id="toggleOptionStarred" class="flex-1 text-center text-[10px] font-black tracking-wide rounded-lg text-slate-500">Starred</button>
+            <!-- ── Priority capsule toggle ──────────────────────────────────────
+                 Single cell; state commits immediately and the new label
+                 bounces in.  Amber border glow tracks the "Starred" state.
+                 togglePriorityFilterCapsule() in aap.js drives the logic. -->
+            <!-- Sliding star toggle — dark track with a thumb that glides L↔R -->
+            <div id="priorityFilterContainer"
+                 class="col-span-3 h-[38px] flex items-center cursor-pointer select-none"
+                 onclick="togglePriorityFilterCapsule()"
+                 style="-webkit-tap-highlight-color:transparent">
+                <div id="priorityToggleTrack">
+                    <!-- Sliding thumb (z-index 1, behind labels) -->
+                    <div id="priorityToggleThumb"></div>
+                    <!-- Track labels — always visible, colour driven by .is-starred on parent -->
+                    <span id="priorityLabelAll">All</span>
+                    <i    id="priorityLabelStar" class="fa-solid fa-star"></i>
+                </div>
             </div>
-            <div class="col-span-4 relative">
-                <button id="cityFilterHUDTriggerBtn" onclick="toggleCityDropdownOverlayMenu(event)" class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-2 text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 truncate shadow-inner transition-all duration-200">
-                    <span id="cityHUDTriggerText" class="truncate">All Cities</span><span>▼</span>
+            <!-- ── Unified Filter Capsule ───────────────────────────────────────────
+                 Opens a 2-page bottom sheet: City grid → Category list.
+                 Replaces the old separate city (col-span-6) + type (col-span-3) buttons.
+                 openUnifiedFilterSheet() in aap.js drives the logic. -->
+            <div class="col-span-9 relative">
+                <button id="filterUnifiedCapsuleBtn" onclick="openUnifiedFilterSheet(event)"
+                        class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-3 text-[11px] font-black text-slate-300 flex items-center gap-1.5 shadow-inner transition-all duration-200"
+                        style="-webkit-tap-highlight-color:transparent">
+                    <i class="fa-solid fa-location-dot text-[10px] shrink-0"></i>
+                    <!-- Marquee wrapper — JS populates with either a static span or a
+                         looping doubled-ticker when filters are active -->
+                    <div id="filterCapsuleLabelWrap" class="flex-1 overflow-hidden min-w-0">
+                        <span id="filterCapsuleLabel" class="block text-[11px] font-black whitespace-nowrap">Filter</span>
+                    </div>
+                    <span id="filterCapsuleActiveBadge" class="hidden bg-pink-600 text-white font-black text-[9px] rounded-full px-1.5 py-0.5 shrink-0"></span>
+                    <i class="fa-solid fa-chevron-down text-[8px] shrink-0"></i>
                 </button>
             </div>
-            <div class="col-span-3 relative">
-                <button id="filterMenuTriggerBtn" onclick="toggleFilterDropdownOverlayMenu(event)" class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] text-center text-[11px] font-black text-slate-300 flex items-center justify-center gap-1 shadow-inner transition-all duration-200">
-                    <span>Type</span><span>▼</span><span id="activeFilterBadgeCount" class="hidden px-1.5 py-0.5 bg-pink-600 text-white font-black text-[9px] rounded-full">0</span>
-                </button>
+            <!-- Ghost: legacy button IDs kept in DOM so existing JS references
+                 (updateCityHUDTriggerButtonLabelText, updateHeaderBadgeHUDCounters,
+                  switchMasterMenuDashboardTab, etc.) never throw null-ref errors. -->
+            <div style="display:none" aria-hidden="true">
+                <button id="cityFilterHUDTriggerBtn"><span id="cityHUDTriggerText"></span></button>
+                <button id="filterMenuTriggerBtn"><span id="activeFilterBadgeCount"></span></button>
             </div>
         </div>
     </div>
@@ -135,11 +196,13 @@
 
             <div id="filterCategoryDropdownPopupBox" class="absolute right-4 w-52 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-2 hidden pointer-events-auto flex flex-col max-h-80 overflow-hidden">
                 <div class="border-b border-slate-800 pb-1.5 mb-1.5 shrink-0">
-                    <button onclick="toggleItineraryChildDropdownMenu(event)" class="w-full text-left text-[11px] font-black text-pink-400 flex items-center justify-between py-1 px-1.5 rounded bg-pink-500/5 hover:bg-pink-500/10 border border-pink-500/10">
-                        <span><i class="fa-solid fa-route mr-1.5"></i> Itinerary Quick Drop</span>
-                        <span id="itinChildCaretNode">▶</span>
+                    <button onclick="openItineraryFilterSheet()" class="w-full text-left text-[11px] font-black text-pink-400 flex items-center justify-between py-1 px-1.5 rounded bg-pink-500/5 active:bg-pink-500/15 border border-pink-500/10" style="-webkit-tap-highlight-color:transparent;">
+                        <span><i class="fa-solid fa-route mr-1.5"></i> Itinerary</span>
+                        <div class="flex items-center gap-1.5 pointer-events-none">
+                            <span id="itinTypeBadge" class="hidden px-1.5 py-0.5 bg-pink-600 text-white font-black text-[9px] rounded-full">1</span>
+                            <i class="fa-solid fa-chevron-right text-pink-400/60 text-[9px]"></i>
+                        </div>
                     </button>
-                    <div id="itineraryChildSelectorMenuBucket" class="hidden mt-1.5 pl-1 space-y-1 max-h-32 overflow-y-auto subtle-scrollbar border-l border-slate-800"></div>
                 </div>
                 <div class="overflow-y-auto subtle-scrollbar flex-1 max-h-64 pb-1 pr-1 space-y-1 text-xs text-slate-300 font-semibold" id="checkboxScrollRegionContainer"></div>
                 <div class="sticky bottom-0 bg-slate-900 pt-2 border-t border-slate-850 shrink-0 space-y-2 text-center pb-1" id="stickyDropdownFreezePanel">
@@ -150,8 +213,197 @@
         </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         UNIFIED FILTER BOTTOM SHEET
+         2-page sliding layout:  Page 1 = City grid   |   Page 2 = Categories
+         JS: openUnifiedFilterSheet / closeUnifiedFilterSheet in aap.js
+         ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="unifiedFilterSheetOverlay"
+         class="fixed inset-0 z-[900] bg-black/50 hidden"
+         onclick="closeUnifiedFilterSheet()"></div>
+
+    <div id="unifiedFilterSheet"
+         class="fixed bottom-0 left-0 right-0 z-[901] bg-slate-900 rounded-t-2xl shadow-2xl overflow-hidden max-w-md mx-auto"
+         style="max-height:85vh; transform:translateY(100%);">
+
+        <!-- Drag handle -->
+        <div class="flex justify-center pt-3 pb-1">
+            <div class="w-10 h-1 bg-slate-700 rounded-full"></div>
+        </div>
+
+        <!-- Header row — left-aligned title with icon; red X matches Settings style -->
+        <div class="flex items-center gap-2 px-4 pt-1 pb-3 border-b border-slate-800/80">
+            <!-- Back chevron: always visible; on page 1 it closes the sheet -->
+            <button id="filterSheetBackBtn" onclick="_filterSheetNavBack()"
+                    class="w-8 h-8 flex items-center justify-center text-slate-400 active:text-slate-200 rounded-lg shrink-0"
+                    style="-webkit-tap-highlight-color:transparent">
+                <i class="fa-solid fa-chevron-left text-[13px]"></i>
+            </button>
+            <!-- Sliders icon: visible on page 1, hidden on page 2 -->
+            <i id="filterSheetHeaderIcon" class="fa-solid fa-sliders text-pink-400 text-[13px] shrink-0"></i>
+            <!-- Title: left-aligned, fills remaining space -->
+            <span id="filterSheetTitle" class="flex-1 text-[16px] font-black text-slate-200 truncate">Filters</span>
+            <!-- Close: Settings art style — red rounded pill -->
+            <button onclick="closeUnifiedFilterSheet()"
+                    class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold shrink-0"
+                    style="-webkit-tap-highlight-color:transparent">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+
+        <!-- Pages (sliding) — 400% wide flex row, inner shifted by JS -->
+        <div id="filterSheetPagesContainer" class="overflow-hidden">
+            <div id="filterSheetPagesInner" class="flex" style="width:400%;">
+
+                <!-- ── Page 1 : City grid ─────────────────────────────────── -->
+                <!-- Relative shell lets the fade overlays anchor to the visible viewport -->
+                <div style="flex:0 0 25%; width:25%; position:relative;">
+                    <div id="filterSheetPage1Scroll"
+                         class="overflow-y-auto subtle-scrollbar px-4 py-3"
+                         style="max-height:calc(85vh - 160px);"
+                         onscroll="_filterSheetSyncFades(this)">
+
+                        <!-- ── AI Assist Smart Search ─────────────────────── -->
+                        <div class="mb-4 rounded-2xl border border-violet-500/25 overflow-hidden"
+                             style="background:linear-gradient(135deg,rgba(139,92,246,0.11) 0%,rgba(236,72,153,0.07) 100%);">
+                            <!-- Title row -->
+                            <div class="flex items-center gap-2 px-3.5 pt-3 pb-1.5">
+                                <div class="flex items-center justify-center w-6 h-6 rounded-lg shrink-0"
+                                     style="background:rgba(139,92,246,0.22);">
+                                    <i class="fa-solid fa-wand-magic-sparkles text-violet-400 text-[10px]"></i>
+                                </div>
+                                <span class="text-[12px] font-black text-violet-200 tracking-tight">AI Assist Smart Search</span>
+                            </div>
+                            <!-- Hint row -->
+                            <div class="flex items-start gap-2 px-3.5 pb-2.5">
+                                <i class="fa-solid fa-circle-question text-violet-500/60 text-[10px] mt-0.5 shrink-0"></i>
+                                <span class="text-[10px] font-medium text-slate-500 leading-relaxed">Ask AI to filter based on your keyword. Paste/Type full sentence or keyword.</span>
+                            </div>
+                            <!-- Input + Send row -->
+                            <div class="flex items-center gap-2 px-3 pb-3">
+                                <input id="aiAssistFilterInput"
+                                       type="text"
+                                       placeholder="Quiet garden, near Eiffel Tower…"
+                                       autocomplete="off"
+                                       class="flex-1 bg-slate-950/70 border border-slate-700/50 rounded-xl px-3 py-2 text-[11px] text-slate-300 outline-none transition-colors"
+                                       style="-webkit-appearance:none;appearance:none;">
+                                <button class="flex items-center justify-center w-8 h-8 rounded-xl border shrink-0 transition-all"
+                                        style="background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.32);-webkit-tap-highlight-color:transparent"
+                                        onclick="return false;"
+                                        aria-label="AI search (coming soon)">
+                                    <i class="fa-solid fa-paper-plane text-violet-400 text-[11px]"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- ── City grid ──────────────────────────────────── -->
+                        <div class="flex items-center justify-between mb-2.5">
+                            <span class="text-[11px] font-black text-slate-500 uppercase tracking-widest">Select City</span>
+                            <span id="filterSheetCityBadge"
+                                  class="hidden bg-pink-600 text-white px-1.5 py-0.5 rounded-full text-[9px] font-black">1</span>
+                        </div>
+                        <div id="filterSheetCityGrid" class="grid grid-cols-2 gap-2 pb-3"></div>
+                    </div>
+                    <div class="fs-fade-overlay fs-fade-top-overlay"></div>
+                    <div class="fs-fade-overlay fs-fade-btm-overlay"></div>
+                </div>
+
+                <!-- ── Page 2 : Categories + Itinerary ───────────────────── -->
+                <!-- Relative shell lets the fade overlays anchor to the visible viewport -->
+                <div style="flex:0 0 25%; width:25%; position:relative;">
+                    <div id="filterSheetPage2Scroll"
+                         class="overflow-y-auto subtle-scrollbar px-4 py-3"
+                         style="max-height:calc(85vh - 160px);"
+                         onscroll="_filterSheetSyncFades(this)">
+
+                        <!-- Itinerary special row (always at top of page 2) -->
+                        <div class="mb-4">
+                            <div class="text-[11px] font-black text-slate-500 uppercase tracking-widest mb-2">Filter by Itinerary</div>
+                            <button onclick="_filterSheetOpenItinList()"
+                                    class="filter-itin-row w-full text-left"
+                                    style="-webkit-tap-highlight-color:transparent">
+                                <!-- Route icon in a pill container -->
+                                <div class="flex items-center justify-center w-11 h-11 rounded-xl bg-pink-500/20 shrink-0">
+                                    <i class="fa-solid fa-route text-pink-400 text-[20px]"></i>
+                                </div>
+                                <!-- Two-row text block -->
+                                <div class="flex-1 mx-3">
+                                    <div class="text-[13px] font-black text-pink-200 leading-tight">Itinerary Days</div>
+                                    <div class="text-[11px] font-medium text-pink-400/75 mt-1 leading-snug">Click here to see your saved itinerary days.</div>
+                                </div>
+                                <!-- Badge + chevron -->
+                                <div class="flex items-center gap-1.5 shrink-0">
+                                    <span id="filterSheetItinBadge"
+                                          class="hidden bg-pink-600 text-white px-1.5 py-0.5 rounded-full text-[9px] font-black">1</span>
+                                    <i class="fa-solid fa-chevron-right text-[11px] opacity-60"></i>
+                                </div>
+                            </button>
+                        </div>
+
+                        <!-- Categories -->
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-[11px] font-black text-slate-500 uppercase tracking-widest">Filter by Categories</span>
+                                <span id="filterSheetCategoryBadge"
+                                      class="hidden bg-pink-600 text-white px-1.5 py-0.5 rounded-full text-[9px] font-black">0</span>
+                            </div>
+                            <div id="filterSheetCategoryList" class="space-y-1.5 pb-3"></div>
+                        </div>
+                    </div><!-- /filterSheetPage2Scroll -->
+                    <div class="fs-fade-overlay fs-fade-top-overlay"></div>
+                    <div class="fs-fade-overlay fs-fade-btm-overlay"></div>
+                </div><!-- /page 2 relative shell -->
+
+                <!-- ── Page 3 : Itinerary list ────────────────────────────── -->
+                <div style="flex:0 0 25%; width:25%; position:relative;">
+                    <div id="filterSheetPage3Scroll"
+                         class="overflow-y-auto subtle-scrollbar px-4 py-3"
+                         style="max-height:calc(85vh - 160px);"
+                         onscroll="_filterSheetSyncFades(this)">
+                        <div class="flex items-center justify-between mb-2.5">
+                            <span class="text-[11px] font-black text-slate-500 uppercase tracking-widest">Select Itinerary</span>
+                            <span id="filterSheetItinListBadge"
+                                  class="hidden bg-pink-600 text-white px-1.5 py-0.5 rounded-full text-[9px] font-black">1</span>
+                        </div>
+                        <div id="filterSheetItineraryList" class="space-y-2 pb-3"></div>
+                    </div>
+                    <div class="fs-fade-overlay fs-fade-top-overlay"></div>
+                    <div class="fs-fade-overlay fs-fade-btm-overlay"></div>
+                </div><!-- /page 3 relative shell -->
+
+                <!-- ── Page 4 : Day list ──────────────────────────────────── -->
+                <div style="flex:0 0 25%; width:25%; position:relative;">
+                    <div id="filterSheetPage4Scroll"
+                         class="overflow-y-auto subtle-scrollbar px-4 py-3"
+                         style="max-height:calc(85vh - 160px);"
+                         onscroll="_filterSheetSyncFades(this)">
+                        <div class="flex items-center justify-between mb-2.5">
+                            <span id="filterSheetDayListItinName"
+                                  class="text-[11px] font-black text-slate-500 uppercase tracking-widest truncate flex-1 pr-2">Days</span>
+                        </div>
+                        <div id="filterSheetDayList" class="space-y-2 pb-3"></div>
+                    </div>
+                    <div class="fs-fade-overlay fs-fade-top-overlay"></div>
+                    <div class="fs-fade-overlay fs-fade-btm-overlay"></div>
+                </div><!-- /page 4 relative shell -->
+
+            </div><!-- /filterSheetPagesInner -->
+        </div><!-- /filterSheetPagesContainer -->
+
+        <!-- Footer: Reset + Apply -->
+        <div class="px-4 py-3 border-t border-slate-800/80 flex gap-2.5">
+            <button onclick="_filterSheetClearAll()"
+                    class="flex-1 py-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-[11px] font-black uppercase tracking-wider active:bg-rose-500/20 transition-all"
+                    style="-webkit-tap-highlight-color:transparent">Reset</button>
+            <button id="filterSheetApplyBtn" onclick="closeUnifiedFilterSheet()"
+                    class="flex-1 py-2.5 rounded-xl text-[11px] font-bold text-white uppercase tracking-wider transition-all fs-apply-disabled"
+                    style="-webkit-tap-highlight-color:transparent">Apply</button>
+        </div>
+    </div>
+    <!-- /UNIFIED FILTER BOTTOM SHEET -->
+
     <div class="flex-1 relative w-full h-full overflow-hidden z-10">
-        
+
         <div id="view-map" class="view-panel active-view">
             <div id="map-render-element" class="w-full h-full bg-slate-950 absolute inset-0 z-10"></div>
             
@@ -256,14 +508,18 @@
                 </div>
             </div>
 
-            <div id="gesture-touch-container" class="flex-1 min-h-0 overflow-y-auto w-full subtle-scrollbar px-4 pt-2 flex flex-col gap-2 select-none">
-                <div id="pullToRefreshIndicatorHUD" class="w-full h-0 overflow-hidden flex items-center justify-center text-[11px] font-black tracking-wider text-slate-600 transition-all duration-200 bg-slate-950 shrink-0">
-                    <span class="animate-pulse">Refresh...</span>
+            <!-- Relative wrapper creates a stacking context so the bottom fade
+                 sits above the GPU-composited scroll layer in iOS Safari. -->
+            <div class="flex-1 relative min-h-0" style="z-index:0">
+                <div id="gesture-touch-container" class="h-full overflow-y-auto w-full subtle-scrollbar px-4 pt-2 pb-24 flex flex-col gap-2 select-none">
+                    <div id="pullToRefreshIndicatorHUD" class="w-full h-0 overflow-hidden flex items-center justify-center text-[11px] font-black tracking-wider text-slate-600 transition-all duration-200 bg-slate-950 shrink-0">
+                        <span class="animate-pulse">Refresh...</span>
+                    </div>
                 </div>
+                <!-- Bottom fade — cards dissolve smoothly as they scroll toward the nav bar -->
+                <div class="absolute bottom-0 left-0 right-0 h-20 pointer-events-none z-30"
+                     style="background:linear-gradient(to top,#020617 0%,transparent 100%)"></div>
             </div>
-            <!-- Bottom fade — cards dissolve smoothly as they scroll toward the nav bar -->
-            <div class="absolute bottom-0 left-0 right-0 h-20 pointer-events-none z-30"
-                 style="background:linear-gradient(to top,#020617 0%,transparent 100%)"></div>
         </div>
 
         <div id="view-itinerary" class="view-panel bg-slate-950 overflow-hidden">
@@ -276,8 +532,9 @@
                         <i class="fa-solid fa-plus"></i> New Itinerary
                     </button>
                 </div>
-                <!-- Scroll area wrapper — relative so the fade overlays can sit above it -->
-                <div class="flex-1 relative min-h-0">
+                <!-- Scroll area wrapper — relative + z-index:0 creates a stacking context
+                     so the fade overlays paint above the GPU-composited scroll layer. -->
+                <div class="flex-1 relative min-h-0" style="z-index:0">
                 <!-- Top fade — cards dissolve cleanly as they scroll under the header -->
                 <div class="absolute top-0 left-0 right-0 h-8 pointer-events-none z-10"
                      style="background:linear-gradient(to bottom,#020617 0%,transparent 100%)"></div>
@@ -314,9 +571,11 @@
                                 </span>
                             </div>
                             <!-- CTA -->
-                            <button onclick="openItineraryCreationDrawerForm()" class="w-full py-3.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-2xl text-xs font-black uppercase tracking-wider text-white shadow-lg shadow-pink-600/25 active:scale-95 transition-transform flex items-center justify-center gap-2">
+                            <button id="itinCreateFirstBtn" onclick="openItineraryCreationDrawerForm()" class="w-full py-3.5 bg-gradient-to-r from-pink-600 to-purple-600 rounded-2xl text-xs font-black uppercase tracking-wider text-white shadow-lg shadow-pink-600/25 active:scale-95 transition-transform flex items-center justify-center gap-2 disabled:opacity-40 disabled:pointer-events-none disabled:scale-100">
                                 <i class="fa-solid fa-plus"></i> New Itinerary
                             </button>
+                            <!-- Sync status message: shown while fetching or on error -->
+                            <div id="itinSyncStatusMsg" class="hidden mt-2 min-h-[1.5rem] flex items-center justify-center"></div>
                         </div>
                     </div>
                 </div>
@@ -371,8 +630,9 @@
                     </div>
                 </div>
                 
-                <!-- Wrapper provides the stacking context for the non-scrolling fade overlay -->
-                <div class="flex-1 relative min-h-0">
+                <!-- Wrapper: relative + z-index:0 creates a stacking context so fade
+                     overlays paint above the GPU-composited iOS scroll layer. -->
+                <div class="flex-1 relative min-h-0" style="z-index:0">
                     <div id="itineraryTimelineScrollContainer" class="h-full overflow-y-auto subtle-scrollbar pt-2 pb-32 bg-slate-950">
                     </div>
                     <!-- Soft top fade — masks the hard cut between the header and scrolling content -->
@@ -422,11 +682,11 @@
                 </div>
                 <div class="flex flex-col gap-2 shrink-0">
                     <div class="flex gap-2">
-                        <a id="trayOpenReferenceBtn" href="#" target="_blank" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
+                        <a id="trayOpenReferenceBtn" href="about:blank" target="_blank" rel="noopener noreferrer" class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">Open Reference</a>
                         <button id="trayActionBtn" onclick="handleAdaptiveDirectionClick(this, event)" class="px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 gap-1.5"><i class="fa-solid fa-map text-sm"></i> Directions</button>
                     </div>
                     <div id="trayTicketRow" class="hidden">
-                        <a id="trayTicketBtn" href="#" target="_blank" class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>
+                        <a id="trayTicketBtn" href="about:blank" target="_blank" rel="noopener noreferrer" class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>
                     </div>
                     <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center">
                         <button id="trayFlipToBackBtn" class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
@@ -478,8 +738,37 @@
         </button>
     </div>
 
-    <button id="globalFloatingActionPlusButton" onclick="toggleQuickAddModal(true)" class="fixed bottom-24 left-4 w-12 h-12 bg-gradient-to-tr from-pink-500 to-violet-600 rounded-full flex items-center justify-center text-white shadow-2xl shadow-pink-500/20 z-[450] border border-white/10 text-lg">
-        <i class="fa-solid fa-plus"></i>
+    <!-- ── FAB Radial Satellite Menu ──────────────────────────────────────
+         Cone glow + three satellites are all rendered before the main button
+         so the main button's z-index (452) always sits on top.
+         Satellites start collapsed at the + button's centre; JS / CSS animate
+         them outward when #globalFloatingActionPlusButton is tapped.        -->
+
+    <!-- Cone glow: radial gradient anchored to viewport bottom-left corner -->
+    <div id="fabConeGlow" aria-hidden="true"></div>
+
+    <!-- Satellite 1 — Camera (upper-left arc, ~100°) — currently no-op -->
+    <button id="fabSat1" class="fab-satellite" aria-label="Add from camera" onclick="">
+        <i class="fa-solid fa-camera text-[12px]"></i>
+    </button>
+
+    <!-- Satellite 2 — Pencil (upper arc, ~75°) — opens spot-add form -->
+    <button id="fabSat2" class="fab-satellite" aria-label="Add spot manually"
+            onclick="toggleFabMenu(); toggleQuickAddModal(true);">
+        <i class="fa-solid fa-pencil text-[12px]"></i>
+    </button>
+
+    <!-- Satellite 3 — AI Assist (upper-right arc, ~47°) — opens AI notepad modal -->
+    <button id="fabSat3" class="fab-satellite" aria-label="AI Assist"
+            onclick="toggleFabMenu(); openAIAssistNotepad();">
+        <i class="fa-solid fa-wand-magic-sparkles text-[11px]"></i>
+    </button>
+
+    <!-- Main FAB: z-[452] keeps it above satellites (z-[451]) and the glow (z-[448]) -->
+    <button id="globalFloatingActionPlusButton" onclick="toggleFabMenu()"
+            class="fixed bottom-24 left-4 w-12 h-12 bg-gradient-to-tr from-pink-500 to-violet-600 rounded-full flex items-center justify-center text-white shadow-2xl shadow-pink-500/20 z-[452] border border-white/10 text-lg"
+            style="-webkit-tap-highlight-color:transparent;">
+        <i id="fabPlusIcon" class="fa-solid fa-plus"></i>
     </button>
 
     <div id="quickAddModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-end hidden transition-all duration-300">
@@ -527,6 +816,170 @@
                     <i class="fa-solid fa-floppy-disk mr-2"></i> Save
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         AI ASSIST NOTEPAD MODAL  — 3-panel state machine
+         Panel 1 (aiAssistFormPanel)      : default — textarea + submit
+         Panel 2 (aiAssistProgressPanel)  : shown during GAS calls
+         Panel 3 (aiAssistErrorPanel)     : shown on failure with retry
+         Backdrop click closes (blocked during processing).
+         JS: openAIAssistNotepad / closeAIAssistNotepad / submitAIAssistNotepad
+         ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="aiAssistNotepadModal"
+         class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[9999] flex items-end hidden"
+         onclick="closeAIAssistNotepad()">
+        <div class="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl shadow-2xl"
+             style="max-height:88vh;display:flex;flex-direction:column;"
+             onclick="event.stopPropagation()">
+
+            <!-- ── Shared Header ──────────────────────────────────────────── -->
+            <div class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-800 shrink-0">
+                <div class="flex items-center gap-2.5">
+                    <div class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
+                         style="background:linear-gradient(135deg,rgba(124,58,237,0.28),rgba(219,39,119,0.18));border:1px solid rgba(124,58,237,0.30);">
+                        <i class="fa-solid fa-wand-magic-sparkles text-violet-400 text-[11px]"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-[13px] font-black tracking-tight"
+                            style="background:linear-gradient(90deg,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">
+                            AI Assist Smart Entry
+                        </h3>
+                        <p class="text-[10px] text-slate-500 mt-0.5">Paste links, notes, or text — Gemini handles the rest</p>
+                    </div>
+                </div>
+                <button id="aiAssistCloseBtn" onclick="closeAIAssistNotepad()"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold shrink-0"
+                        style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- ── PANEL 1: Form (default) ────────────────────────────────── -->
+            <div id="aiAssistFormPanel" style="display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;">
+
+                <div class="flex-1 overflow-y-auto no-scrollbar px-5 py-4 space-y-3" style="min-height:0;">
+                    <div class="flex items-start gap-2">
+                        <i class="fa-solid fa-circle-info text-violet-500/50 text-[10px] mt-0.5 shrink-0"></i>
+                        <p class="text-[10px] text-slate-500 leading-relaxed">
+                            Paste anything — Instagram or Maps links, video URLs, or just describe a spot. Gemini will extract and structure it automatically.
+                        </p>
+                    </div>
+                    <textarea id="aiAssistNotepadInput" rows="8"
+                        placeholder="Examples:&#10;• https://www.instagram.com/p/abc123&#10;• Hidden rooftop bar in Bali 🌅 https://maps.app.goo.gl/xyz&#10;• Cute café near Shinjuku station, Tokyo — cherry blossom views, cash only"
+                        class="w-full bg-slate-950 border border-slate-800 rounded-2xl px-4 py-3 text-[12px] text-slate-200 leading-relaxed resize-none outline-none transition-colors subtle-scrollbar"
+                        style="min-height:180px;-webkit-appearance:none;appearance:none;"
+                        oninput="_aiAssistOnInput()"></textarea>
+                    <div id="aiAssistStatusBanner" class="hidden rounded-xl px-4 py-3 text-[12px] font-semibold flex items-start gap-2.5 leading-relaxed">
+                        <span id="aiAssistStatusIcon" class="shrink-0 mt-0.5 text-[13px]"></span>
+                        <span id="aiAssistStatusText"></span>
+                    </div>
+                </div>
+
+                <div class="px-5 pb-6 pt-3 border-t border-slate-800/60 shrink-0 space-y-2.5">
+                    <button id="aiAssistSubmitBtn" onclick="submitAIAssistNotepad()"
+                            class="w-full py-3 rounded-2xl text-[13px] font-black text-white flex items-center justify-center gap-2 transition-all active:opacity-80"
+                            style="background:linear-gradient(to right,#7c3aed,#db2777);-webkit-tap-highlight-color:transparent;opacity:0.45;pointer-events:none;">
+                        <i id="aiAssistBtnIcon" class="fa-solid fa-paper-plane text-[11px]"></i>
+                        <span id="aiAssistBtnLabel">Submit</span>
+                    </button>
+                    <p class="text-center text-[10px] text-slate-600">
+                        Data entry powered by <span class="text-violet-500 font-semibold">Gemini AI Assistant</span>
+                    </p>
+                </div>
+
+            </div>
+
+            <!-- ── PANEL 2: Processing ────────────────────────────────────── -->
+            <div id="aiAssistProgressPanel"
+                 style="display:none;flex-direction:column;flex:1;align-items:center;justify-content:center;padding:36px 24px 32px;min-height:300px;">
+
+                <!-- Glowing wand icon with two pulsing rings -->
+                <div class="relative flex items-center justify-center mb-6" style="width:84px;height:84px;">
+                    <div style="position:absolute;inset:-6px;border-radius:50%;border:2px solid rgba(124,58,237,0.42);animation:aiAssistRingPulse 1.8s ease-in-out infinite;"></div>
+                    <div style="position:absolute;inset:0;border-radius:50%;border:1.5px solid rgba(219,39,119,0.22);animation:aiAssistRingPulse 1.8s ease-in-out infinite 0.65s;"></div>
+                    <div id="aiAssistProgressIconWrap"
+                         style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,rgba(124,58,237,0.18),rgba(219,39,119,0.12));display:flex;align-items:center;justify-content:center;border:1px solid rgba(124,58,237,0.22);">
+                        <i id="aiAssistProgressCenterIcon" class="fa-solid fa-wand-magic-sparkles text-violet-400"
+                           style="font-size:22px;animation:aiAssistIconFloat 2.4s ease-in-out infinite;"></i>
+                    </div>
+                </div>
+
+                <h4 id="aiAssistProgressTitle" class="text-[15px] font-black text-slate-100 mb-1.5 text-center tracking-tight"></h4>
+                <p  id="aiAssistProgressSub"   class="text-[11px] text-slate-500 text-center mb-8 leading-relaxed" style="max-width:260px;"></p>
+
+                <!-- Three-step indicator -->
+                <div class="flex items-start justify-center">
+
+                    <!-- Step 1 -->
+                    <div class="flex flex-col items-center" style="width:68px;">
+                        <div id="aiAssistStep1Dot" class="w-8 h-8 rounded-full flex items-center justify-center mb-1.5 transition-all"
+                             style="background:rgba(124,58,237,0.15);border:2px solid rgba(124,58,237,0.5);">
+                            <i id="aiAssistStepIcon1" class="fa-solid fa-wand-magic-sparkles text-violet-400" style="font-size:9px;"></i>
+                        </div>
+                        <span id="aiAssistStepLabel1" class="text-[9px] font-bold text-violet-400 text-center leading-tight">AI Analysis</span>
+                    </div>
+
+                    <!-- Connector 1 -->
+                    <div style="width:36px;height:2px;margin-top:15px;background:rgba(51,65,85,0.6);border-radius:2px;overflow:hidden;position:relative;">
+                        <div id="aiAssistConnector1" style="position:absolute;top:0;left:0;height:100%;width:0;background:linear-gradient(to right,#7c3aed,#a855f7);border-radius:2px;transition:width 0.55s ease;"></div>
+                    </div>
+
+                    <!-- Step 2 -->
+                    <div class="flex flex-col items-center" style="width:68px;">
+                        <div id="aiAssistStep2Dot" class="w-8 h-8 rounded-full flex items-center justify-center mb-1.5 transition-all"
+                             style="background:rgba(30,41,59,0.9);border:2px solid rgba(51,65,85,0.5);">
+                            <i id="aiAssistStepIcon2" class="fa-solid fa-database" style="font-size:9px;color:#475569;"></i>
+                        </div>
+                        <span id="aiAssistStepLabel2" class="text-[9px] font-bold text-center leading-tight" style="color:#475569;">Saving</span>
+                    </div>
+
+                    <!-- Connector 2 -->
+                    <div style="width:36px;height:2px;margin-top:15px;background:rgba(51,65,85,0.6);border-radius:2px;overflow:hidden;position:relative;">
+                        <div id="aiAssistConnector2" style="position:absolute;top:0;left:0;height:100%;width:0;background:linear-gradient(to right,#a855f7,#db2777);border-radius:2px;transition:width 0.55s ease;"></div>
+                    </div>
+
+                    <!-- Step 3 -->
+                    <div class="flex flex-col items-center" style="width:68px;">
+                        <div id="aiAssistStep3Dot" class="w-8 h-8 rounded-full flex items-center justify-center mb-1.5 transition-all"
+                             style="background:rgba(30,41,59,0.9);border:2px solid rgba(51,65,85,0.5);">
+                            <i id="aiAssistStepIcon3" class="fa-solid fa-check" style="font-size:9px;color:#475569;"></i>
+                        </div>
+                        <span id="aiAssistStepLabel3" class="text-[9px] font-bold text-center leading-tight" style="color:#475569;">Verified</span>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- ── PANEL 3: Error ─────────────────────────────────────────── -->
+            <div id="aiAssistErrorPanel"
+                 style="display:none;flex-direction:column;flex:1;align-items:center;padding:36px 24px 24px;min-height:300px;">
+
+                <div class="w-16 h-16 rounded-2xl flex items-center justify-center mb-4"
+                     style="background:rgba(248,113,113,0.09);border:1px solid rgba(248,113,113,0.22);">
+                    <i class="fa-solid fa-triangle-exclamation text-red-400" style="font-size:22px;"></i>
+                </div>
+
+                <h4 id="aiAssistErrorTitle"  class="text-[14px] font-black text-red-300 mb-2 text-center tracking-tight"></h4>
+                <p  id="aiAssistErrorDetail" class="text-[11px] text-slate-500 text-center mb-7 leading-relaxed" style="max-width:290px;"></p>
+
+                <div class="w-full flex flex-col gap-2.5">
+                    <button id="aiAssistRetryBtn" onclick="_aiAssistRetry()"
+                            class="w-full py-3 rounded-2xl text-[13px] font-black text-white flex items-center justify-center gap-2 active:opacity-80 transition-all"
+                            style="background:linear-gradient(to right,#7c3aed,#db2777);-webkit-tap-highlight-color:transparent;">
+                        <i class="fa-solid fa-rotate-right text-[11px]"></i>
+                        <span>Retry</span>
+                    </button>
+                    <button onclick="closeAIAssistNotepad()"
+                            class="w-full py-2.5 rounded-2xl text-[12px] font-bold text-slate-400 active:opacity-70 transition-all"
+                            style="background:rgba(30,41,59,0.6);border:1px solid rgba(51,65,85,0.4);-webkit-tap-highlight-color:transparent;">
+                        Close
+                    </button>
+                </div>
+
+            </div>
+
         </div>
     </div>
 
@@ -810,7 +1263,7 @@
         <div class="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-2xl flex flex-col">
             <!-- Header: section label + X close -->
             <div class="flex justify-between items-center mb-3">
-                <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest">Select Dates</span>
+                <span class="text-[11px] font-black text-slate-500 uppercase tracking-widest">Select Dates</span>
                 <button onclick="closeMultiDatePickerModal()" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <!-- Month navigation -->
@@ -1176,6 +1629,84 @@
                     class="w-full py-2 bg-slate-800 border border-slate-700/40 rounded-xl text-[10px] font-black text-slate-400 uppercase tracking-wider active:bg-slate-700 transition-colors">
                 Cancel
             </button>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         Itinerary Filter Sheet — Sheet 1: Itinerary selection
+         Slides up when user taps "Itinerary" in the Type Filter dropdown.
+         z-[300] sits above all tab content but below Sheet 2 and context menus.
+         ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="itinFilterSheet" class="fixed inset-0 z-[300] pointer-events-none">
+        <!-- Backdrop -->
+        <div id="itinFilterSheetBackdrop"
+             class="itin-filter-sheet-backdrop absolute inset-0 bg-black/60"
+             onclick="closeItineraryFilterSheets()"></div>
+        <!-- Panel — slides down from top -->
+        <div id="itinFilterSheetPanel"
+             class="itin-filter-sheet-panel absolute top-0 left-0 right-0 bg-slate-950 border-b border-slate-800/80 rounded-b-3xl flex flex-col"
+             style="max-height:82vh;">
+            <!-- Header -->
+            <div class="flex-shrink-0 flex items-center justify-between px-5 py-4 border-b border-slate-800/60">
+                <div class="flex items-center gap-2.5">
+                    <div class="w-8 h-8 rounded-xl bg-pink-500/10 border border-pink-500/20 flex items-center justify-center">
+                        <i class="fa-solid fa-route text-pink-400 text-[11px]"></i>
+                    </div>
+                    <h2 class="text-[13px] font-black text-slate-200">Select Itinerary</h2>
+                </div>
+                <button onclick="closeItineraryFilterSheets()"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"
+                        style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark pointer-events-none"></i>
+                </button>
+            </div>
+            <!-- Itinerary list — min-h-0 allows flex child to shrink and scroll correctly -->
+            <div id="itinFilterSheetList"
+                 class="flex-1 min-h-0 overflow-y-auto subtle-scrollbar px-4 py-3 space-y-2 pb-6"></div>
+            <!-- Drag handle at bottom signals the drawer can be closed -->
+            <div class="flex-shrink-0 flex justify-center pb-3 pt-1">
+                <div class="w-9 h-1 bg-slate-700 rounded-full"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         Itinerary Filter Sheet — Sheet 2: Day selection
+         Slides up on top of Sheet 1 after an itinerary is chosen.
+         z-[310] ensures it sits above Sheet 1.
+         ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="itinDayFilterSheet" class="fixed inset-0 z-[310] pointer-events-none">
+        <!-- Backdrop -->
+        <div id="itinDayFilterSheetBackdrop"
+             class="itin-filter-sheet-backdrop absolute inset-0 bg-black/50"
+             onclick="closeItineraryFilterSheets()"></div>
+        <!-- Panel — slides down from top -->
+        <div id="itinDayFilterSheetPanel"
+             class="itin-filter-sheet-panel absolute top-0 left-0 right-0 bg-slate-950 border-b border-slate-800/80 rounded-b-3xl flex flex-col"
+             style="max-height:82vh;">
+            <!-- Header -->
+            <div class="flex-shrink-0 flex items-center justify-between px-5 py-4 border-b border-slate-800/60">
+                <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                    <button onclick="_openItinerarySheetBack()"
+                            class="w-8 h-8 bg-slate-800 border border-slate-700/60 rounded-xl flex items-center justify-center text-slate-400 active:bg-slate-700 transition-colors shrink-0"
+                            style="-webkit-tap-highlight-color:transparent;">
+                        <i class="fa-solid fa-arrow-left text-[10px] pointer-events-none"></i>
+                    </button>
+                    <h2 id="itinDayFilterSheetTitle" class="text-[13px] font-black text-slate-200 truncate">Select Day</h2>
+                </div>
+                <button onclick="closeItineraryFilterSheets()"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold ml-2 shrink-0"
+                        style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark pointer-events-none"></i>
+                </button>
+            </div>
+            <!-- Day list — min-h-0 allows flex child to shrink and scroll correctly -->
+            <div id="itinDayFilterSheetList"
+                 class="flex-1 min-h-0 overflow-y-auto subtle-scrollbar px-4 py-3 space-y-2 pb-6"></div>
+            <!-- Drag handle at bottom -->
+            <div class="flex-shrink-0 flex justify-center pb-3 pt-1">
+                <div class="w-9 h-1 bg-slate-700 rounded-full"></div>
+            </div>
         </div>
     </div>
 

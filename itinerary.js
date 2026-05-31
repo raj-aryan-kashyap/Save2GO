@@ -10,7 +10,86 @@ const DEV_ALLOW_PAST_DATE_SELECTION = false;
 // All itinerary logic shares these; they are intentionally module-level so
 // every function in this file (and callers from aap.js / map.js) can read them.
 
-let savedItineraries         = JSON.parse(localStorage.getItem('compass_saved_itineraries')) || [];
+// ── Per-user itinerary storage helpers ─────────────────────────────────────
+//
+// Itineraries are stored under a per-user key: compass_itins_<username>
+// so that switching profiles never leaks one user's data into another's view.
+// Every write also mirrors to the legacy flat key (compass_saved_itineraries)
+// for backward compatibility with any third-party code that reads it directly.
+//
+// Sync state is tracked per user under compass_itin_sync_<username>:
+//   status: 'pending' | 'syncing' | 'done' | 'error'
+//   ts:     epoch ms of last state change
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Returns the localStorage key for the active user's itinerary array. */
+function _itinStorageKey() {
+    const u = (typeof currentUser !== 'undefined' && currentUser)
+        ? currentUser.trim().toLowerCase().replace(/\s+/g, '_') : null;
+    return u ? `compass_itins_${u}` : 'compass_saved_itineraries';
+}
+
+/** Returns the localStorage key for the active user's sync state (null if no user). */
+function _itinSyncKey() {
+    const u = (typeof currentUser !== 'undefined' && currentUser)
+        ? currentUser.trim().toLowerCase().replace(/\s+/g, '_') : null;
+    return u ? `compass_itin_sync_${u}` : null;
+}
+
+/**
+ * Read the current user's itinerary sync state object.
+ * @returns {{ status: 'pending'|'syncing'|'done'|'error', ts: number }}
+ */
+function _getItinSyncState() {
+    const key = _itinSyncKey();
+    if (!key) return { status: 'done', ts: 0 }; // no user → treat as done, show create UI
+    try { return JSON.parse(localStorage.getItem(key)) || { status: 'pending', ts: 0 }; }
+    catch (_) { return { status: 'pending', ts: 0 }; }
+}
+
+/** Persist the current user's sync state. */
+function _setItinSyncState(status) {
+    const key = _itinSyncKey();
+    if (!key) return;
+    localStorage.setItem(key, JSON.stringify({ status, ts: Date.now() }));
+}
+
+/**
+ * Save `savedItineraries` to both the per-user namespaced key AND the
+ * legacy flat key (compass_saved_itineraries) for backward compatibility.
+ */
+function _saveItineraries() {
+    const json = JSON.stringify(savedItineraries);
+    localStorage.setItem(_itinStorageKey(), json);
+    localStorage.setItem('compass_saved_itineraries', json);
+}
+
+// ── Module-level initialisation ────────────────────────────────────────────
+// Load the active user's cached itinerary array at parse time so that
+// renderItineraryMasterDashboardWorkspace() has data immediately.
+// Falls back to the legacy flat key and migrates to the per-user key
+// on the first run.
+let savedItineraries = (() => {
+    const u = localStorage.getItem('compass_user');
+    if (u) {
+        const key     = `compass_itins_${u.trim().toLowerCase().replace(/\s+/g, '_')}`;
+        const perUser = JSON.parse(localStorage.getItem(key) || 'null');
+        if (perUser !== null) return perUser; // already migrated
+
+        // First time for this user on this device — migrate their subset from
+        // the legacy flat key (filtered by itin.user === currentUser).
+        const legacy     = JSON.parse(localStorage.getItem('compass_saved_itineraries') || '[]');
+        const userLegacy = legacy.filter(i => !i.user || i.user === u);
+        if (userLegacy.length > 0) {
+            localStorage.setItem(key, JSON.stringify(userLegacy));
+            return userLegacy;
+        }
+        // No legacy data for this user — start empty (sync will fill from cloud)
+        return [];
+    }
+    return JSON.parse(localStorage.getItem('compass_saved_itineraries') || '[]');
+})();
+
 let itineraryItems           = JSON.parse(localStorage.getItem('compass_itinerary_cache'))    || { '1': [], '2': [], '3': [] };
 let activeItineraryId        = null;
 let activeItineraryDayTracker = 0;
@@ -300,19 +379,38 @@ function resetItineraryTitleValidationUI() {
  * Falls back to localStorage-only if the network request fails.
  */
 async function loadUserItineraries() {
-    const localData = JSON.parse(localStorage.getItem('compass_saved_itineraries')) || [];
-    const user      = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
+    const user = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
+
+    // ── Migration: seed per-user key from legacy flat key (runs once per user) ──
+    const storageKey = _itinStorageKey();
+    if (user && localStorage.getItem(storageKey) === null) {
+        const legacy     = JSON.parse(localStorage.getItem('compass_saved_itineraries') || '[]');
+        const userLegacy = legacy.filter(i => !i.user || i.user === user);
+        if (userLegacy.length > 0) localStorage.setItem(storageKey, JSON.stringify(userLegacy));
+    }
+
+    const localData = JSON.parse(localStorage.getItem(storageKey) || '[]');
 
     if (!user) {
         savedItineraries = localData;
         return;
     }
 
+    // ── Mark sync as in-flight → show loading indicator immediately ──────────
+    _setItinSyncState('syncing');
+    renderItineraryMasterDashboardWorkspace();
+
     try {
         const backendBase = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL : (typeof API_URL !== 'undefined' ? API_URL : null);
-        if (!backendBase) { savedItineraries = localData; return; }
+        if (!backendBase) {
+            savedItineraries = localData;
+            _setItinSyncState('done');
+            _saveItineraries();
+            renderItineraryMasterDashboardWorkspace();
+            return;
+        }
 
-        const res      = await fetch(`${backendBase}?action=get_itineraries&user=${encodeURIComponent(user)}`);
+        const res       = await fetch(`${backendBase}?action=get_itineraries&user=${encodeURIComponent(user)}`);
         const cloudRows = await res.json();
 
         if (Array.isArray(cloudRows) && cloudRows.length > 0) {
@@ -323,23 +421,36 @@ async function loadUserItineraries() {
                 user: row.user    || (row.data && row.data.user),
             }));
 
-            // Keep any local itineraries that haven't been uploaded to cloud yet
-            // (cloud is source of truth; local-only items are appended)
+            // Cloud is source of truth; keep local-only items not yet uploaded.
             const cloudIds  = new Set(cloudItins.map(i => i.id));
             const localOnly = localData.filter(i => !cloudIds.has(i.id));
 
             savedItineraries = [...cloudItins, ...localOnly];
         } else {
-            // Cloud returned nothing — trust local data (may be first run or offline)
+            // Server returned [] — either a genuine new user with no itineraries,
+            // or an existing user who deleted everything.  Either way, trust local.
             savedItineraries = localData;
         }
+
+        _setItinSyncState('done');
+
     } catch (err) {
         console.warn('[ItinerarySync] cloud fetch failed, using localStorage:', err);
         savedItineraries = localData;
+        _setItinSyncState('error');
     }
 
-    // Keep localStorage in sync with whatever we resolved
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
+    renderItineraryMasterDashboardWorkspace();
+}
+
+/**
+ * Public retry entry point — called by the "Tap to retry" button in the
+ * empty-state when a previous loadUserItineraries() call failed.
+ */
+async function retryItinerarySync() {
+    _setItinSyncState('pending'); // reset to allow re-render as loading
+    await loadUserItineraries();
 }
 
 /**
@@ -352,7 +463,7 @@ async function loadUserItineraries() {
 async function syncItineraryToCloud(itin, action) {
     // Always update localStorage immediately so the UI stays consistent even
     // if the network call fails or the user is offline.
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
 
     if (!itin || !itin.id) return;
     const user = (typeof currentUser !== 'undefined' && currentUser) ? currentUser : null;
@@ -744,27 +855,247 @@ function forceClearItinerarySavedCache() {
     alert("Itinerary registry wiped.");
 }
 
-function toggleItineraryChildDropdownMenu(event) {
-    if (event) event.stopPropagation();
-    const bucket = document.getElementById('itineraryChildSelectorMenuBucket');
-    const caret = document.getElementById('itinChildCaretNode');
-    if (!bucket || !caret) return;
-    if (bucket.classList.contains('hidden')) {
-        bucket.classList.remove('hidden'); caret.innerText = "▼";
-    } else {
-        bucket.classList.add('hidden'); caret.innerText = "▶";
+// ─────────────────────────────────────────────────────────────────────────────
+// Itinerary Filter Bottom Sheets
+// Sheet 1 → itinerary list  (openItineraryFilterSheet)
+// Sheet 2 → day list        (openDayFilterSheet)
+// Both closed by:           closeItineraryFilterSheets
+// Filter applied by:        applyItineraryDayFilter (aap.js)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Open Sheet 1: itinerary selection.
+ *  Closes the Type Filter dropdown first, then slides up the sheet. */
+function openItineraryFilterSheet() {
+    if (typeof closeAllActiveHUDDropdownOverlays === 'function') {
+        // Suppress the auto-pan that closeAllActiveHUDDropdownOverlays would trigger —
+        // we're just opening the sheet, not confirming a filter.
+        const _saved = typeof activeItineraryFilter !== 'undefined' ? activeItineraryFilter : null;
+        if (typeof activeItineraryFilter !== 'undefined') activeItineraryFilter = null;
+        closeAllActiveHUDDropdownOverlays();
+        if (typeof activeItineraryFilter !== 'undefined') activeItineraryFilter = _saved;
     }
+    _buildItineraryFilterList();
+    const sheet    = document.getElementById('itinFilterSheet');
+    const panel    = document.getElementById('itinFilterSheetPanel');
+    const backdrop = document.getElementById('itinFilterSheetBackdrop');
+    if (!panel) return;
+    sheet.style.pointerEvents    = 'all';
+    panel.classList.add('itin-sheet-open');
+    backdrop.classList.add('itin-sheet-open');
 }
 
-function buildItinerarySubMenuChecklist() {
-    const bucket = document.getElementById('itineraryChildSelectorMenuBucket');
-    if (!bucket) return;
-    bucket.innerHTML = `
-        <button onclick="injectActiveSpotToItineraryDay(1, null, event)" class="w-full text-left text-[10px] py-1 px-2 hover:bg-slate-800 text-slate-300 font-semibold rounded block">→ Schedule Day 1</button>
-        <button onclick="injectActiveSpotToItineraryDay(2, null, event)" class="w-full text-left text-[10px] py-1 px-2 hover:bg-slate-800 text-slate-300 font-semibold rounded block">→ Schedule Day 2</button>
-        <button onclick="injectActiveSpotToItineraryDay(3, null, event)" class="w-full text-left text-[10px] py-1 px-2 hover:bg-slate-800 text-slate-300 font-semibold rounded block">→ Schedule Day 3</button>
-    `;
+/** Populate the itinerary list in Sheet 1.
+ *  Filtered by the current city selection (if any). */
+function _buildItineraryFilterList() {
+    const list = document.getElementById('itinFilterSheetList');
+    if (!list) return;
+    list.innerHTML = '';
+
+    const cityFilter = (typeof checkedCitiesStateArray !== 'undefined') ? checkedCitiesStateArray : [];
+    const itins = (savedItineraries || []).filter(itin => {
+        if (cityFilter.length > 0) return cityFilter.includes(itin.city);
+        return true;
+    });
+
+    if (itins.length === 0) {
+        list.innerHTML = `
+            <div class="flex flex-col items-center justify-center py-12 text-center px-4">
+                <i class="fa-solid fa-route text-2xl text-slate-700 mb-3"></i>
+                <p class="text-[11px] font-black text-slate-500 uppercase tracking-widest mb-1">No Itineraries</p>
+                <p class="text-[10px] text-slate-600 font-medium">
+                    ${cityFilter.length > 0 ? 'No itineraries match the current city filter.' : 'No saved itineraries yet.'}
+                </p>
+            </div>`;
+        return;
+    }
+
+    const _activeFiltItin = (typeof activeItineraryFilter !== 'undefined') ? activeItineraryFilter : null;
+
+    itins.forEach(itin => {
+        const realDays    = (itin.days || []).filter(d => !d?.isSuggested);
+        const dayCount    = realDays.length;
+        const safeTitle   = (itin.title || 'Untitled').replace(/</g, '&lt;');
+        const safeCity    = (itin.city  || '—').replace(/</g, '&lt;');
+        const isActiveItin = _activeFiltItin?.itineraryId === itin.id;
+
+        const btn = document.createElement('button');
+        btn.className = [
+            'w-full flex items-center gap-3 p-3.5 rounded-2xl border transition-colors text-left',
+            isActiveItin
+                ? 'bg-pink-500/10 border-pink-500/30 active:bg-pink-500/15'
+                : 'bg-slate-900 border-slate-800 active:bg-slate-800',
+        ].join(' ');
+        btn.style.cssText = '-webkit-tap-highlight-color:transparent;';
+
+        const trailingEl = isActiveItin
+            ? `<span class="px-1.5 py-0.5 bg-pink-600 text-white font-black text-[9px] rounded-full shrink-0 pointer-events-none">1</span>`
+            : `<i class="fa-solid fa-chevron-right text-slate-600 text-[10px] shrink-0 pointer-events-none"></i>`;
+
+        btn.innerHTML = `
+            <div class="w-10 h-10 rounded-xl bg-pink-500/10 border border-pink-500/20 flex items-center justify-center shrink-0">
+                <i class="fa-solid fa-route text-pink-400 text-[13px] pointer-events-none"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+                <p class="text-[13px] font-black ${isActiveItin ? 'text-pink-300' : 'text-slate-200'} truncate">${safeTitle}</p>
+                <p class="text-[10px] font-medium mt-0.5 ${isActiveItin ? 'text-pink-400/70' : 'text-slate-500'}">
+                    <i class="fa-solid fa-location-dot text-[8px] mr-0.5"></i>${safeCity}
+                    &nbsp;·&nbsp;${dayCount} day${dayCount !== 1 ? 's' : ''}
+                </p>
+            </div>
+            ${trailingEl}`;
+        btn.onclick = () => openDayFilterSheet(itin.id);
+        list.appendChild(btn);
+    });
 }
+
+/** Open Sheet 2: day selection for the given itinerary.
+ *  Sheet 1 is hidden first; Sheet 2 slides up on top. */
+function openDayFilterSheet(itineraryId) {
+    const itin = (savedItineraries || []).find(i => i.id === itineraryId);
+    if (!itin) return;
+
+    // Hide Sheet 1 (keep its container pointer-events off)
+    const s1 = document.getElementById('itinFilterSheet');
+    const s1p = document.getElementById('itinFilterSheetPanel');
+    const s1b = document.getElementById('itinFilterSheetBackdrop');
+    if (s1p) s1p.classList.remove('itin-sheet-open');
+    if (s1b) s1b.classList.remove('itin-sheet-open');
+    if (s1)  s1.style.pointerEvents = 'none';
+
+    // Populate day list
+    const titleEl = document.getElementById('itinDayFilterSheetTitle');
+    if (titleEl) titleEl.textContent = (itin.title || 'Untitled');
+
+    _buildDayFilterList(itin);
+
+    // Show Sheet 2
+    const s2  = document.getElementById('itinDayFilterSheet');
+    const s2p = document.getElementById('itinDayFilterSheetPanel');
+    const s2b = document.getElementById('itinDayFilterSheetBackdrop');
+    if (!s2p) return;
+    s2.style.pointerEvents  = 'all';
+    s2p.classList.add('itin-sheet-open');
+    s2b.classList.add('itin-sheet-open');
+}
+
+/** Populate the day list in Sheet 2. */
+function _buildDayFilterList(itin) {
+    const list = document.getElementById('itinDayFilterSheetList');
+    if (!list) return;
+    list.innerHTML = '';
+
+    const realDays  = (itin.days || []).filter(d => !d?.isSuggested);
+    const currentDayIdx = typeof activeItineraryDayTracker !== 'undefined' ? activeItineraryDayTracker : 0;
+    const activeFilt    = (typeof activeItineraryFilter !== 'undefined') ? activeItineraryFilter : null;
+
+    realDays.forEach(day => {
+        const realIdx  = itin.days.indexOf(day);
+        const spots    = (day.timeline || []).length;
+        const isEmpty  = spots === 0;
+        const isCurrent = realIdx === currentDayIdx;
+        const isActive  = activeFilt?.itineraryId === itin.id && activeFilt?.dayIndex === realIdx;
+
+        let dateLabel = '';
+        if (day.date) {
+            try {
+                dateLabel = new Date(day.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+            } catch(_) { dateLabel = day.date; }
+        }
+
+        const btn = document.createElement('button');
+        btn.style.cssText = '-webkit-tap-highlight-color:transparent;';
+        btn.className = [
+            'w-full flex items-center gap-3 p-3.5 rounded-2xl border transition-colors text-left',
+            isEmpty
+                ? 'bg-slate-900/40 border-slate-800/50 cursor-default opacity-60'
+                : isActive
+                    ? 'bg-pink-500/10 border-pink-500/30 active:bg-pink-500/15'
+                    : 'bg-slate-900 border-slate-800 active:bg-slate-800',
+        ].join(' ');
+
+        const numBg  = isEmpty ? 'bg-slate-800/40 border-slate-700/30' : isActive ? 'bg-pink-500/20 border-pink-500/30' : 'bg-slate-800 border-slate-700/40';
+        const numCol = isEmpty ? 'text-slate-600' : isActive ? 'text-pink-400' : 'text-slate-300';
+        const nameCol = isEmpty ? 'text-slate-600' : isActive ? 'text-pink-300' : 'text-slate-200';
+        const metaCol = isEmpty ? 'text-slate-700' : 'text-slate-500';
+
+        const currentBadge = isCurrent
+            ? '<span class="text-[9px] font-black text-amber-400 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-lg uppercase tracking-wide shrink-0">Current</span>'
+            : '';
+        const activeBadge = isActive
+            ? '<span class="text-[9px] font-black text-pink-400 bg-pink-500/10 border border-pink-500/20 px-1.5 py-0.5 rounded-lg uppercase tracking-wide shrink-0">Active</span>'
+            : '';
+        const spotsMeta = isEmpty
+            ? 'No spots'
+            : `${spots} spot${spots !== 1 ? 's' : ''}`;
+        const checkIcon = !isEmpty
+            ? isActive
+                ? `<span class="px-1.5 py-0.5 bg-pink-600 text-white font-black text-[9px] rounded-full shrink-0 pointer-events-none">1</span>`
+                : `<i class="fa-solid fa-check text-[10px] shrink-0 text-slate-700 pointer-events-none"></i>`
+            : '';
+
+        btn.innerHTML = `
+            <div class="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${numBg}">
+                <span class="text-[11px] font-black ${numCol} pointer-events-none">${realIdx + 1}</span>
+            </div>
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                    <p class="text-[13px] font-black ${nameCol}">Day ${realIdx + 1}</p>
+                    ${currentBadge}${activeBadge}
+                </div>
+                <p class="text-[10px] font-medium mt-0.5 ${metaCol}">${dateLabel ? dateLabel + ' · ' : ''}${spotsMeta}</p>
+            </div>
+            ${checkIcon}`;
+
+        if (isEmpty) {
+            btn.onclick = (e) => {
+                if (typeof triggerCuteSpeechBubbleHUD === 'function') {
+                    triggerCuteSpeechBubbleHUD('No spots scheduled for this day.', btn, e);
+                }
+            };
+        } else {
+            btn.onclick = () => {
+                if (typeof applyItineraryDayFilter === 'function') {
+                    applyItineraryDayFilter(itin.id, realIdx);
+                }
+            };
+        }
+
+        list.appendChild(btn);
+    });
+}
+
+/** Close both filter sheets without applying a filter.
+ *  Called by the X button or backdrop tap on either sheet. */
+function closeItineraryFilterSheets() {
+    [
+        { sheet: 'itinFilterSheet',    panel: 'itinFilterSheetPanel',    backdrop: 'itinFilterSheetBackdrop' },
+        { sheet: 'itinDayFilterSheet', panel: 'itinDayFilterSheetPanel', backdrop: 'itinDayFilterSheetBackdrop' },
+    ].forEach(({ sheet, panel, backdrop }) => {
+        const s = document.getElementById(sheet);
+        const p = document.getElementById(panel);
+        const b = document.getElementById(backdrop);
+        if (p) p.classList.remove('itin-sheet-open');
+        if (b) b.classList.remove('itin-sheet-open');
+        if (s) s.style.pointerEvents = 'none';
+    });
+}
+
+/** Back button in Sheet 2 — return to Sheet 1. */
+function _openItinerarySheetBack() {
+    // Close Sheet 2
+    const s2  = document.getElementById('itinDayFilterSheet');
+    const s2p = document.getElementById('itinDayFilterSheetPanel');
+    const s2b = document.getElementById('itinDayFilterSheetBackdrop');
+    if (s2p) s2p.classList.remove('itin-sheet-open');
+    if (s2b) s2b.classList.remove('itin-sheet-open');
+    if (s2)  s2.style.pointerEvents = 'none';
+    // Re-open Sheet 1
+    openItineraryFilterSheet();
+}
+
+/** Legacy stub — kept so any stale references don't throw. */
+function toggleItineraryChildDropdownMenu(event) { openItineraryFilterSheet(); }
+function buildItinerarySubMenuChecklist() {}
 
 function assembleTrayInlineAssignorRow() {
     const container = document.getElementById('trayItineraryBtnDeck');
@@ -1267,7 +1598,7 @@ function promptDeleteItinerary() {
         "Delete",
         () => {
             savedItineraries = savedItineraries.filter(i => i.id !== activeItineraryId);
-            localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+            _saveItineraries();
             syncItineraryToCloud({id: activeItineraryId}, 'delete');
             activeItineraryId = null;
             closeItineraryDetailView();
@@ -1425,6 +1756,46 @@ function renderItineraryMasterDashboardWorkspace() {
         // Show the static landing page, hide the data header
         if (headerBar)  headerBar.classList.add('hidden');
         if (emptyState) emptyState.classList.remove('hidden');
+
+        // ── Sync-aware empty state ────────────────────────────────────────
+        // Differentiate between "still fetching" (disable create), "error"
+        // (retry button), and "confirmed empty" (show normal create UI).
+        const createBtn = document.getElementById('itinCreateFirstBtn');
+        const statusMsg = document.getElementById('itinSyncStatusMsg');
+        const syncState = _getItinSyncState();
+
+        if (syncState.status === 'syncing' || syncState.status === 'pending') {
+            // In-flight: disable the create button, show animated dots
+            if (createBtn) createBtn.disabled = true;
+            if (statusMsg) {
+                statusMsg.classList.remove('hidden');
+                statusMsg.innerHTML =
+                    `<span class="text-[11px] text-slate-500 font-medium tracking-wide">` +
+                    `Fetching saved data` +
+                    `<span class="itin-sync-dot">.</span>` +
+                    `<span class="itin-sync-dot">.</span>` +
+                    `<span class="itin-sync-dot">.</span>` +
+                    `</span>`;
+            }
+        } else if (syncState.status === 'error') {
+            // Failed: disable create, show retry link
+            if (createBtn) createBtn.disabled = true;
+            if (statusMsg) {
+                statusMsg.classList.remove('hidden');
+                statusMsg.innerHTML =
+                    `<button onclick="retryItinerarySync()" ` +
+                    `class="text-[11px] text-pink-400 font-semibold flex items-center gap-1.5 mx-auto active:opacity-70" ` +
+                    `style="-webkit-tap-highlight-color:transparent;">` +
+                    `<i class="fa-solid fa-rotate-right text-[9px]"></i> Couldn't load — tap to retry` +
+                    `</button>`;
+            }
+        } else {
+            // status === 'done': confirmed empty, enable the create button
+            if (createBtn) createBtn.disabled = false;
+            if (statusMsg) statusMsg.classList.add('hidden');
+        }
+        // ─────────────────────────────────────────────────────────────────
+
         // Remove any previously rendered itinerary cards
         Array.from(masterList.children).forEach(el => {
             if (el.id !== 'itineraryEmptyStateLanding') el.remove();
@@ -1929,6 +2300,22 @@ function closeItineraryDetailView() {
 function _hasRecalculatableItems() {
     const itin = getActiveItinerary();
     if (!itin) return false;
+
+    // ── Closed-loop guard ────────────────────────────────────────────────────
+    // Block recalculate while we are in a recalculated state (_recalcBaseSnapshot
+    // is set after the user accepts a result) or while a suggested-days banner is
+    // pending confirmation (_preRecalcSnapshot is set).
+    //
+    // This enforces the intended closed loop:
+    //   Recalculate → (Undo available, Recalculate disabled)
+    //   Undo         → (Recalculate available again per conditions below)
+    //
+    // Without this guard, multi-day itineraries with Done activities on past days
+    // (which are never lifted by the engine) satisfy Condition 2b even immediately
+    // after a completed recalculation, making both Undo and Recalculate visible
+    // at the same time.
+    if (itin._recalcBaseSnapshot || itin._preRecalcSnapshot) return false;
+
     const todayYMD = _getLocalYMD(0);
 
     // Condition 1: at least one real elapsed past day
@@ -2088,7 +2475,7 @@ function _dismissSuggestedBanner(e) {
     // If no prior recalc was accepted, _recalcBaseSnapshot is still null and
     // the Undo button correctly stays hidden.
 
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     // Sync dismiss to cloud so that a hard refresh or a new-device load via
     // loadUserItineraries() doesn't resurrect the stale pending banner.
     syncItineraryToCloud(itin, 'save');
@@ -2098,32 +2485,51 @@ function _dismissSuggestedBanner(e) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Move-guidance banner — appears on the elapsed day the user was viewing when
-// they triggered recalculation if activities were moved out of it.  The action
-// button navigates them straight to the first future day that received spots.
+// Move-guidance banner — appears on every elapsed day that lost spots to
+// recalculation.  Dismissing it (X) reverts the entire recalculation, exactly
+// as the Suggested Extra Days banner dismiss does.  The action button navigates
+// to the first future day that received the redistributed spots and clears the
+// banner permanently.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Builds the move-guidance banner element.
- * Matches the app's dark-slate art style using a pink/purple accent palette.
+ * Visual structure, X button, and dismiss semantics are intentionally identical
+ * to _createSuggestedTimelineBanner so both banners feel like one coherent system.
  */
-function _createRecalcMoveGuidanceBanner(itin) {
+/**
+ * @param {object}  itin        - Active itinerary
+ * @param {boolean} isSourceDay - true  → this day lost spots (per-day copy)
+ *                                false → any other day (aggregate copy)
+ */
+function _createRecalcMoveGuidanceBanner(itin, isSourceDay = true) {
     const guidance  = itin._recalcMoveGuidance;
     if (!guidance)  return document.createDocumentFragment();
-    const count     = guidance.movedCount || 0;
-    const targetIdx = guidance.toDayIndices[0];
-    const dayLabel  = `Day ${targetIdx + 1}`;
+
+    const targetIdx   = guidance.toDayIndices[0];
+    const dayLabel    = `Day ${targetIdx + 1}`;
+
+    // Per-day count for source days; aggregate total across all lifted days otherwise.
+    const perDayCount = (guidance.liftedByDayIdx?.[activeItineraryDayTracker]) ?? (guidance.movedCount || 0);
+    const totalCount  = guidance.liftedByDayIdx
+        ? Object.values(guidance.liftedByDayIdx).reduce((s, n) => s + n, 0)
+        : (guidance.movedCount || 0);
+    const count    = isSourceDay ? perDayCount : totalCount;
+    const bodyText = isSourceDay
+        ? `${count} spot${count !== 1 ? 's were' : ' was'} moved from this day to upcoming days.`
+        : `${count} spot${count !== 1 ? 's were' : ' was'} redistributed from past days to upcoming days.`;
+
     const wrap      = document.createElement('div');
-    wrap.className  = 'suggested-banner-float recalc-move-guidance-banner';
+    wrap.className  = 'suggested-timeline-banner suggested-banner-float recalc-move-guidance-banner';
     wrap.style.cssText = 'margin: 0 16px 20px; padding-top: 12px;';
 
     wrap.innerHTML = `
         <div style="
-            background: linear-gradient(135deg, rgba(236,72,153,0.07) 0%, rgba(15,23,42,0.93) 100%);
+            background: linear-gradient(135deg, rgba(236,72,153,0.07) 0%, rgba(15,23,42,0.95) 100%);
             border: 1px solid rgba(236,72,153,0.22);
             border-radius: 18px;
             padding: 14px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.25), 0 0 0 1px rgba(236,72,153,0.05) inset;
+            box-shadow: 0 8px 28px rgba(0,0,0,0.30), 0 0 0 1px rgba(236,72,153,0.05) inset;
             display: flex;
             flex-direction: column;
             gap: 12px;
@@ -2134,7 +2540,7 @@ function _createRecalcMoveGuidanceBanner(itin) {
                     width:34px;height:34px;border-radius:11px;flex-shrink:0;
                     background:rgba(236,72,153,0.10);border:1px solid rgba(236,72,153,0.22);
                     display:flex;align-items:center;justify-content:center;">
-                    <i class="fa-solid fa-arrows-turn-right" style="color:rgb(236,72,153);font-size:13px;"></i>
+                    <i class="fa-solid fa-arrows-turn-right" style="color:rgb(236,72,153);font-size:13px;pointer-events:none;"></i>
                 </div>
                 <div style="flex:1;min-width:0;">
                     <p style="margin:0 0 2px;font-size:10px;font-weight:900;color:rgb(236,72,153);
@@ -2142,16 +2548,14 @@ function _createRecalcMoveGuidanceBanner(itin) {
                         Activities Redistributed
                     </p>
                     <p style="margin:0;font-size:10px;font-weight:500;color:rgb(100,116,139);line-height:1.45;">
-                        ${count} spot${count !== 1 ? 's were' : ' was'} moved from this day to upcoming days.
+                        ${bodyText}
                     </p>
                 </div>
-                <!-- Dismiss -->
-                <button onclick="_dismissRecalcMoveGuidanceBanner(event)" style="
-                    width:26px;height:26px;border-radius:50%;flex-shrink:0;cursor:pointer;
-                    background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.45);
-                    display:flex;align-items:center;justify-content:center;
-                    -webkit-tap-highlight-color:transparent;">
-                    <i class="fa-solid fa-xmark" style="color:rgb(100,116,139);font-size:9px;pointer-events:none;"></i>
+                <!-- Dismiss — same style as Suggested Extra Days X: red, Tailwind, tap feedback -->
+                <button onclick="_dismissRecalcMoveGuidanceBanner(event)"
+                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold shrink-0 active:scale-90 transition-transform"
+                        style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-xmark pointer-events-none"></i>
                 </button>
             </div>
 
@@ -2174,14 +2578,32 @@ function _createRecalcMoveGuidanceBanner(itin) {
     return wrap;
 }
 
-/** Dismiss the move-guidance banner without navigating. */
+/** Dismiss the move-guidance banner — reverts the recalculation entirely. */
 function _dismissRecalcMoveGuidanceBanner(e) {
     if (e) e.stopPropagation();
     const itin = getActiveItinerary();
     if (!itin) return;
-    itin._recalcMoveGuidance = null;
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+
+    // Revert to the pre-recalc baseline (Case A promotes _preRecalcSnapshot →
+    // _recalcBaseSnapshot, so this is the correct restore anchor).
+    if (itin._recalcBaseSnapshot) {
+        itin.days = JSON.parse(JSON.stringify(itin._recalcBaseSnapshot));
+        if (activeItineraryDayTracker >= itin.days.length) {
+            activeItineraryDayTracker = Math.max(0, itin.days.length - 1);
+        }
+    }
+
+    // Clear ALL recalc state — itinerary is back to clean baseline.
+    itin._recalcBaseSnapshot   = null;
+    itin._recalcMoveGuidance   = null;
+    itin._pendingSuggestedDays = null;
+    itin._preRecalcSnapshot    = null;
+    itin._suggestedBanner      = { active: false, count: 0 };
+
+    _saveItineraries();
+    syncItineraryToCloud(itin, 'save');
     renderDetailViewTimeline();
+    _updateBurgerMenuUndoBtn();
 }
 
 /**
@@ -2194,7 +2616,8 @@ function _jumpToRecalcMovedDay() {
     if (!itin || !itin._recalcMoveGuidance) return;
     const targetIdx = itin._recalcMoveGuidance.toDayIndices[0];
     itin._recalcMoveGuidance = null;
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
+    syncItineraryToCloud(itin, 'save');
     activeItineraryDayTracker = targetIdx;
     renderDetailViewTimeline();
 }
@@ -2301,12 +2724,16 @@ function renderDetailViewTimeline() {
     container.innerHTML = '';
     container.scrollTop = 0; // reset scroll on every render so banners always start visible
 
-    // ── Move-guidance banner visibility ───────────────────────────────────────
-    // True when recalculation moved spots out of the day the user is viewing,
-    // so we can show the pink banner that guides them to where those spots went.
-    const _showMoveGuidance = !!(itin._recalcMoveGuidance &&
-        activeItineraryDayTracker === itin._recalcMoveGuidance.fromDayIdx &&
-        !_currentDay?.isSuggested);
+    // ── Banner visibility flags ───────────────────────────────────────────────
+    // Move-guidance: shown on EVERY day when _recalcMoveGuidance exists (not just
+    // the source days that lost spots).  _moveIsSourceDay drives per-day vs aggregate copy.
+    const _liftedFromThisDay  = itin._recalcMoveGuidance?.liftedByDayIdx?.[activeItineraryDayTracker];
+    const _showMoveGuidance   = !!(itin._recalcMoveGuidance && !_currentDay?.isSuggested);
+    const _moveIsSourceDay    = !!(_liftedFromThisDay > 0);
+    // Suggested banner: shown on every non-suggested day when active.
+    const _hasSuggestedBanner = !!(itin._suggestedBanner?.active && !_currentDay?.isSuggested);
+    // Combined flag used for dim + hard-block logic below.
+    const _anyBannerActive    = _showMoveGuidance || _hasSuggestedBanner;
 
     // ── Layout constants ──────────────────────────────────────────────────────
     const PX_PER_MIN  = 2.0;   // 120 px per hour
@@ -2319,9 +2746,8 @@ function renderDetailViewTimeline() {
         // Inject both recalc banners before the empty-state message so the user
         // understands what happened rather than seeing a blank day with no context.
         if (_showMoveGuidance) {
-            container.appendChild(_createRecalcMoveGuidanceBanner(itin));
+            container.appendChild(_createRecalcMoveGuidanceBanner(itin, _moveIsSourceDay));
         }
-        const _hasSuggestedBanner = itin._suggestedBanner?.active && !_currentDay?.isSuggested;
         if (_hasSuggestedBanner) {
             container.appendChild(_createSuggestedTimelineBanner(itin));
         }
@@ -2340,6 +2766,18 @@ function renderDetailViewTimeline() {
             </div>
             <p style="font-size:11px;font-weight:600;color:rgb(71 85 105);">${emptyMsg}</p>`;
             container.appendChild(emptyDiv);
+        }
+        // Dim + block all content below the banner (empty-state illustration included).
+        if (_anyBannerActive) {
+            const _bannerEl = container.querySelector('.suggested-timeline-banner');
+            Array.from(container.children).forEach(child => {
+                if (child !== _bannerEl) {
+                    child.style.opacity          = '0.5';
+                    child.style.pointerEvents    = 'none';
+                    child.style.userSelect       = 'none';
+                    child.style.webkitUserSelect = 'none';
+                }
+            });
         }
         return;
     }
@@ -2449,16 +2887,15 @@ function renderDetailViewTimeline() {
         const propH = Math.round(durationMins * PX_PER_MIN);
 
         // ── Move-guidance banner: injected once above the first card ─────────
-        // Appears when recalculation redistributed spots out of this day so the
-        // user has a clear call-to-action to navigate to the affected future day.
+        // Shown on every day when _recalcMoveGuidance is active (not just source days).
         if (spotIndex === 0 && _showMoveGuidance) {
-            container.appendChild(_createRecalcMoveGuidanceBanner(itin));
+            container.appendChild(_createRecalcMoveGuidanceBanner(itin, _moveIsSourceDay));
         }
 
         // ── Suggested-days banner: injected once, right above the first card ──
         // Only shown on real days (not on the suggested-day view which has its own
         // explanation banner) and only when itin._suggestedBanner.active is true.
-        if (spotIndex === 0 && itin._suggestedBanner?.active && !_currentDay?.isSuggested) {
+        if (spotIndex === 0 && _hasSuggestedBanner) {
             container.appendChild(_createSuggestedTimelineBanner(itin));
         }
 
@@ -2482,6 +2919,9 @@ function renderDetailViewTimeline() {
         const block = document.createElement('div');
         block.dataset.itinBlock = `${activeItineraryDayTracker}-${spotIndex}`;
         block.style.cssText = `
+            display:block;
+            width:100%;
+            box-sizing:border-box;
             position:relative;
             padding:${CARD_TOP}px 16px ${CARD_TOP}px ${RULER_W + 6}px;
             min-height:${Math.max(propH, MIN_BLOCK_H)}px;`;
@@ -2610,8 +3050,10 @@ function renderDetailViewTimeline() {
                 <!-- Row 1b: confidence · rain-risk · defer badges -->
                 <!-- Always rendered so the rain-risk span (which has a stable DOM id)
                      can be shown/hidden by the async _updateRainRiskBadge job even when
-                     the forecast cache wasn't warm at render time. -->
-                <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                     the forecast cache wasn't warm at render time.
+                     min-height matches badge line height so this row never collapses
+                     to zero — prevents card height jitter when badges appear/disappear. -->
+                <div class="flex items-center gap-1.5 mb-1.5 flex-wrap" style="min-height:1.375rem;">
                     ${_confBadge}${_weatherRiskBadge}${_deferBadge}
                 </div>
 
@@ -2732,6 +3174,42 @@ function renderDetailViewTimeline() {
     // Postamble ruler: last activity end → midnight
     _appendRulerSection(lastEnd, 1440);
 
+    // ── Banner dim + hard-block ───────────────────────────────────────────────
+    // When any persistent banner is active, every timeline element below the banner
+    // is dimmed to 50% and an invisible overlay intercepts all pointer events so the
+    // user must dismiss or act on the banner before touching the cards.
+    if (_anyBannerActive) {
+        const _bannerEl = container.querySelector('.suggested-timeline-banner');
+        Array.from(container.children).forEach(child => {
+            if (child !== _bannerEl) {
+                child.style.opacity          = '0.5';
+                child.style.pointerEvents    = 'none';
+                child.style.userSelect       = 'none';
+                child.style.webkitUserSelect = 'none';
+            }
+        });
+        // Invisible overlay — sits above the dimmed cards, below the banner,
+        // and intercepts any touch/click that escapes the per-element block above
+        // (e.g. ruler sections whose pointer-events were already none).
+        const _overlay = document.createElement('div');
+        _overlay.style.cssText = `
+            position:sticky;bottom:0;left:0;right:0;
+            height:0;overflow:visible;
+            z-index:40;pointer-events:none;`;
+        // The real blocking layer: absolute inside the sticky shell so it
+        // covers the entire scrollable content above the bottom of the viewport.
+        const _blocker = document.createElement('div');
+        _blocker.style.cssText = `
+            position:absolute;
+            bottom:0;left:0;right:0;
+            height:100vh;
+            background:transparent;
+            pointer-events:all;
+            -webkit-tap-highlight-color:transparent;`;
+        _overlay.appendChild(_blocker);
+        container.appendChild(_overlay);
+    }
+
     // Per-activity weather badges — deferred so the DOM is painted first.
     const _actWeatherJobs = timeline.map((spot, idx) => ({
         badgeId:  `wba-${itin.id}-${activeItineraryDayTracker}-${idx}`,
@@ -2771,8 +3249,7 @@ function renderDetailViewTimeline() {
     if (timeline.length > 0) {
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                const _hasBanner = _showMoveGuidance ||
-                    (itin._suggestedBanner?.active && !_currentDay?.isSuggested);
+                const _hasBanner = _anyBannerActive;
                 if (_hasBanner) {
                     // The preamble ruler occupies firstStart * PX_PER_MIN px.
                     // The banner is appended immediately after the ruler, so its
@@ -2790,8 +3267,39 @@ function renderDetailViewTimeline() {
                     const scrollTarget = Math.max(0, rulerHeight - 12);
                     container.scrollTop = scrollTarget;
                 } else {
-                    const scrollTarget = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
-                    container.scrollTop = scrollTarget;
+                    // If any cards are done, snap to the first undone card so the user
+                    // lands right at the point they still need to action.
+                    // If ALL cards are done, snap to the last card to show the completed day.
+                    // If nothing is done yet, fall back to the original behaviour:
+                    // ~30 min before the first activity.
+                    const _hasDone = timeline.some(s => s.isDone);
+                    if (_hasDone) {
+                        const _firstUndoneIdx = timeline.findIndex(s => !s.isDone);
+                        // All done → target last card; otherwise target first undone.
+                        const _targetIdx  = _firstUndoneIdx >= 0
+                            ? _firstUndoneIdx
+                            : timeline.length - 1;
+                        const _targetCard = document.getElementById(
+                            `itin-timeline-card-${activeItineraryDayTracker}-${_targetIdx}`
+                        );
+                        if (_targetCard) {
+                            // getBoundingClientRect gives viewport-relative positions.
+                            // Convert to scroll-container-relative then subtract a
+                            // comfortable top gap (24 px) so the card isn't flush with
+                            // the viewport edge.
+                            const _cRect  = container.getBoundingClientRect();
+                            const _elRect = _targetCard.getBoundingClientRect();
+                            const _offset = _elRect.top - _cRect.top + container.scrollTop;
+                            container.scrollTop = Math.max(0, _offset - 24);
+                        } else {
+                            // Target card not yet in DOM — fall back to time-based scroll.
+                            container.scrollTop = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
+                        }
+                    } else {
+                        // No done cards — original behaviour: snap ~30 min before first activity.
+                        const scrollTarget = Math.max(0, Math.round((firstStart - 30) * PX_PER_MIN));
+                        container.scrollTop = scrollTarget;
+                    }
                 }
             });
         });
@@ -2821,7 +3329,7 @@ function toggleItinerarySpotStar(dayIndex, spotIndex) {
 
     // ── 1. Update the itinerary copy ─────────────────────────────────────────
     spot.priority = newPriority;
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
 
     // ── 2. Mirror priority into travelSpots in-memory ────────────────────────
     // IMPORTANT: we intentionally do NOT call updateCloudAction() here because
@@ -2864,7 +3372,7 @@ function toggleActivityDoneState(dayIndex, spotIndex) {
     const itin = getActiveItinerary();
     if(!itin) return;
     itin.days[dayIndex].timeline[spotIndex].isDone = !itin.days[dayIndex].timeline[spotIndex].isDone;
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     syncItineraryToCloud(itin, 'save');
     renderDetailViewTimeline();
 }
@@ -2909,7 +3417,7 @@ function removeActivityFromTimeline(dayIndex, spotIndex) {
     const itin = getActiveItinerary();
     if(!itin) return;
     itin.days[dayIndex].timeline.splice(spotIndex, 1);
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     renderDetailViewTimeline();
 }
 
@@ -2931,7 +3439,7 @@ function swapActivityInTimeline(dayIndex, spotIndex) {
             isDone: false,
             isAnchored: false
         };
-        localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+        _saveItineraries();
         renderDetailViewTimeline();
         if(typeof showFormErrorSpeechBubble === 'function') showFormErrorSpeechBubble([`Swapped for: ${replacement.spot_name}`]);
     } else {
@@ -3048,11 +3556,14 @@ function executeRecalculateEngine() {
         const isPastNoon = nowMins >= 720; // 12:00 — half-day awareness
 
         // ── Move-guidance tracking ────────────────────────────────────────────
-        // Remembers which origin day lost spots and which future days received them
-        // so we can display a banner + navigation arrow after recalc completes.
-        const _recalcOriginDayIdx       = activeItineraryDayTracker;
-        const _originDayLiftedRowids    = new Set(); // rowids lifted FROM the origin day
-        const _affectedFutureDayIndices = new Set(); // itin.days[] indices that received them
+        // Tracks which past days lost spots and which future days received them so
+        // the guidance banner can appear on EVERY emptied day (not just the one the
+        // user was viewing when they tapped Recalculate).  This fixes multi-day
+        // itineraries where the user is on today (Day 3) but spots are lifted from
+        // Days 1 and 2.
+        const _liftedByDayIdx           = new Map(); // dayIndex → # spots lifted from that day
+        const _allLiftedRowids          = new Set(); // all rowids lifted from any past day
+        const _affectedFutureDayIndices = new Set(); // itin.days[] indices that received lifted spots
 
         // ── Pacing config ─────────────────────────────────────────────────────
         const isRelaxed   = (itin.config?.pacing || 'max') === 'relaxed';
@@ -3088,8 +3599,9 @@ function executeRecalculateEngine() {
                 const newDur = cat[durationKey] ?? s.logicDur;
                 const lifted = { ...s, logicDur: newDur };
                 day.timeline.splice(j, 1);
-                // Track spots lifted from the day the user was viewing when they triggered recalc
-                if (i === _recalcOriginDayIdx) _originDayLiftedRowids.add(s.rowid);
+                // Track ALL lifted spots across every past day
+                _allLiftedRowids.add(s.rowid);
+                _liftedByDayIdx.set(i, (_liftedByDayIdx.get(i) || 0) + 1);
                 if (s.isDeferToLastDay) { deferSpots.push(lifted); }
                 else                   { missedSpots.push(lifted); }
             }
@@ -3220,8 +3732,8 @@ function executeRecalculateEngine() {
                         _confidence: confidence,
                     });
                     existingIds.add(spot.rowid);
-                    // Track if a spot from the origin day landed on this future day
-                    if (_originDayLiftedRowids.has(spot.rowid)) {
+                    // Track which future days received any lifted spot
+                    if (_allLiftedRowids.has(spot.rowid)) {
                         _affectedFutureDayIndices.add(itin.days.indexOf(day));
                     }
                     t = slotEnd + bufferMins;
@@ -3260,11 +3772,11 @@ function executeRecalculateEngine() {
         // ── Move-guidance: store which future days received spots from origin day ─
         // Banner will appear on the origin day's timeline view so the user isn't
         // left wondering why their day looks empty after recalculation.
-        if (_originDayLiftedRowids.size > 0 && _affectedFutureDayIndices.size > 0) {
+        if (_liftedByDayIdx.size > 0 && _affectedFutureDayIndices.size > 0) {
             itin._recalcMoveGuidance = {
-                fromDayIdx:   _recalcOriginDayIdx,
-                toDayIndices: [..._affectedFutureDayIndices].sort((a, b) => a - b),
-                movedCount:   _originDayLiftedRowids.size,
+                // liftedByDayIdx: { dayIndex: count } — banner appears on any day in this map
+                liftedByDayIdx: Object.fromEntries(_liftedByDayIdx),
+                toDayIndices:   [..._affectedFutureDayIndices].sort((a, b) => a - b),
             };
         }
 
@@ -3391,7 +3903,7 @@ function executeRecalculateEngine() {
             itin._preRecalcSnapshot = null;
         }
 
-        localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+        _saveItineraries();
         // Always sync to cloud here so the pending banner state (_pendingSuggestedDays,
         // _suggestedBanner, _preRecalcSnapshot) survives hard refresh and is accessible
         // from any device via loadUserItineraries().  Without this call the cloud still
@@ -3455,7 +3967,7 @@ function undoRecalculate() {
     itin._preRecalcSnapshot    = null;
     itin._suggestedBanner      = { active: false, count: 0 };
 
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     renderDetailViewTimeline();
     _updateBurgerMenuUndoBtn();
     showRecalcResultBubble(
@@ -3484,7 +3996,7 @@ function skipActivityFromTimeline(dayIndex, spotIndex) {
     const spot = itin.days[dayIndex].timeline[spotIndex];
     spot.isSkipped = true;
     itin.days[dayIndex].timeline.splice(spotIndex, 1);
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     closeSpotContextMenu();
     renderDetailViewTimeline();
 }
@@ -3510,7 +4022,7 @@ function deferActivityToLastDay(dayIndex, spotIndex) {
         isDeferToLastDay: true,
     });
     lastDay.timeline.sort((a, b) => a.sch_start - b.sch_start);
-    localStorage.setItem('compass_saved_itineraries', JSON.stringify(savedItineraries));
+    _saveItineraries();
     closeSpotContextMenu();
     renderDetailViewTimeline();
     if (typeof showFormErrorSpeechBubble === 'function') {

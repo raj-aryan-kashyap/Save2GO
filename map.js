@@ -49,6 +49,234 @@ function setupV4TwoFingerRotationListeners() {
     }, { passive: true });
 }
 
+// ── City-centre geocode fallback ─────────────────────────────────────────────
+// Spots with missing lat/lon are placed at their city centre so they still
+// appear on the map and are included in bounds-fitting.  The spot's own data
+// is never mutated — the fallback coord lives only in this cache.
+//
+// API: OpenStreetMap Nominatim — free, no key required, 1 req/s rate limit.
+// Cache is persisted to localStorage so offline sessions never re-fetch.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const cityCenterCache = new Map(
+    Object.entries(JSON.parse(localStorage.getItem('compass_city_centers') || '{}'))
+);
+
+// Hardcoded city-centre coordinates for common travel destinations.
+// These seed the cache synchronously at parse time so spots with missing
+// coordinates in these cities resolve immediately on the first render —
+// no network request required.  Nominatim still handles cities not listed here.
+const _CITY_CENTER_DEFAULTS = {
+    'paris':           { lat:  48.8566, lon:   2.3522 },
+    'london':          { lat:  51.5074, lon:  -0.1278 },
+    'new york':        { lat:  40.7128, lon: -74.0060 },
+    'new york city':   { lat:  40.7128, lon: -74.0060 },
+    'nyc':             { lat:  40.7128, lon: -74.0060 },
+    'los angeles':     { lat:  34.0522, lon:-118.2437 },
+    'chicago':         { lat:  41.8781, lon: -87.6298 },
+    'san francisco':   { lat:  37.7749, lon:-122.4194 },
+    'miami':           { lat:  25.7617, lon: -80.1918 },
+    'las vegas':       { lat:  36.1699, lon:-115.1398 },
+    'boston':          { lat:  42.3601, lon: -71.0589 },
+    'seattle':         { lat:  47.6062, lon:-122.3321 },
+    'washington':      { lat:  38.9072, lon: -77.0369 },
+    'washington dc':   { lat:  38.9072, lon: -77.0369 },
+    'toronto':         { lat:  43.6532, lon: -79.3832 },
+    'vancouver':       { lat:  49.2827, lon:-123.1207 },
+    'montreal':        { lat:  45.5017, lon: -73.5673 },
+    'mexico city':     { lat:  19.4326, lon: -99.1332 },
+    'buenos aires':    { lat: -34.6037, lon: -58.3816 },
+    'rio de janeiro':  { lat: -22.9068, lon: -43.1729 },
+    'sao paulo':       { lat: -23.5505, lon: -46.6333 },
+    'lima':            { lat: -12.0464, lon: -77.0428 },
+    'bogota':          { lat:   4.7110, lon: -74.0721 },
+    'rome':            { lat:  41.9028, lon:  12.4964 },
+    'milan':           { lat:  45.4654, lon:   9.1859 },
+    'florence':        { lat:  43.7696, lon:  11.2558 },
+    'venice':          { lat:  45.4408, lon:  12.3155 },
+    'naples':          { lat:  40.8518, lon:  14.2681 },
+    'barcelona':       { lat:  41.3851, lon:   2.1734 },
+    'madrid':          { lat:  40.4168, lon:  -3.7038 },
+    'seville':         { lat:  37.3891, lon:  -5.9845 },
+    'berlin':          { lat:  52.5200, lon:  13.4050 },
+    'munich':          { lat:  48.1351, lon:  11.5820 },
+    'hamburg':         { lat:  53.5753, lon:   9.9954 },
+    'amsterdam':       { lat:  52.3676, lon:   4.9041 },
+    'brussels':        { lat:  50.8503, lon:   4.3517 },
+    'zurich':          { lat:  47.3769, lon:   8.5417 },
+    'geneva':          { lat:  46.2044, lon:   6.1432 },
+    'vienna':          { lat:  48.2082, lon:  16.3738 },
+    'prague':          { lat:  50.0755, lon:  14.4378 },
+    'budapest':        { lat:  47.4979, lon:  19.0402 },
+    'warsaw':          { lat:  52.2297, lon:  21.0122 },
+    'lisbon':          { lat:  38.7223, lon:  -9.1393 },
+    'porto':           { lat:  41.1579, lon:  -8.6291 },
+    'athens':          { lat:  37.9838, lon:  23.7275 },
+    'stockholm':       { lat:  59.3293, lon:  18.0686 },
+    'oslo':            { lat:  59.9139, lon:  10.7522 },
+    'copenhagen':      { lat:  55.6761, lon:  12.5683 },
+    'helsinki':        { lat:  60.1699, lon:  24.9384 },
+    'reykjavik':       { lat:  64.1466, lon: -21.9426 },
+    'moscow':          { lat:  55.7558, lon:  37.6173 },
+    'istanbul':        { lat:  41.0082, lon:  28.9784 },
+    'dubai':           { lat:  25.2048, lon:  55.2708 },
+    'abu dhabi':       { lat:  24.4539, lon:  54.3773 },
+    'doha':            { lat:  25.2854, lon:  51.5310 },
+    'riyadh':          { lat:  24.7136, lon:  46.6753 },
+    'tel aviv':        { lat:  32.0853, lon:  34.7818 },
+    'jerusalem':       { lat:  31.7683, lon:  35.2137 },
+    'cairo':           { lat:  30.0444, lon:  31.2357 },
+    'marrakech':       { lat:  31.6295, lon:  -7.9811 },
+    'casablanca':      { lat:  33.5731, lon:  -7.5898 },
+    'nairobi':         { lat:  -1.2921, lon:  36.8219 },
+    'cape town':       { lat: -33.9249, lon:  18.4241 },
+    'johannesburg':    { lat: -26.2041, lon:  28.0473 },
+    'mumbai':          { lat:  19.0760, lon:  72.8777 },
+    'delhi':           { lat:  28.7041, lon:  77.1025 },
+    'new delhi':       { lat:  28.6139, lon:  77.2090 },
+    'bangalore':       { lat:  12.9716, lon:  77.5946 },
+    'kolkata':         { lat:  22.5726, lon:  88.3639 },
+    'chennai':         { lat:  13.0827, lon:  80.2707 },
+    'beijing':         { lat:  39.9042, lon: 116.4074 },
+    'shanghai':        { lat:  31.2304, lon: 121.4737 },
+    'hong kong':       { lat:  22.3193, lon: 114.1694 },
+    'tokyo':           { lat:  35.6762, lon: 139.6503 },
+    'osaka':           { lat:  34.6937, lon: 135.5023 },
+    'kyoto':           { lat:  35.0116, lon: 135.7681 },
+    'seoul':           { lat:  37.5665, lon: 126.9780 },
+    'taipei':          { lat:  25.0330, lon: 121.5654 },
+    'singapore':       { lat:   1.3521, lon: 103.8198 },
+    'kuala lumpur':    { lat:   3.1390, lon: 101.6869 },
+    'bangkok':         { lat:  13.7563, lon: 100.5018 },
+    'bali':            { lat:  -8.4095, lon: 115.1889 },
+    'jakarta':         { lat:  -6.2088, lon: 106.8456 },
+    'ho chi minh':     { lat:  10.8231, lon: 106.6297 },
+    'ho chi minh city':{ lat:  10.8231, lon: 106.6297 },
+    'hanoi':           { lat:  21.0285, lon: 105.8542 },
+    'phnom penh':      { lat:  11.5564, lon: 104.9282 },
+    'yangon':          { lat:  16.8661, lon:  96.1951 },
+    'colombo':         { lat:   6.9271, lon:  79.8612 },
+    'kathmandu':       { lat:  27.7172, lon:  85.3240 },
+    'sydney':          { lat: -33.8688, lon: 151.2093 },
+    'melbourne':       { lat: -37.8136, lon: 144.9631 },
+    'brisbane':        { lat: -27.4698, lon: 153.0251 },
+    'auckland':        { lat: -36.8509, lon: 174.7645 },
+};
+// Pre-seed the cache from defaults so common cities resolve synchronously
+// on the very first render — entries already in localStorage take priority
+// (they may have been refined by a prior Nominatim fetch).
+Object.entries(_CITY_CENTER_DEFAULTS).forEach(([key, coords]) => {
+    if (!cityCenterCache.has(key)) cityCenterCache.set(key, coords);
+});
+
+/**
+ * Returns { lat, lon } for a spot using real coordinates if valid,
+ * or the cached city-centre if not.  Returns null if neither is available.
+ * The spot object is never mutated.
+ */
+function _resolveSpotCoords(spot) {
+    const rawLat = String(spot.latitude  || '').trim();
+    const rawLon = String(spot.longitude || '').trim();
+    const lat    = parseFloat(rawLat);
+    const lon    = parseFloat(rawLon);
+    const isReal = rawLat !== '' && rawLat !== '0' &&
+                   !isNaN(lat) && !isNaN(lon) && !(lat === 0 && lon === 0);
+    if (isReal) return { lat, lon };
+
+    // Fallback: city-centre from cache
+    if (spot.city && spot.city.trim()) {
+        const cc = cityCenterCache.get(spot.city.trim().toLowerCase());
+        if (cc) return { lat: cc.lat, lon: cc.lon };
+    }
+    return null;
+}
+
+/**
+ * Fetch the geographic centre of a city via Nominatim and cache the result.
+ * Safe to call concurrently — duplicate in-flight requests for the same city
+ * are deduplicated by checking the cache before and after the await.
+ */
+async function fetchAndCacheCityCenter(city) {
+    if (!city || !city.trim()) return null;
+    const key = city.trim().toLowerCase();
+    if (cityCenterCache.has(key)) return cityCenterCache.get(key);
+    try {
+        const url  = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(city)}&format=json&limit=1`;
+        const resp = await fetch(url, { headers: { 'User-Agent': 'Save2Go/5.0 travel-app (raj.aryan@miniclip.com)' } });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        if (!data.length) return null;
+        const coords = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+        if (isNaN(coords.lat) || isNaN(coords.lon)) return null;
+        cityCenterCache.set(key, coords);
+        // Persist so the next session skips the network call.
+        const stored = {};
+        cityCenterCache.forEach((v, k) => { stored[k] = v; });
+        localStorage.setItem('compass_city_centers', JSON.stringify(stored));
+        return coords;
+    } catch (_) { return null; }
+}
+
+/**
+ * Collect every city that has at least one spot with missing coordinates
+ * and whose centre isn't cached yet, then fetch them one-by-one respecting
+ * Nominatim's 1-request-per-second policy.
+ * Re-renders map markers once all fetches are done (only if anything was fetched).
+ */
+let _prefetchRunning = false;
+// True while the map detail tray is open — suppresses all programmatic
+// viewport changes (fitBounds / setView) so the user's zoom level is preserved.
+let _mapDetailTrayVisible = false;
+// Snapshot of { center: LatLng, zoom: number } taken when the tray opens.
+// Restored exactly on dismiss so async callbacks can never shift the viewport.
+let _savedMapViewForTray = null;
+async function prefetchMissingCityCenters() {
+    if (_prefetchRunning) return;
+    if (typeof travelSpots === 'undefined') return;
+
+    const needsGeocode = new Set();
+    travelSpots.forEach(spot => {
+        // Use the same validity test as _resolveSpotCoords so the two are always in sync.
+        const rawLat = String(spot.latitude  || '').trim();
+        const rawLon = String(spot.longitude || '').trim();
+        const lat    = parseFloat(rawLat);
+        const lon    = parseFloat(rawLon);
+        const isReal = rawLat !== '' && rawLat !== '0' &&
+                       !isNaN(lat) && !isNaN(lon) && !(lat === 0 && lon === 0);
+        if (!isReal && spot.city && spot.city.trim()) {
+            const key = spot.city.trim().toLowerCase();
+            if (!cityCenterCache.has(key)) needsGeocode.add(spot.city.trim());
+        }
+    });
+    if (needsGeocode.size === 0) return;
+
+    _prefetchRunning = true;
+    const _cityList = [...needsGeocode];
+    for (let _i = 0; _i < _cityList.length; _i++) {
+        await fetchAndCacheCityCenter(_cityList[_i]);
+        // Respect Nominatim's 1 req/s limit — but skip the wait after the last request
+        // so the re-render fires immediately once all cities are resolved.
+        if (_i < _cityList.length - 1) {
+            await new Promise(r => setTimeout(r, 1100));
+        }
+    }
+    _prefetchRunning = false;
+
+    // Re-render markers with the newly cached city-centre coordinates.
+    if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+
+    // If the user is already on the map tab with a city filter active, re-fit the
+    // viewport so the fallback-coord pins are actually visible on screen.
+    // Skip if the detail tray is open — a programmatic zoom while the tray is
+    // visible would jar the user and lose their hand-chosen zoom level.
+    if (!_mapDetailTrayVisible &&
+        typeof activeTabID !== 'undefined' && activeTabID === 'map' &&
+        typeof checkedCitiesStateArray !== 'undefined' && checkedCitiesStateArray.length > 0 &&
+        typeof snapMapViewportToSelectedCityBounds === 'function') {
+        snapMapViewportToSelectedCityBounds(null);
+    }
+}
+
 function calculateDefaultMapCenterCity() {
     if (!travelSpots || travelSpots.length === 0) return null;
 
@@ -278,16 +506,25 @@ function updateGpsHudStatus(statusKey, labelText) {
           : statusKey === 'syncing' ? 'GPS Syncing...'
           :                           'GPS Off');
 
+    // ── Compact inline style (fits inside the 16 px HUD cycle slot) ──────────
+    // Colours are applied on the button element so they inherit to both children.
+    // The 'emerald' token is used by _hudCanCycle() in aap.js to detect
+    // GPS-active state — do not remove it without updating that check.
+    // Base chrome classes shared across all states (pill chip feel)
+    const _btnBase = "flex items-center gap-1.5 cursor-pointer rounded px-1.5 py-px bg-slate-800/60 border transition-colors active:bg-slate-700/80";
     if (statusKey === 'active') {
-        btn.className = "h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-emerald-500/10 border-emerald-500/40 text-emerald-400 cursor-pointer relative z-[60] transition-colors";
-        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-emerald-400"></i>';
+        btn.className   = `${_btnBase} text-emerald-400 border-emerald-900/40`;
+        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-[9px]"></i>';
     } else if (statusKey === 'syncing') {
-        btn.className = "h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-amber-500/10 border-amber-500/40 text-amber-400 cursor-pointer relative z-[60] transition-colors";
-        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-amber-400 subtle-gps-pulse"></i>';
+        btn.className   = `${_btnBase} text-amber-400 border-amber-900/40`;
+        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-[9px] subtle-gps-pulse"></i>';
     } else {
-        btn.className = "h-8 px-2.5 rounded-lg text-[9px] font-black uppercase border flex items-center gap-1.5 bg-red-500/10 border-red-500/20 text-red-400 cursor-pointer relative z-[60] transition-colors";
-        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-red-400"></i>';
+        btn.className   = `${_btnBase} text-red-400 border-red-900/40`;
+        iconFrame.innerHTML = '<i class="fa-solid fa-location-crosshairs text-[9px]"></i>';
     }
+
+    // Notify the HUD cycle controller so it can persist or resume cycling
+    if (typeof onHudGpsStateChange === 'function') onHudGpsStateChange();
 }
 
 /**
@@ -347,6 +584,9 @@ function handleGpsBadgeClickAction(event) {
 
     // Debounce: ignore taps while a GPS request is already in-flight
     if (_gpsSyncingInProgress) return;
+
+    // Pause the HUD cycle on tap — resumes when the GPS modal closes (or after 4 s)
+    if (typeof hudCyclePauseForGpsTap === 'function') hudCyclePauseForGpsTap();
 
     startLiveHardwareGPSTracking();
 }
@@ -806,7 +1046,44 @@ function snapMapViewportToSelectedCityBounds(event) {
     const magnifyingButton = document.getElementById('shortcutMagnifyingButton');
 
     if (!leafletMapInstance || travelSpots.length === 0) return;
-    
+
+    // ── Itinerary day filter active → zoom to day pins at level 15 ───────────
+    // Takes priority over the normal city-fit path so the button always focuses
+    // on what the user is actually looking at when a day filter is applied.
+    if (typeof activeItineraryFilter !== 'undefined' && activeItineraryFilter) {
+        if (magnifyingButton) {
+            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
+            void magnifyingButton.offsetWidth;
+            magnifyingButton.classList.add('lens-zoom-animation');
+        }
+        const _itin = (typeof savedItineraries !== 'undefined')
+            ? savedItineraries.find(i => i.id === activeItineraryFilter.itineraryId) : null;
+        const _day  = _itin ? _itin.days[activeItineraryFilter.dayIndex] : null;
+        if (_day?.timeline?.length) {
+            const _rowIds     = new Set(_day.timeline.map(s => String(s.rowid)));
+            const _itinSpots  = travelSpots.filter(s =>
+                _rowIds.has(String(s.rowid)) && _resolveSpotCoords(s) !== null
+            );
+            if (_itinSpots.length > 0) {
+                isCameraLocked = false;
+                syncCameraLockVisualUIState();
+                if (_itinSpots.length === 1) {
+                    const _c = _resolveSpotCoords(_itinSpots[0]);
+                    leafletMapInstance.setView([_c.lat, _c.lon], 15, { animate: true });
+                } else {
+                    const _b = L.latLngBounds();
+                    _itinSpots.forEach(s => { const _c = _resolveSpotCoords(s); if (_c) _b.extend([_c.lat, _c.lon]); });
+                    leafletMapInstance.fitBounds(_b, { padding: [50, 50], maxZoom: 15, animate: true, duration: 0.6 });
+                }
+                return;
+            }
+        }
+        // Day exists but has no mappable spots — surface a helpful bubble
+        if (typeof triggerCuteSpeechBubbleHUD === 'function')
+            triggerCuteSpeechBubbleHUD('No map pins found for this day!', magnifyingButton, event);
+        return;
+    }
+
     if (checkedCitiesStateArray.length === 0) {
         if(magnifyingButton) {
             magnifyingButton.classList.remove('thematic-pink-glow');
@@ -817,10 +1094,10 @@ function snapMapViewportToSelectedCityBounds(event) {
         return;
     }
 
-    let activeCityPins = travelSpots.filter(spot => {
-        const latVal = spot.latitude ? String(spot.latitude).trim() : "";
-        return latVal !== "" && latVal !== "0" && checkedCitiesStateArray.includes(spot.city);
-    });
+    // Include spots that have real coords OR a cached city-centre fallback.
+    let activeCityPins = travelSpots.filter(spot =>
+        checkedCitiesStateArray.includes(spot.city) && _resolveSpotCoords(spot) !== null
+    );
 
     if (activeCityPins.length === 0) {
         if(magnifyingButton) {
@@ -832,40 +1109,147 @@ function snapMapViewportToSelectedCityBounds(event) {
         return;
     }
 
+    // If the starred filter is active, the map only renders starred pins.
+    // Fitting bounds to all city pins would be misleading — snap only to
+    // the visible starred subset.  If none exist in the selected city,
+    // show a contextual bubble instead of silently doing nothing.
+    const _starredPriorities = ['high', '🔥', 'must do', 'starred'];
+    const _isStarredFilterOn = typeof showStarredOnly !== 'undefined' && showStarredOnly;
+    if (_isStarredFilterOn) {
+        const starredCityPins = activeCityPins.filter(s =>
+            _starredPriorities.includes((s.priority || '').toLowerCase())
+        );
+        if (starredCityPins.length === 0) {
+            if (magnifyingButton) {
+                magnifyingButton.classList.remove('thematic-pink-glow');
+                void magnifyingButton.offsetWidth;
+                magnifyingButton.classList.add('thematic-pink-glow');
+            }
+            if (typeof triggerCuteSpeechBubbleHUD === 'function') {
+                const _cityName = checkedCitiesStateArray.length === 1
+                    ? checkedCitiesStateArray[0]
+                    : 'this city';
+                triggerCuteSpeechBubbleHUD(
+                    `"Starred" filter is on — no starred spots in ${_cityName}!`,
+                    magnifyingButton, event
+                );
+            }
+            return;
+        }
+        // Replace the pin set so bounds-fitting only covers what's visible on map.
+        activeCityPins = starredCityPins;
+    }
+
     let targetBounds = L.latLngBounds();
     activeCityPins.forEach(spot => {
-        targetBounds.extend([parseFloat(spot.latitude), parseFloat(spot.longitude)]);
+        const _c = _resolveSpotCoords(spot);
+        if (_c) targetBounds.extend([_c.lat, _c.lon]);
     });
 
-    const currentMapBounds = leafletMapInstance.getBounds();
-    const pinsAreAlreadyWhollyVisible = currentMapBounds.contains(targetBounds);
-
-    if (pinsAreAlreadyWhollyVisible) {
-        if (magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
-            void magnifyingButton.offsetWidth; 
-            magnifyingButton.classList.add('thematic-pink-glow');
-        }
-    } else {
-        if (magnifyingButton) {
-            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
-            void magnifyingButton.offsetWidth; 
-            magnifyingButton.classList.add('lens-zoom-animation');
-        }
-
-        isCameraLocked = false;
-        syncCameraLockVisualUIState();
-
-        if (activeCityPins.length === 1) {
-            leafletMapInstance.setView([parseFloat(activeCityPins[0].latitude), parseFloat(activeCityPins[0].longitude)], 18, { animate: true });
-        } else {
-            leafletMapInstance.fitBounds(targetBounds, {
-                padding: [50, 50], 
-                animate: true,
-                duration: 0.6
-            });
-        }
+    // Always snap to the filtered pins — never silently no-op.
+    // The previous "pinsAreAlreadyWhollyVisible" guard caused a stuck-view bug:
+    // when the user narrowed the city filter from multiple cities to one, the map
+    // was still zoomed out to the old multi-city extent, so the remaining city's
+    // pins were technically inside currentMapBounds and the function returned
+    // without re-centering.  The magnifying glass is an explicit "take me there"
+    // action and should always fit/zoom regardless of the current viewport.
+    if (magnifyingButton) {
+        magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
+        void magnifyingButton.offsetWidth;
+        magnifyingButton.classList.add('lens-zoom-animation');
     }
+
+    isCameraLocked = false;
+    syncCameraLockVisualUIState();
+
+    if (activeCityPins.length === 1) {
+        const _c0 = _resolveSpotCoords(activeCityPins[0]);
+        leafletMapInstance.setView([_c0.lat, _c0.lon], 18, { animate: true });
+    } else {
+        leafletMapInstance.fitBounds(targetBounds, {
+            padding: [50, 50],
+            animate: true,
+            duration: 0.6
+        });
+    }
+}
+
+/**
+ * Auto-pan and zoom the map to the spots belonging to the currently active
+ * itinerary day filter.  Called automatically after applyItineraryDayFilter
+ * and after the Type Filter dropdown is closed while a day filter is active.
+ *
+ * Behaviour mirrors the city magnifying-glass focus function:
+ *  - Single spot → setView at zoom 16
+ *  - Multiple spots → fitBounds with 50 px padding
+ *  - Spots without coordinates are skipped silently
+ *  - If zero valid spots exist, the function exits without touching the camera
+ */
+function autoFitMapToItineraryDaySpots() {
+    if (!leafletMapInstance) return;
+    // Don't auto-pan/zoom while the detail tray is open — it would reset the
+    // user's zoom and create visible jitter behind the open tray.
+    if (_mapDetailTrayVisible) return;
+    if (typeof activeItineraryFilter === 'undefined' || !activeItineraryFilter) return;
+    if (typeof savedItineraries === 'undefined') return;
+
+    const itin = savedItineraries.find(i => i.id === activeItineraryFilter.itineraryId);
+    if (!itin) return;
+    const day = itin.days[activeItineraryFilter.dayIndex];
+    if (!day?.timeline?.length) return;
+
+    const dayRowIds = new Set(day.timeline.map(s => String(s.rowid)));
+    const validSpots = (typeof travelSpots !== 'undefined' ? travelSpots : []).filter(spot => {
+        if (!dayRowIds.has(String(spot.rowid))) return false;
+        return _resolveSpotCoords(spot) !== null;
+    });
+
+    if (validSpots.length === 0) return;
+
+    isCameraLocked = false;
+    syncCameraLockVisualUIState();
+
+    if (validSpots.length === 1) {
+        const _c = _resolveSpotCoords(validSpots[0]);
+        leafletMapInstance.setView([_c.lat, _c.lon], 16, { animate: true });
+    } else {
+        const bounds = L.latLngBounds();
+        validSpots.forEach(s => {
+            const _c = _resolveSpotCoords(s);
+            if (_c) bounds.extend([_c.lat, _c.lon]);
+        });
+        leafletMapInstance.fitBounds(bounds, { padding: [50, 50], animate: true, duration: 0.6 });
+    }
+}
+
+/**
+ * Nearest-neighbour TSP heuristic for the itinerary path line.
+ * Starts from the first timeline entry and greedily visits the closest
+ * unvisited pin each step.  Works well for the small pin counts (~5-15)
+ * typical of a single itinerary day.
+ *
+ * @param  {{ lat:number, lng:number }[]} pts  — ordered timeline coordinates
+ * @returns {{ lat:number, lng:number }[]}      — reordered for shortest route
+ */
+function _itinNearestNeighborPath(pts) {
+    if (pts.length <= 2) return pts;
+    const visited = new Array(pts.length).fill(false);
+    const result  = [pts[0]];
+    visited[0]    = true;
+    for (let step = 1; step < pts.length; step++) {
+        const last = result[result.length - 1];
+        let bestIdx = -1, bestD2 = Infinity;
+        for (let j = 0; j < pts.length; j++) {
+            if (visited[j]) continue;
+            const dlat = pts[j].lat - last.lat;
+            const dlng = pts[j].lng - last.lng;
+            const d2   = dlat * dlat + dlng * dlng;
+            if (d2 < bestD2) { bestD2 = d2; bestIdx = j; }
+        }
+        result.push(pts[bestIdx]);
+        visited[bestIdx] = true;
+    }
+    return result;
 }
 
 function plotDynamicMarkersOnCanvasMap() {
@@ -875,20 +1259,25 @@ function plotDynamicMarkersOnCanvasMap() {
     if(typeof getFilteredDatasetRows !== 'function') return;
     const dataset = getFilteredDatasetRows();
     const currentZoom = leafletMapInstance.getZoom();
-    
+
+    // Fire-and-forget: geocode cities for spots with missing coords.
+    // Re-renders automatically when fetches complete.
+    prefetchMissingCityCenters();
+
     let overlapPixelRadiusThreshold = 28;
     if (currentZoom >= 14 && currentZoom <= 15) {
-        overlapPixelRadiusThreshold = 14; 
+        overlapPixelRadiusThreshold = 14;
     } else if (currentZoom >= 16) {
-        overlapPixelRadiusThreshold = 6; 
+        overlapPixelRadiusThreshold = 6;
     }
-    
+
     let structuredClustersArray = [];
 
     dataset.forEach(spot => {
-        if(!spot.latitude || !spot.longitude || String(spot.latitude).trim() === "0" || String(spot.latitude).trim() === "") return;
-        
-        const latLngObj = L.latLng(parseFloat(spot.latitude), parseFloat(spot.longitude));
+        const _coords = _resolveSpotCoords(spot);
+        if (!_coords) return;
+
+        const latLngObj = L.latLng(_coords.lat, _coords.lon);
         const screenPoint = leafletMapInstance.latLngToLayerPoint(latLngObj);
         
         let assignedToCluster = false;
@@ -917,24 +1306,71 @@ function plotDynamicMarkersOnCanvasMap() {
         }
     });
 
+    // ── Itinerary day overlay — badge map ────────────────────────────────────
+    // _itinBadgeMap: rowid → { num, isDone }  (used by renderSingleMarkerElement)
+    // _itinPathPts:  rowid → [lat, lng] | null (filled during cluster rendering
+    //                so the path anchors to the EXACT position each marker renders
+    //                at, including fan-out offsets and cluster-centre fallbacks)
+    // _itinTimeline: ordered timeline array kept for drawing the path afterwards
+    const _itinBadgeMap = new Map();
+    const _itinPathPts  = new Map(); // rowid → [lat, lng] once rendered
+    let   _itinTimeline = [];
+
+    if (typeof activeItineraryFilter !== 'undefined' && activeItineraryFilter) {
+        const _itins = (typeof savedItineraries !== 'undefined') ? savedItineraries : [];
+        const _itin  = _itins.find(i => i.id === activeItineraryFilter.itineraryId);
+        const _day   = _itin?.days?.[activeItineraryFilter.dayIndex];
+        _itinTimeline = _day?.timeline || [];
+
+        // Build badge map — check both itinerary isDone flag AND travelSpots.status
+        // so a "Mark Done" tap on the tray is reflected without a full itin re-save.
+        const _tsr = (typeof travelSpots !== 'undefined') ? travelSpots : [];
+        _itinTimeline.forEach((s, idx) => {
+            const _ts   = _tsr.find(ts => String(ts.rowid) === String(s.rowid));
+            const _done = !!s.isDone || ((_ts?.status || '').toLowerCase().trim() === 'done');
+            _itinBadgeMap.set(String(s.rowid), { num: idx + 1, isDone: _done });
+            _itinPathPts.set(String(s.rowid), null); // placeholder; filled below
+        });
+    }
+    // ── End badge map setup ───────────────────────────────────────────────────
+
     structuredClustersArray.forEach(cluster => {
         const clusterSize = cluster.spots.length;
 
         if (clusterSize === 1) {
-            renderSingleMarkerElement(cluster.spots[0], 0, 0);
+            const _spot = cluster.spots[0];
+            renderSingleMarkerElement(_spot, 0, 0,
+                _itinBadgeMap.get(String(_spot.rowid)) || null);
+            // Record the exact rendered position for the path
+            if (_itinPathPts.has(String(_spot.rowid))) {
+                const _c = _resolveSpotCoords(_spot);
+                if (_c) _itinPathPts.set(String(_spot.rowid), [_c.lat, _c.lon]);
+            }
         } else {
             if (currentZoom >= 15) {
                 cluster.spots.forEach((spot, index) => {
-                    const angle = (index / clusterSize) * Math.PI * 2;
+                    const angle     = (index / clusterSize) * Math.PI * 2;
                     const latOffset = Math.sin(angle) * 0.00018;
                     const lonOffset = Math.cos(angle) * 0.00022;
-                    renderSingleMarkerElement(spot, latOffset, lonOffset);
+                    renderSingleMarkerElement(spot, latOffset, lonOffset,
+                        _itinBadgeMap.get(String(spot.rowid)) || null);
+                    // Record the fanned-out position so the path ends where the pin is
+                    if (_itinPathPts.has(String(spot.rowid))) {
+                        const _c = _resolveSpotCoords(spot);
+                        if (_c) _itinPathPts.set(String(spot.rowid), [_c.lat + latOffset, _c.lon + lonOffset]);
+                    }
                 });
             } else {
+                // Spots collapsed into a cluster marker — use cluster centre for path
+                cluster.spots.forEach(spot => {
+                    if (_itinPathPts.has(String(spot.rowid))) {
+                        _itinPathPts.set(String(spot.rowid),
+                            [cluster.leadLatLng.lat, cluster.leadLatLng.lng]);
+                    }
+                });
                 const clusterHTML = `<div class="cluster-map-cube">${clusterSize}</div>`;
                 const clusterIcon = L.divIcon({ html: clusterHTML, className: '', iconSize: [40, 40], iconAnchor: [20, 20] });
                 const clusterMarker = L.marker([cluster.leadLatLng.lat, cluster.leadLatLng.lng], { icon: clusterIcon });
-                
                 clusterMarker.on('click', (e) => {
                     L.DomEvent.stopPropagation(e);
                     const maxZoomPossible = leafletMapInstance.getMaxZoom();
@@ -945,9 +1381,31 @@ function plotDynamicMarkersOnCanvasMap() {
             }
         }
     });
+
+    // ── Draw itinerary path (after markers so coord collection is complete) ───
+    // Single polyline in timeline order → one continuous dash rhythm, no
+    // inter-segment gaps.  Anchored to actual rendered positions (incl. fan-out).
+    if (_itinTimeline.length >= 2) {
+        const _pathCoords = [];
+        _itinTimeline.forEach(s => {
+            const pt = _itinPathPts.get(String(s.rowid));
+            if (pt) _pathCoords.push(pt);
+        });
+        if (_pathCoords.length >= 2) {
+            L.polyline(_pathCoords, {
+                color:     '#c026d3',   // fuchsia-600 — midpoint of pink→violet
+                weight:    2.5,
+                opacity:   0.75,
+                dashArray: '6, 8',
+                lineCap:   'round',
+                lineJoin:  'round'
+            }).addTo(mapMarkersLayerGroup);
+        }
+    }
+    // ── End itinerary path ────────────────────────────────────────────────────
 }
 
-function renderSingleMarkerElement(spot, latOffset, lonOffset) {
+function renderSingleMarkerElement(spot, latOffset, lonOffset, itinBadge = null) {
     const isStarred = ['high', '🔥', 'must do', 'starred'].includes((spot.priority || "").toLowerCase());
     const isDone = (spot.status || "").toLowerCase().trim() === 'done';
 
@@ -956,6 +1414,7 @@ function renderSingleMarkerElement(spot, latOffset, lonOffset) {
     if(catStr.includes("photo")) categoryIconClass = "fa-camera-retro text-pink-500";
     else if(catStr.includes("food")) categoryIconClass = "fa-utensils text-orange-500";
     else if(catStr.includes("viewpoint")) categoryIconClass = "fa-binoculars text-sky-500";
+    else if(catStr.includes("landmark")) categoryIconClass = "fa-landmark text-yellow-500";
     else if(catStr.includes("nature")) categoryIconClass = "fa-leaf text-emerald-500";
     else if(catStr.includes("culture")) categoryIconClass = "fa-landmark text-violet-500";
     else if(catStr.includes("shopping") || catStr.includes("shop")) categoryIconClass = "fa-bag-shopping text-rose-500";
@@ -986,11 +1445,27 @@ function renderSingleMarkerElement(spot, latOffset, lonOffset) {
         stateClasses += " opacity-40 grayscale";
     }
 
-    const iconHTML = `<div class="custom-map-cube ${baseThemeClasses} ${stateClasses}"><i class="fa-solid ${categoryIconClass}"></i></div>`;
+    // Build optional itinerary order badge (number or green check for done spots)
+    let _badgeHTML = '';
+    if (itinBadge) {
+        if (itinBadge.isDone) {
+            _badgeHTML = `<div class="itin-map-badge itin-map-badge-done"><i class="fa-solid fa-check" style="font-size:6px;"></i></div>`;
+        } else {
+            _badgeHTML = `<div class="itin-map-badge">${itinBadge.num}</div>`;
+        }
+    }
+    const iconHTML = `<div style="position:relative;display:inline-block;width:36px;height:36px;">` +
+        `<div class="custom-map-cube ${baseThemeClasses} ${stateClasses}"><i class="fa-solid ${categoryIconClass}"></i></div>` +
+        `${_badgeHTML}</div>`;
     const customMarkerIcon = L.divIcon({ html: iconHTML, className: '', iconSize: [36, 36], iconAnchor: [18, 18] });
     
-    const finalLat = parseFloat(spot.latitude) + latOffset;
-    const finalLon = parseFloat(spot.longitude) + lonOffset;
+    // Use _resolveSpotCoords so spots with missing database coordinates fall back
+    // to the cached city-centre.  parseFloat(spot.latitude) would produce NaN for
+    // missing coords, causing Leaflet to silently drop the marker.
+    const _base = _resolveSpotCoords(spot);
+    if (!_base) return;
+    const finalLat = _base.lat + latOffset;
+    const finalLon = _base.lon + lonOffset;
     // Starred pins get a large zIndexOffset so they always render on top of
     // non-starred pins when spots overlap or are fanned out from a cluster.
     const leafMarker = L.marker([finalLat, finalLon], { icon: customMarkerIcon, zIndexOffset: isStarred ? 1000 : 0 });
@@ -1003,6 +1478,15 @@ function renderSingleMarkerElement(spot, latOffset, lonOffset) {
 }
 
 function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
+    _mapDetailTrayVisible = true;   // freeze programmatic viewport changes
+    // Snapshot current viewport so dismiss can restore it exactly, regardless
+    // of any async callbacks (geocode, autoFit) that fire while the tray is up.
+    if (leafletMapInstance) {
+        _savedMapViewForTray = {
+            center: leafletMapInstance.getCenter(),
+            zoom:   leafletMapInstance.getZoom()
+        };
+    }
     const tray = document.getElementById('mapDetailTrayHUD');
     // Use the dedicated tray backdrop (z-488) so it sits below the bottom nav
     // (z-490) — nav tabs stay interactive — while blocking the map and top HUD.
@@ -1120,32 +1604,45 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
 
     starBtn.innerHTML = isStarredBool ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
     starBtn.onclick = function() {
-        // Toggle priority in-memory and persist to cloud — tray stays open
-        const newPriority = isStarredBool ? 'Normal' : 'Starred';
-        if(typeof updateCloudAction === 'function') updateCloudAction(spotObj.rowid, 'toggle_priority', newPriority);
+        const nowStarred  = !isStarredBool;
+        const newPriority = nowStarred ? 'Starred' : 'Normal';
+        isStarredBool     = nowStarred;  // keep closure in sync for repeated taps
 
-        // Flip the local starred state and refresh all tray elements in-place
-        const nowStarred = !isStarredBool;
-        isStarredBool = nowStarred;   // update the closure variable so repeated taps stay correct
+        // ── Phase 1 (sync): button label + glow — committed to DOM before
+        // any compositing layer is created.  iOS will rasterise the GPU layer
+        // for .flip-card-front-face with this already-updated content.
+        starBtn.innerHTML = nowStarred
+            ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar'
+            : '<i class="fa-solid fa-star mr-1"></i> Star';
 
-        // Golden glow on both faces
         trayFaces.forEach(face => {
             if (nowStarred) face.classList.add('starred-gold-glow');
-            else face.classList.remove('starred-gold-glow');
+            else            face.classList.remove('starred-gold-glow');
         });
 
-        // Fire the amber burst on the front face when starring (not unstarring)
-        if (nowStarred) {
-            const _trayEl = document.getElementById('mapDetailTrayHUD');
-            if (_trayEl) {
-                _trayEl.classList.add('card-flash-star');
-                const _frontFace = _trayEl.querySelector('.flip-card-front-face');
-                (_frontFace || _trayEl).addEventListener('animationend', () => _trayEl.classList.remove('card-flash-star'), { once: true });
+        // ── Phase 2 (rAF 1): start amber-burst animation AFTER the label
+        // change is committed.  iOS composites .flip-card-front-face with the
+        // updated "Unstar" label already baked in — no stale-texture freeze.
+        requestAnimationFrame(() => {
+            if (nowStarred) {
+                const _trayEl = document.getElementById('mapDetailTrayHUD');
+                if (_trayEl) {
+                    _trayEl.classList.add('card-flash-star');
+                    const _frontFace = _trayEl.querySelector('.flip-card-front-face');
+                    (_frontFace || _trayEl).addEventListener('animationend',
+                        () => _trayEl.classList.remove('card-flash-star'), { once: true });
+                }
             }
-        }
 
-        // Button label
-        starBtn.innerHTML = nowStarred ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar' : '<i class="fa-solid fa-star mr-1"></i> Star';
+            // ── Phase 3 (rAF 2): heavy data work — renderListAnimated,
+            // plotMarkers, cloud POST.  Runs after animation frame 0 can paint,
+            // so it never blocks the visual response.
+            requestAnimationFrame(() => {
+                if (typeof updateCloudAction === 'function') {
+                    updateCloudAction(spotObj.rowid, 'toggle_priority', newPriority);
+                }
+            });
+        });
     };
 
     const backDesc = document.getElementById('trayBackLongDescription');
@@ -1258,9 +1755,35 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
     }
 
     tray.classList.remove('hidden');
+
+    // ── Closed-today bubble ───────────────────────────────────────────────────
+    // Only fires when: the spot has opening hours, today's entry says Closed,
+    // and the spot is not already marked Done (done = user has been there).
+    if (!isDone) {
+        var _closedCheck = _checkSpotClosedToday(spotObj.opening_hours || '');
+        if (_closedCheck && _closedCheck.isClosed) {
+            var _extraInfoBtn = document.getElementById('trayFlipToBackBtn');
+            if (_extraInfoBtn) {
+                // Short delay so the tray finishes its slide-in before the bubble appears
+                setTimeout(function() { triggerTrayClosedStatusBubble(_extraInfoBtn); }, 480);
+            }
+        }
+    }
 }
 
 function dismissMapDetailTrayHUDCard() {
+    _mapDetailTrayVisible = false;  // unfreeze programmatic viewport changes
+    // Restore the exact viewport the user had when they opened the tray.
+    // This cancels any zoom/pan that snuck through (geocode callbacks, autoFit)
+    // and ensures dismiss never changes the user's position or zoom level.
+    if (_savedMapViewForTray && leafletMapInstance) {
+        leafletMapInstance.setView(
+            [_savedMapViewForTray.center.lat, _savedMapViewForTray.center.lng],
+            _savedMapViewForTray.zoom,
+            { animate: false }
+        );
+        _savedMapViewForTray = null;
+    }
     const mapDetailTray = document.getElementById('mapDetailTrayHUD');
     if (mapDetailTray) {
         mapDetailTray.classList.add('hidden');
@@ -1274,6 +1797,69 @@ function dismissMapDetailTrayHUDCard() {
     if (sharedBg) sharedBg.classList.add('hidden');
     const plusBtn = document.getElementById('globalFloatingActionPlusButton');
     if (plusBtn) plusBtn.classList.remove('hidden');
+}
+
+// ── Closed-today detection + speech bubble ────────────────────────────────────
+// Parses the opening_hours string for today's day entry and returns whether
+// the spot is explicitly closed today.  Returns null when data is absent or
+// the day cannot be found (so we never show a false-positive).
+// ─────────────────────────────────────────────────────────────────────────────
+function _checkSpotClosedToday(hoursString) {
+    if (!hoursString || hoursString.trim() === '' || hoursString === 'N/A') return null;
+    const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const todayName = dayNames[new Date().getDay()];
+    // Split on newlines or semicolons (covers both preferred and fallback formats)
+    const tokens = hoursString.split(/[\n;]+/);
+    for (var i = 0; i < tokens.length; i++) {
+        var token = tokens[i].trim();
+        if (!token) continue;
+        if (token.toLowerCase().startsWith(todayName.toLowerCase())) {
+            return { isClosed: /closed/i.test(token), entry: token };
+        }
+    }
+    return null; // Day not found — insufficient data, no bubble
+}
+
+// Shows the "closed today" speech bubble anchored to the Extra Info button.
+// Unlike the standard triggerCuteSpeechBubbleHUD, this has NO auto-dismiss —
+// it persists until the user taps anywhere on screen.
+function triggerTrayClosedStatusBubble(anchorElement) {
+    var hud      = document.getElementById('globalToastSpeechBubbleHUD');
+    var textNode = document.getElementById('speechBubbleTextContainer');
+    var pointer  = document.getElementById('bubblePointerNode');
+    if (!hud || !textNode) return;
+
+    // Kill any bubble currently on screen (including pending auto-dismiss timer)
+    if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
+
+    textNode.textContent = 'Closed today — tap Extra Info for the full schedule.';
+
+    if (anchorElement) {
+        var rect         = anchorElement.getBoundingClientRect();
+        var anchorCenterX = rect.left + rect.width / 2;
+        var bubbleWidth  = 240;
+        var margin       = 8;
+        var leftPos      = anchorCenterX - bubbleWidth / 2;
+        leftPos = Math.max(margin, Math.min(window.innerWidth - bubbleWidth - margin, leftPos));
+        hud.style.left = leftPos + 'px';
+        hud.style.top  = rect.top  + 'px';
+        if (pointer) {
+            var pLeft = Math.max(8, Math.min(bubbleWidth - 20, Math.round(anchorCenterX - leftPos - 6)));
+            pointer.style.left  = pLeft + 'px';
+            pointer.style.right = 'auto';
+        }
+    }
+
+    hud.classList.remove('hidden');
+    hud.classList.remove('bubble-popup-anim');
+    void hud.offsetWidth;
+    hud.classList.add('bubble-popup-anim');
+
+    // No auto-dismiss — click anywhere to close
+    document.addEventListener('click', function _closedBubbleDismiss() {
+        if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
+        document.removeEventListener('click', _closedBubbleDismiss, true);
+    }, { capture: true, once: true });
 }
 
 // ── Proximity Ripple ─────────────────────────────────────────────────────────
