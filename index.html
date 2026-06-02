@@ -10,7 +10,8 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
     
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%23ec4899'/><stop offset='100%25' stop-color='%238b5cf6'/></linearGradient></defs><path fill='url(%23g)' d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z'/></svg>">
+    <link rel="icon" type="image/png" sizes="192x192" href="save2go_app_icon_192x192.png">
+    <link rel="apple-touch-icon" href="save2go_app_icon_192x192.png">
     
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
@@ -115,7 +116,7 @@
                 <!-- ── User greeting capsule ────────────────────────────────────────
                      Person icon (with online/offline status dot) + "Hey! <name>".
                      Text scrolls as a seamless marquee when the name is too long.  -->
-                <div id="userGreetingCapsule" class="flex items-center gap-1.5 py-2 px-2.5 h-8 rounded-xl bg-slate-800/60 border border-slate-700/50 relative z-[60] max-w-[120px]" style="min-width:0;">
+                <div id="userGreetingCapsule" onclick="toggleProfileDrawer(true)" class="flex items-center gap-1.5 py-2 px-2.5 h-8 rounded-xl bg-slate-800/60 border border-slate-700/50 relative z-[60] max-w-[120px] cursor-pointer active:bg-slate-700/80 transition-colors" style="min-width:0;-webkit-tap-highlight-color:transparent;">
                     <!-- Person icon + status dot -->
                     <div class="relative shrink-0 leading-[0]">
                         <i class="fa-solid fa-circle-user text-slate-400 text-sm leading-none"></i>
@@ -165,7 +166,7 @@
                 <button id="filterUnifiedCapsuleBtn" onclick="openUnifiedFilterSheet(event)"
                         class="w-full bg-slate-950 border border-slate-800/80 rounded-xl h-[38px] px-3 text-[11px] font-black text-slate-300 flex items-center gap-1.5 shadow-inner transition-all duration-200"
                         style="-webkit-tap-highlight-color:transparent">
-                    <i class="fa-solid fa-location-dot text-[10px] shrink-0"></i>
+                    <i class="fa-solid fa-sliders text-pink-400 text-[10px] shrink-0"></i>
                     <!-- Marquee wrapper — JS populates with either a static span or a
                          looping doubled-ticker when filters are active -->
                     <div id="filterCapsuleLabelWrap" class="flex-1 overflow-hidden min-w-0">
@@ -244,7 +245,8 @@
             <!-- Title: left-aligned, fills remaining space -->
             <span id="filterSheetTitle" class="flex-1 text-[16px] font-black text-slate-200 truncate">Filters</span>
             <!-- Close: Settings art style — red rounded pill -->
-            <button onclick="closeUnifiedFilterSheet()"
+            <button id="filterSheetCloseBtn"
+                    onclick="closeUnifiedFilterSheet()"
                     class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold shrink-0"
                     style="-webkit-tap-highlight-color:transparent">
                 <i class="fa-solid fa-xmark"></i>
@@ -285,14 +287,67 @@
                                        type="text"
                                        placeholder="Quiet garden, near Eiffel Tower…"
                                        autocomplete="off"
+                                       onkeydown="ssHandleInputKeydown(event)"
                                        class="flex-1 bg-slate-950/70 border border-slate-700/50 rounded-xl px-3 py-2 text-[11px] text-slate-300 outline-none transition-colors"
                                        style="-webkit-appearance:none;appearance:none;">
-                                <button class="flex items-center justify-center w-8 h-8 rounded-xl border shrink-0 transition-all"
-                                        style="background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.32);-webkit-tap-highlight-color:transparent"
-                                        onclick="return false;"
-                                        aria-label="AI search (coming soon)">
-                                    <i class="fa-solid fa-paper-plane text-violet-400 text-[11px]"></i>
+                                <button id="ssSmartSearchSendBtn"
+                                        class="flex items-center justify-center w-8 h-8 rounded-xl border shrink-0 transition-all"
+                                        style="background:rgba(139,92,246,0.18);border-color:rgba(139,92,246,0.32);-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;"
+                                        onclick="submitSmartSearch()"
+                                        aria-label="Run AI Smart Search">
+                                    <i id="ssSmartSearchSendIcon" class="fa-solid fa-paper-plane text-violet-400 text-[11px]"></i>
                                 </button>
+                            </div>
+
+                            <!-- ── Smart Search Result Area ──────────────────
+                                 Revealed after a search is submitted.
+                                 Shows the AI status badge + removable tag chips.
+                                 Managed entirely by smart_search.js.
+                            ──────────────────────────────────────────────────── -->
+                            <div id="ssResultArea" class="hidden px-3 pb-3 pt-0.5">
+                                <!-- AI status badge row -->
+                                <div class="flex items-center gap-1.5 mb-2">
+                                    <span id="ssAiBadgeDot" class="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0"></span>
+                                    <span id="ssAiBadgeText"
+                                          class="text-[10px] font-bold tracking-wide"
+                                          style="color:rgba(167,139,250,0.85);">
+                                        AI is refining…
+                                    </span>
+                                    <!-- Reset link — revealed only when chips have been removed -->
+                                    <button id="ssResetLink"
+                                            onclick="_ssResetChips()"
+                                            class="hidden ml-auto text-[10px] text-slate-500 underline underline-offset-2 transition-opacity"
+                                            style="-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;">
+                                        Reset
+                                    </button>
+                                </div>
+                                <!-- Tag chip strip — chips injected by smart_search.js -->
+                                <div id="ssChipStrip" class="flex flex-wrap gap-1.5"></div>
+                            </div>
+
+                            <!-- ── Custom Filters section ──────────────────────
+                                 Hidden until the first custom filter is created.
+                                 Rendered and managed entirely by smart_search.js.
+                            ──────────────────────────────────────────────────── -->
+                            <div id="customFiltersSection" class="hidden px-3 pb-3">
+                                <!-- Header row: label + broom button -->
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-[10px] font-black uppercase tracking-widest"
+                                          style="color:rgba(167,139,250,0.65);">Custom Filters</span>
+                                    <button onclick="_ssBroomConfirm()"
+                                            class="flex items-center justify-center w-6 h-6 rounded-lg transition-all active:scale-90"
+                                            style="background:rgba(139,92,246,0.22);border:1px solid rgba(139,92,246,0.45);-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;"
+                                            aria-label="Clear all custom filters">
+                                        <i class="fa-solid fa-broom text-[9px]" style="color:#a78bfa;"></i>
+                                    </button>
+                                </div>
+                                <!-- Filter pill buttons injected here by renderCustomFilterButtons() -->
+                                <div id="customFilterButtonsGrid" class="flex flex-wrap gap-1.5"></div>
+                                <!-- Transient notice: fallback warning / no-results -->
+                                <div id="ssFilterNotice"
+                                     class="hidden mt-2 text-[9px] font-medium leading-relaxed px-0.5"
+                                     style="color:rgba(148,163,184,0.7);">
+                                </div>
                             </div>
                         </div>
 
@@ -436,7 +491,7 @@
                 </div>
 
                 <!-- ── Map Weather Widget ──────────────────────────────────────────── -->
-                <div id="mapWeatherWidget" class="bg-slate-900/95 border border-slate-800 rounded-xl shadow-2xl px-3 py-2 pointer-events-auto flex items-center gap-2">
+                <div id="mapWeatherWidget" onclick="openWeatherDrawer()" class="bg-slate-900/95 border border-slate-800 rounded-xl shadow-2xl px-3 py-2 pointer-events-auto flex items-center gap-2 cursor-pointer active:bg-slate-800/95 transition-colors" style="-webkit-tap-highlight-color:transparent;">
                     <i id="mapWeatherIcon" class="fa-solid fa-cloud text-[12px] shrink-0 text-sky-400 opacity-40"></i>
                     <span id="mapWeatherTemp" class="text-[10px] font-black uppercase tracking-wider text-slate-300 shrink-0 leading-none">—°C</span>
                     <div class="w-px h-3 bg-slate-700 shrink-0"></div>
@@ -447,14 +502,39 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- ── Map Currency Widget ─────────────────────────────────────────── -->
+                <div id="mapCurrencyWidget" onclick="openCurrencyDrawer()" class="bg-slate-900/95 border border-slate-800 rounded-xl shadow-2xl px-3 py-2 pointer-events-auto flex items-center gap-2 cursor-pointer active:bg-slate-800/95 transition-colors" style="-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-coins text-[12px] shrink-0 text-emerald-400/70"></i>
+                    <div class="flex-1 overflow-hidden relative" style="height:1.1em">
+                        <div id="mapCurrencyTicker" style="top:0;left:0;position:absolute;display:flex;width:max-content;">
+                            <span id="mapCurrencyRateA" class="whitespace-nowrap text-[10px] font-black uppercase tracking-wider text-slate-400" style="padding-right:2rem">Exchange</span>
+                            <span id="mapCurrencyRateB" class="whitespace-nowrap text-[10px] font-black uppercase tracking-wider text-slate-400" style="padding-right:2rem">Exchange</span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            <div id="mapNavigationShortcutsStack" class="absolute top-1/2 right-4 -translate-y-1/2 z-[400] flex flex-col gap-2.5 pointer-events-auto">
+            <div id="mapNavigationShortcutsStack" class="absolute bottom-5 right-4 z-[400] flex flex-col gap-2.5 pointer-events-auto">
                 <button id="shortcutMagnifyingButton" onclick="snapMapViewportToSelectedCityBounds(event)" class="w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 text-[17px]">
                     <i class="fa-solid fa-magnifying-glass"></i>
                 </button>
                 <button id="hardwareCompassRecenterButtonNode" onclick="triggerRecenterToGpsHardwareAction(event)" class="w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 overflow-hidden relative text-[19px]">
                     <i id="innerCompassEmojiSpinnerSpan" class="fa-solid fa-compass inline-block transform transition-transform duration-300 ease-out"></i>
+                </button>
+            </div>
+
+            <!-- ── Public Holiday Notifier ──────────────────────────────────────────── -->
+            <!-- Shown only when the single selected city has a public holiday today.   -->
+            <!-- Vertically aligned with the recenter button (bottom-24, same as FAB).  -->
+            <div id="holidayNotifierWrapper"
+                 class="hidden absolute left-4 bottom-24 z-[400] pointer-events-auto">
+                <button id="holidayNotifierBtn"
+                        onclick="handleHolidayNotifierTap(event)"
+                        class="w-12 h-12 bg-red-600 border border-red-400/30 rounded-full shadow-2xl flex items-center justify-center text-white active:bg-red-700 holiday-notifier-shake"
+                        style="-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;"
+                        aria-label="Public holiday reminder">
+                    <i class="fa-solid fa-calendar-days text-[18px]"></i>
                 </button>
             </div>
 
@@ -511,7 +591,7 @@
             <!-- Relative wrapper creates a stacking context so the bottom fade
                  sits above the GPU-composited scroll layer in iOS Safari. -->
             <div class="flex-1 relative min-h-0" style="z-index:0">
-                <div id="gesture-touch-container" class="h-full overflow-y-auto w-full subtle-scrollbar px-4 pt-2 pb-24 flex flex-col gap-2 select-none">
+                <div id="gesture-touch-container" class="h-full overflow-y-auto overflow-x-hidden w-full subtle-scrollbar px-4 pt-2 pb-24 flex flex-col gap-2 select-none">
                     <div id="pullToRefreshIndicatorHUD" class="w-full h-0 overflow-hidden flex items-center justify-center text-[11px] font-black tracking-wider text-slate-600 transition-all duration-200 bg-slate-950 shrink-0">
                         <span class="animate-pulse">Refresh...</span>
                     </div>
@@ -983,6 +1063,42 @@
         </div>
     </div>
 
+    <!-- ═══ PROFILE DRAWER ═══════════════════════════════════════════════════
+         Opens when the user taps the greeting capsule (person icon + name).
+         Contains only profile-management controls: rename + switch user.
+         Shares the same confirm/result/purge sub-modals as the settings drawer.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="profileDrawer" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[999] hidden flex justify-end">
+        <div id="profileDrawerContentBody" class="w-72 bg-slate-900 h-full border-l border-slate-800 p-6 flex flex-col gap-6 shadow-2xl overflow-y-auto no-scrollbar pb-24">
+            <!-- Header -->
+            <div class="flex justify-between items-center pb-3 border-b border-slate-800">
+                <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider">My Profile</h3>
+                <button onclick="toggleProfileDrawer(false)" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <!-- Change Profile Name -->
+            <div class="space-y-2">
+                <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Change My Profile Name</label>
+                <input type="text" id="settingsRenameField" oninput="validateProfileRenameInput()" placeholder="Enter Your New Name Here" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none placeholder-slate-600">
+                <div id="profileRenameMinCharWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-amber-400/75 pl-0.5">
+                    <i class="fa-solid fa-triangle-exclamation text-[9px]"></i>
+                    <span>Minimum 3 characters required</span>
+                </div>
+                <div id="profileRenameNameTakenWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5">
+                    <i class="fa-solid fa-circle-xmark text-[9px]"></i>
+                    <span>Name not available</span>
+                </div>
+                <button id="profileRenameSubmitBtn" onclick="commitProfileRename()" disabled class="w-full py-2 bg-slate-800 rounded-lg text-[11px] font-bold opacity-40 cursor-not-allowed transition-all duration-200">Update Profile</button>
+            </div>
+            <hr class="border-slate-800">
+            <!-- Select Active User -->
+            <div id="settingsSwitchUserSection" class="space-y-2">
+                <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Select Active User</label>
+                <select id="settingsSwitchUserDropdown" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-300 focus:outline-none block appearance-none h-11 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_12px_center] bg-no-repeat pr-8"></select>
+                <button id="settingsSwitchUserBtn" onclick="switchUserSessionViaSettings()" class="w-full py-2 bg-gradient-to-r from-violet-600 to-pink-600 rounded-lg text-[11px] font-bold text-white">Swap Active User</button>
+            </div>
+        </div>
+    </div>
+
     <div id="settingsDrawer" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[999] hidden flex justify-end">
         <div id="settingsDrawerContentBody" class="w-72 bg-slate-900 h-full border-l border-slate-800 p-6 flex flex-col justify-between shadow-2xl overflow-y-auto no-scrollbar pb-24">
             <div class="space-y-6">
@@ -990,24 +1106,46 @@
                     <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider">Settings</h3>
                     <button onclick="toggleSettingsMenu(false)" class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold"><i class="fa-solid fa-xmark"></i></button>
                 </div>
+                <!-- ── Map Display ──────────────────────────────────────────────── -->
                 <div class="space-y-2">
-                    <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Change My Profile Name</label>
-                    <input type="text" id="settingsRenameField" oninput="validateProfileRenameInput()" placeholder="Enter Your New Name Here" class="w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs text-slate-200 focus:outline-none placeholder-slate-600">
-                    <div id="profileRenameMinCharWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-amber-400/75 pl-0.5">
-                        <i class="fa-solid fa-triangle-exclamation text-[9px]"></i>
-                        <span>Minimum 3 characters required</span>
+                    <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                        Map Display
+                    </label>
+                    <div class="bg-slate-950 border border-slate-800 rounded-xl px-3 py-3 space-y-3">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="min-w-0">
+                                <div class="text-[11.5px] font-bold text-slate-300 leading-tight">
+                                    Show weather on map
+                                </div>
+                                <div class="text-[9.5px] text-slate-500 mt-0.5 leading-relaxed">
+                                    Weather capsule in the map HUD
+                                </div>
+                            </div>
+                            <button id="settingsWeatherToggle"
+                                    onclick="settingsToggleWeatherCapsule()"
+                                    class="cd-toggle-track cd-toggle-settings-on"
+                                    aria-pressed="true">
+                                <span class="cd-toggle-knob"></span>
+                            </button>
+                        </div>
+                        <div class="border-t border-slate-800/60"></div>
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="min-w-0">
+                                <div class="text-[11.5px] font-bold text-slate-300 leading-tight">
+                                    Show currency on map
+                                </div>
+                                <div class="text-[9.5px] text-slate-500 mt-0.5 leading-relaxed">
+                                    Currency capsule in the map HUD
+                                </div>
+                            </div>
+                            <button id="settingsCurrencyToggle"
+                                    onclick="settingsToggleCurrencyCapsule()"
+                                    class="cd-toggle-track cd-toggle-settings-on"
+                                    aria-pressed="true">
+                                <span class="cd-toggle-knob"></span>
+                            </button>
+                        </div>
                     </div>
-                    <div id="profileRenameNameTakenWarning" class="hidden flex items-center gap-1.5 text-[10px] font-semibold text-red-400/80 pl-0.5">
-                        <i class="fa-solid fa-circle-xmark text-[9px]"></i>
-                        <span>Name not available</span>
-                    </div>
-                    <button id="profileRenameSubmitBtn" onclick="commitProfileRename()" disabled class="w-full py-2 bg-slate-800 rounded-lg text-[11px] font-bold opacity-40 cursor-not-allowed transition-all duration-200">Update Profile</button>
-                </div>
-                <hr class="border-slate-800">
-                <div id="settingsSwitchUserSection" class="space-y-2">
-                    <label class="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Select Active User</label>
-                    <select id="settingsSwitchUserDropdown" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-300 focus:outline-none block appearance-none h-11 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_12px_center] bg-no-repeat pr-8"></select>
-                    <button id="settingsSwitchUserBtn" onclick="switchUserSessionViaSettings()" class="w-full py-2 bg-gradient-to-r from-violet-600 to-pink-600 rounded-lg text-[11px] font-bold text-white">Swap Active User</button>
                 </div>
                 <hr class="border-slate-800">
                 <div class="space-y-2">
@@ -1044,8 +1182,8 @@
          Reusable "are you sure?" dialog for Clear Itinerary, Logout, Rename,
          Switch User. JS calls openSettingsConfirmModal({...}) to configure it.
     ════════════════════════════════════════════════════════════════════════ -->
-    <div id="settingsConfirmModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[2000] hidden flex items-center justify-center p-6">
-        <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden">
+    <div id="settingsConfirmModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[2000] hidden flex items-center justify-center p-6" onclick="cancelSettingsConfirmModal()">
+        <div class="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl relative overflow-hidden" onclick="event.stopPropagation()">
             <div id="sConfirmTopBar" class="h-0.5 w-full bg-gradient-to-r from-pink-500 to-violet-500"></div>
             <div class="p-5 pt-4">
                 <!-- X close — returns user to settings drawer -->
@@ -1710,6 +1848,486 @@
         </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         WEATHER DRAWER  — bottom-sheet triggered by tapping the map capsule
+         z-[62] sits above the map tray overlay (z-50) and the filter sheet (z-60)
+         ═══════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Backdrop -->
+    <div id="weatherDrawerOverlay"
+         class="hidden fixed inset-0 z-[62] bg-black/60 backdrop-blur-[1px]"
+         onclick="closeWeatherDrawer()"
+         style="-webkit-tap-highlight-color:transparent;"></div>
+
+    <!-- Sheet -->
+    <div id="weatherDrawerSheet"
+         class="fixed bottom-0 left-0 right-0 z-[63] bg-slate-900 rounded-t-2xl shadow-2xl weather-drawer-sheet"
+         style="transform:translateY(100%); max-height:90dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
+
+        <!-- Drag handle -->
+        <div class="flex justify-center pt-3 pb-1 sticky top-0 bg-slate-900 z-10">
+            <div class="w-10 h-1 bg-slate-700/80 rounded-full"></div>
+        </div>
+
+        <!-- ── Header ──────────────────────────────────────────────────────── -->
+        <div class="px-4 pb-4 pt-1 flex justify-between items-start border-b border-slate-800/50">
+            <div class="flex-1 min-w-0 pr-3">
+                <div class="text-[8.5px] font-black uppercase tracking-[0.28em] text-sky-400/60 mb-1">
+                    Atmospheric Intelligence
+                </div>
+                <div class="flex items-baseline gap-2.5">
+                    <div id="wdCity"
+                         class="text-[22px] font-black text-white leading-tight tracking-tight truncate">
+                        …
+                    </div>
+                    <div id="wdTempHero" class="shrink-0 text-[18px] font-black text-sky-300 leading-tight">
+                        —°
+                    </div>
+                </div>
+                <div id="wdCondition"
+                     class="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                    <span class="text-slate-500 text-[10px] italic">Syncing…</span>
+                </div>
+                <div id="wdFeelsLine" class="text-[9.5px] text-slate-500 mt-0.5 hidden">
+                    Feels like <span id="wdFeelsVal" class="font-bold text-slate-400">—°</span>
+                </div>
+            </div>
+            <button onclick="closeWeatherDrawer()"
+                    class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 mt-0.5 shrink-0 active:bg-red-950/70 transition-colors"
+                    style="-webkit-tap-highlight-color:transparent;">
+                <i class="fa-solid fa-xmark text-[11px] pointer-events-none"></i>
+            </button>
+        </div>
+
+        <!-- ── Loading state ──────────────────────────────────────────────── -->
+        <div id="wdLoading" class="py-14 flex flex-col items-center gap-3">
+            <i class="fa-solid fa-cloud-sun text-slate-600 text-[28px]"></i>
+            <span class="text-slate-500 text-[11px] tracking-widest uppercase font-bold">
+                Fetching live data…
+            </span>
+        </div>
+
+        <!-- ── Main content (hidden until data arrives) ───────────────────── -->
+        <!-- pb-28 (112px) ensures the forecast strip clears the fixed bottom nav bar -->
+        <div id="wdContent" class="hidden px-4 pb-28 space-y-5 pt-4">
+
+            <!-- Section 1 · Health Hub -->
+            <div>
+                <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-2 pl-0.5">
+                    Health Hub
+                </div>
+                <div class="grid grid-cols-2 gap-2.5">
+
+                    <!-- AQI card -->
+                    <div class="bg-slate-900/70 border border-sky-500/20 rounded-2xl p-3.5">
+                        <div class="flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-wind text-sky-400 text-[10px]"></i>
+                            <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                                Air Quality
+                            </span>
+                        </div>
+                        <div id="wdAqiValue"
+                             class="text-[26px] font-black leading-none text-sky-300">—</div>
+                        <div id="wdAqiLabel"
+                             class="text-[10px] font-bold text-sky-400/70 mt-1">—</div>
+                    </div>
+
+                    <!-- UV card -->
+                    <div class="bg-slate-900/70 border border-amber-500/20 rounded-2xl p-3.5">
+                        <div class="flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-sun text-amber-400 text-[10px]"></i>
+                            <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                                UV Index
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div id="wdUvValue"
+                                 class="text-[26px] font-black leading-none text-amber-300">—</div>
+                            <div id="wdUvPulse"
+                                 class="hidden w-2.5 h-2.5 rounded-full bg-amber-400"></div>
+                        </div>
+                        <div id="wdUvLabel"
+                             class="text-[10px] font-bold text-amber-400/70 mt-1">—</div>
+                        <div id="wdUvAdvice"
+                             class="text-[9px] text-slate-500 mt-0.5 leading-snug">—</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 2 · Photographer's Grid -->
+            <div>
+                <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-2 pl-0.5">
+                    Photographer's Grid
+                </div>
+                <div class="grid grid-cols-2 gap-2.5">
+
+                    <!-- Golden Hour -->
+                    <div class="bg-slate-900/70 border border-amber-600/20 rounded-2xl p-3.5">
+                        <div class="flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-camera text-amber-500 text-[10px]"></i>
+                            <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                                Golden Hour
+                            </span>
+                        </div>
+                        <div id="wdGoldenHour"
+                             class="text-[12px] font-black text-amber-300 leading-snug">—</div>
+                    </div>
+
+                    <!-- Blue Hour -->
+                    <div class="bg-slate-900/70 border border-indigo-500/20 rounded-2xl p-3.5">
+                        <div class="flex items-center gap-1.5 mb-2">
+                            <i class="fa-solid fa-camera text-indigo-400 text-[10px]"></i>
+                            <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                                Blue Hour
+                            </span>
+                        </div>
+                        <div id="wdBlueHour"
+                             class="text-[12px] font-black text-indigo-300 leading-snug">—</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 3 · Solar Cycle -->
+            <div>
+                <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-2 pl-0.5">
+                    Solar Cycle
+                </div>
+                <div class="bg-slate-900/70 border border-slate-700/40 rounded-2xl px-4 py-3.5
+                            flex justify-around items-center">
+                    <!-- Sunrise -->
+                    <div class="flex flex-col items-center gap-1.5">
+                        <i class="fa-solid fa-sun text-orange-400 text-[18px]"></i>
+                        <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                            Sunrise
+                        </span>
+                        <span id="wdSunrise"
+                              class="text-[14px] font-black text-orange-300 tabular-nums">—</span>
+                    </div>
+                    <!-- Divider -->
+                    <div class="flex items-center gap-1 text-slate-700">
+                        <div class="w-4 h-px bg-slate-700/60"></div>
+                        <i class="fa-solid fa-circle text-[5px]"></i>
+                        <div class="w-4 h-px bg-slate-700/60"></div>
+                    </div>
+                    <!-- Sunset -->
+                    <div class="flex flex-col items-center gap-1.5">
+                        <i class="fa-solid fa-moon text-indigo-400 text-[18px]"></i>
+                        <span class="text-[8.5px] font-black uppercase tracking-widest text-slate-500">
+                            Sunset
+                        </span>
+                        <span id="wdSunset"
+                              class="text-[14px] font-black text-indigo-300 tabular-nums">—</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 4 · Hourly Forecast -->
+            <div>
+                <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-2 pl-0.5">
+                    Hourly Forecast
+                </div>
+                <div id="wdForecastStrip"
+                     class="wd-forecast-strip flex gap-2.5 overflow-x-auto pb-0.5">
+                    <!-- forecast pills injected by JS -->
+                </div>
+            </div>
+
+            <!-- ── Divider ─────────────────────────────────────────────────── -->
+            <div class="border-t border-slate-800/60"></div>
+
+            <!-- ── Don't show on map toggle ──────────────────────────────── -->
+            <div class="bg-slate-900/70 border border-slate-700/40 rounded-2xl px-4 py-3.5">
+                <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="text-[11.5px] font-black text-slate-300 leading-tight">
+                            Don't show on map
+                        </div>
+                        <div class="text-[9.5px] text-slate-500 mt-0.5 leading-relaxed">
+                            Hide the weather capsule from the map screen
+                        </div>
+                    </div>
+                    <button id="wdHideCapsuleToggle"
+                            onclick="toggleWeatherHidePreference()"
+                            class="cd-toggle-track"
+                            aria-pressed="false">
+                        <span class="cd-toggle-knob"></span>
+                    </button>
+                </div>
+                <!-- Info banner — visible only when toggle is ON -->
+                <div id="wdHideCapsuleInfo"
+                     class="hidden mt-3 bg-amber-500/8 border border-amber-500/20 rounded-xl
+                            px-3 py-2.5 flex items-start gap-2">
+                    <i class="fa-solid fa-circle-info text-amber-400 text-[11px] mt-0.5 shrink-0
+                               pointer-events-none"></i>
+                    <p class="text-[10px] text-amber-200/70 leading-relaxed">
+                        Closing this drawer will hide the weather capsule from your map.
+                        Re-enable it anytime from
+                        <span class="font-black text-amber-300">Settings → Show weather on map</span>.
+                    </p>
+                </div>
+            </div>
+
+        </div>
+    </div>
+    <!-- END WEATHER DRAWER -->
+
+    <!-- ═══ CURRENCY DRAWER  — bottom-sheet triggered by tapping the map currency capsule
+         Same z-level as weather drawer — they are never open simultaneously.
+    ════════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Backdrop -->
+    <div id="currencyDrawerOverlay"
+         class="hidden fixed inset-0 z-[62] bg-black/60 backdrop-blur-[1px]"
+         onclick="closeCurrencyDrawer()"
+         style="-webkit-tap-highlight-color:transparent;"></div>
+
+    <!-- Sheet -->
+    <div id="currencyDrawerSheet"
+         class="fixed bottom-0 left-0 right-0 z-[63] bg-slate-900 rounded-t-2xl shadow-2xl weather-drawer-sheet"
+         style="transform:translateY(100%); max-height:90dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
+
+        <!-- Drag handle -->
+        <div class="flex justify-center pt-3 pb-1 sticky top-0 bg-slate-900 z-10">
+            <div class="w-10 h-1 bg-slate-700/80 rounded-full"></div>
+        </div>
+
+        <!-- ── Header ──────────────────────────────────────────────────────── -->
+        <div class="px-4 pb-4 pt-1 flex justify-between items-start border-b border-slate-800/50">
+            <div class="flex-1 min-w-0 pr-3">
+                <div class="text-[8.5px] font-black uppercase tracking-[0.28em] text-emerald-400/60 mb-1">
+                    Currency Exchange
+                </div>
+                <div id="cdLocation"
+                     class="text-[18px] font-black text-white leading-tight tracking-tight truncate">
+                    Your Location
+                </div>
+                <div id="cdLocalCurrencyLabel"
+                     class="text-[11px] text-slate-400 mt-0.5">
+                    <span class="text-slate-500 text-[10px] italic">Detecting…</span>
+                </div>
+            </div>
+            <button onclick="closeCurrencyDrawer()"
+                    class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center
+                           justify-center text-red-400 mt-0.5 shrink-0 active:bg-red-950/70 transition-colors"
+                    style="-webkit-tap-highlight-color:transparent;">
+                <i class="fa-solid fa-xmark text-[11px] pointer-events-none"></i>
+            </button>
+        </div>
+
+        <!-- ── Content ─────────────────────────────────────────────────────── -->
+        <!-- pb-28 (112px) clears the fixed bottom nav bar (76px) + safe-area  -->
+        <div id="cdContent" class="px-4 pt-5 pb-28 space-y-5"
+             style="padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px))">
+
+            <!-- Loading skeleton -->
+            <div id="cdLoading" class="space-y-3">
+                <div class="h-16 bg-slate-800/60 rounded-2xl animate-pulse"></div>
+                <div class="h-5 bg-slate-800/40 rounded-xl animate-pulse w-2/3"></div>
+            </div>
+
+            <!-- Rate block (hidden until data loads) -->
+            <div id="cdRateBlock" class="hidden">
+                <div class="bg-slate-800/60 border border-slate-700/40 rounded-2xl px-5 py-5">
+                    <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-3">
+                        Live Rate
+                    </div>
+                    <div id="cdRatePrimary"
+                         class="text-[30px] font-black text-emerald-300 leading-none tabular-nums tracking-tight">
+                        —
+                    </div>
+                    <div id="cdRateInverse"
+                         class="text-[14px] font-bold text-slate-500 tabular-nums mt-2 hidden">
+                        —
+                    </div>
+                    <div class="mt-3 flex items-center gap-1.5">
+                        <div class="w-1.5 h-1.5 rounded-full bg-emerald-500/60"></div>
+                        <span id="cdRateAttrib"
+                              class="text-[8.5px] text-slate-600 font-medium tracking-wide">
+                            ECB · Updated daily
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Amount Converter ───────────────────────────────────────── -->
+            <div id="cdConverterBlock" class="hidden">
+                <div class="bg-slate-800/60 border border-slate-700/40 rounded-2xl px-4 py-4 space-y-2">
+                    <div class="text-[8.5px] font-black uppercase tracking-[0.22em] text-slate-500 mb-1">
+                        Convert
+                    </div>
+
+                    <!-- FROM row — tappable currency selector + editable amount -->
+                    <div class="bg-slate-950 border border-slate-700/50 rounded-xl flex items-center gap-0 px-3 py-3">
+                        <button id="cdConvFromSelector" onclick="openConverterCurrencyPicker('from')"
+                                class="shrink-0 flex items-center gap-1.5 pr-3 active:opacity-60 transition-opacity"
+                                style="-webkit-tap-highlight-color:transparent;">
+                            <span id="cdConvFromSymbol"
+                                  class="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20
+                                         flex items-center justify-center text-[13px] font-black text-emerald-300">
+                                ₹
+                            </span>
+                            <div class="text-left">
+                                <div id="cdConvFromCode"
+                                     class="text-[9px] text-slate-300 font-black uppercase tracking-wider leading-none">
+                                    INR
+                                </div>
+                                <i class="fa-solid fa-chevron-down text-slate-600 text-[7px] mt-0.5 block"></i>
+                            </div>
+                        </button>
+                        <div class="w-px self-stretch bg-slate-700/50 shrink-0 mx-0.5"></div>
+                        <input id="cdConverterInput"
+                               type="number" inputmode="decimal" min="0" placeholder="0"
+                               oninput="onCurrencyConverterInput()"
+                               class="flex-1 min-w-0 bg-transparent text-slate-100 text-[22px] font-black leading-none
+                                      outline-none pl-3"
+                               style="-webkit-appearance:none;-moz-appearance:textfield;appearance:textfield;">
+                    </div>
+
+                    <!-- Swap button -->
+                    <div class="flex items-center justify-center py-0.5">
+                        <button onclick="swapCurrencyDirection()"
+                                class="w-9 h-9 rounded-full bg-slate-700/80 border border-slate-600/50
+                                       flex items-center justify-center text-slate-300 active:bg-slate-600
+                                       transition-colors shadow-md"
+                                style="-webkit-tap-highlight-color:transparent;">
+                            <i class="fa-solid fa-arrow-down-up-across-line text-[13px]"></i>
+                        </button>
+                    </div>
+
+                    <!-- TO row — tappable currency selector + read-only result -->
+                    <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl flex items-center gap-0 px-3 py-3">
+                        <button id="cdConvToSelector" onclick="openConverterCurrencyPicker('to')"
+                                class="shrink-0 flex items-center gap-1.5 pr-3 active:opacity-60 transition-opacity"
+                                style="-webkit-tap-highlight-color:transparent;">
+                            <span id="cdConvToSymbol"
+                                  class="w-8 h-8 rounded-lg bg-slate-800 border border-slate-700/40
+                                         flex items-center justify-center text-[13px] font-black text-slate-400">
+                                €
+                            </span>
+                            <div class="text-left">
+                                <div id="cdConvToCode"
+                                     class="text-[9px] text-slate-300 font-black uppercase tracking-wider leading-none">
+                                    EUR
+                                </div>
+                                <i class="fa-solid fa-chevron-down text-slate-600 text-[7px] mt-0.5 block"></i>
+                            </div>
+                        </button>
+                        <div class="w-px self-stretch bg-slate-700/50 shrink-0 mx-0.5"></div>
+                        <div id="cdConverterResult"
+                             class="flex-1 min-w-0 text-slate-200 text-[22px] font-black leading-none tabular-nums truncate pl-3">
+                            —
+                        </div>
+                    </div>
+
+                    <!-- Inline currency picker panel (shared for FROM/TO) -->
+                    <div id="cdPickerPanel"
+                         class="hidden overflow-hidden rounded-2xl border border-slate-700/60 bg-slate-950 mt-1">
+
+                        <!-- Picker header -->
+                        <div class="px-3 pt-3 pb-2 flex items-center justify-between border-b border-slate-800/70">
+                            <span id="cdPickerPanelTitle"
+                                  class="text-[9px] font-black uppercase tracking-wider text-slate-500">
+                                Select currency
+                            </span>
+                            <button onclick="closeConverterCurrencyPicker()"
+                                    class="text-slate-500 active:text-slate-300 transition-colors"
+                                    style="-webkit-tap-highlight-color:transparent;">
+                                <i class="fa-solid fa-xmark text-[13px]"></i>
+                            </button>
+                        </div>
+
+                        <!-- Search bar -->
+                        <div class="px-3 pt-2.5 pb-2 border-b border-slate-800/70">
+                            <div class="relative">
+                                <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2
+                                          text-slate-500 text-[11px] pointer-events-none"></i>
+                                <input type="text"
+                                       id="cdPickerSearch"
+                                       placeholder="Type a currency or country…"
+                                       autocomplete="off"
+                                       autocorrect="off"
+                                       spellcheck="false"
+                                       oninput="filterConverterCurrencyList(this.value)"
+                                       class="w-full bg-slate-900 border border-slate-800 rounded-xl
+                                              pl-9 pr-3 py-2.5 text-[11px] text-slate-200
+                                              focus:outline-none focus:border-emerald-500/40
+                                              placeholder-slate-600 transition-colors">
+                            </div>
+                        </div>
+
+                        <!-- Currency list -->
+                        <div id="cdPickerList"
+                             class="overflow-y-auto no-scrollbar"
+                             style="max-height:200px; overscroll-behavior:contain;">
+                            <!-- Rows injected by JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Home currency zone message -->
+            <div id="cdHomeCurrencyZone" class="hidden">
+                <div class="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl px-5 py-4 flex items-center gap-3.5">
+                    <i class="fa-solid fa-circle-check text-emerald-400 text-[20px] shrink-0"></i>
+                    <div>
+                        <div id="cdZoneLabel" class="text-[12px] font-black text-emerald-300 leading-tight">Home currency zone</div>
+                        <div class="text-[10px] text-slate-500 mt-0.5 leading-relaxed">You're already paying in your home currency here.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error state -->
+            <div id="cdError" class="hidden">
+                <div class="bg-slate-800/60 border border-slate-700/40 rounded-2xl px-4 py-4 flex items-center gap-3">
+                    <i class="fa-solid fa-triangle-exclamation text-amber-400 text-[16px] shrink-0"></i>
+                    <span id="cdErrorText" class="text-[11px] text-slate-400 leading-relaxed">Rate unavailable</span>
+                </div>
+            </div>
+
+            <!-- ── Divider ─────────────────────────────────────────────────── -->
+            <div class="border-t border-slate-800/60"></div>
+
+            <!-- ── Don't show on map toggle ──────────────────────────────── -->
+            <div class="bg-slate-900/70 border border-slate-700/40 rounded-2xl px-4 py-3.5">
+                <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="text-[11.5px] font-black text-slate-300 leading-tight">
+                            Don't show on map
+                        </div>
+                        <div class="text-[9.5px] text-slate-500 mt-0.5 leading-relaxed">
+                            Hide the currency capsule from the map screen
+                        </div>
+                    </div>
+                    <button id="cdHideCapsuleToggle"
+                            onclick="toggleCurrencyHidePreference()"
+                            class="cd-toggle-track"
+                            aria-pressed="false">
+                        <span class="cd-toggle-knob"></span>
+                    </button>
+                </div>
+                <!-- Info banner — visible only when toggle is ON -->
+                <div id="cdHideCapsuleInfo"
+                     class="hidden mt-3 bg-amber-500/8 border border-amber-500/20 rounded-xl
+                            px-3 py-2.5 flex items-start gap-2">
+                    <i class="fa-solid fa-circle-info text-amber-400 text-[11px] mt-0.5 shrink-0
+                               pointer-events-none"></i>
+                    <p class="text-[10px] text-amber-200/70 leading-relaxed">
+                        Closing this drawer will hide the currency capsule from your map.
+                        Re-enable it anytime from
+                        <span class="font-black text-amber-300">Settings → Show currency on map</span>.
+                    </p>
+                </div>
+            </div>
+
+
+        </div>
+    </div>
+    <!-- END CURRENCY DRAWER -->
+
+    <!-- smart_search.js must load after aap.js (needs API_URL, travelSpots,
+         currentUser) and before map.js / itinerary.js (which may trigger
+         renderList before user interaction). -->
+    <script src="smart_search.js"></script>
     <script src="map.js"></script>
     <script src="itinerary.js"></script>
 </body>

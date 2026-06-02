@@ -2,11 +2,46 @@ const APP_VERSION = "v5.0.10";
 const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ2NjeKudS93yv8-DYSYnBxaFS5_I1TWily79rOkMdGTu5IA/exec";
 const BACKEND_URL = API_URL;
 
-// ── OpenWeatherMap ───────────────────────────────────────────────────────────
-// API key is stored in Google Apps Script Script Properties (key: OWM_API_KEY).
-// The frontend never holds the key — it requests weather via the backend proxy.
+// ── Weather (Open-Meteo) ─────────────────────────────────────────────────────
+// All live weather data now comes from Open-Meteo (free, no API key, CORS-safe).
+// OpenWeatherMap code is preserved in the GAS backend for future use but is NOT
+// called by the frontend.
+//
+// Nominatim reverse-geocode is used for city/country name only (cached 24 h,
+// keyed to 0.1° precision so all spots in a city share one lookup).
 const weatherCache        = new Map(); // key: "lat,lon" → { iconClass, temp, fetchedAt }
-const WEATHER_CACHE_TTL   = 30 * 60 * 1000; // 30 minutes
+const WEATHER_CACHE_TTL   = 10 * 60 * 1000; // 10 minutes
+
+const _nominatimCache     = new Map(); // key: "lat1,lon1" → { city, country, fetchedAt }
+const _NOMINATIM_TTL      = 24 * 60 * 60 * 1000; // 24 h — city/country almost never changes
+
+/**
+ * Lightweight reverse-geocode via Nominatim.  Keyed to 0.1° (~10 km) so all
+ * spots in the same city share one network call.
+ * @returns {{ city: string, country: string }}
+ */
+async function _reverseGeocode(lat, lon) {
+    const key    = `${parseFloat(lat).toFixed(1)},${parseFloat(lon).toFixed(1)}`;
+    const cached = _nominatimCache.get(key);
+    if (cached && (Date.now() - cached.fetchedAt) < _NOMINATIM_TTL) return cached;
+    try {
+        const res  = await fetch(
+            `https://nominatim.openstreetmap.org/reverse` +
+            `?format=json&lat=${lat}&lon=${lon}&zoom=10&addressdetails=1`
+        );
+        const data = await res.json();
+        const addr = data.address || {};
+        const result = {
+            city:      addr.city || addr.town || addr.village || addr.county || '',
+            country:   (addr.country_code || '').toUpperCase(),
+            fetchedAt: Date.now(),
+        };
+        _nominatimCache.set(key, result);
+        return result;
+    } catch (_) {
+        return { city: '', country: '', fetchedAt: Date.now() };
+    }
+}
 
 // --- GLOBAL SHARED APPLICATION ENGINE MEMORY STATE ---
 let currentUser = localStorage.getItem('compass_user');
@@ -33,12 +68,48 @@ const _storedLat = parseFloat(localStorage.getItem('compass_user_live_lat'));
 const _storedLon = parseFloat(localStorage.getItem('compass_user_live_lng'));
 let userLat = (!isNaN(_storedLat) && _storedLat !== 0) ? _storedLat : 38.7223;
 let userLon = (!isNaN(_storedLon) && _storedLon !== 0) ? _storedLon : -9.1393;
+
+// ── Proximity sort deferral ───────────────────────────────────────────────────
+// Tracks the user's position at the last full list sort so we can decide
+// whether an incoming GPS fix warrants a re-sort.
+let _sortAnchorLat   = userLat;
+let _sortAnchorLon   = userLon;
+let _listSortPending = false;      // true = sort needed but list tab not active
+const _SORT_MOVE_THRESHOLD_KM = 0.2; // 200 m — ignore smaller GPS drifts
+
+/**
+ * Called by the map.js GPS watchPosition callback on every live fix.
+ * Decides whether the new position is far enough to warrant a re-sort:
+ *  • <200 m from anchor  → silently ignored (distance badges already live-update)
+ *  • ≥200 m, list active → update anchor; let badges update naturally (no reorder)
+ *  • ≥200 m, list hidden → update anchor; set _listSortPending so the next
+ *                          list-tab entry triggers a smooth FLIP reorder
+ */
+function notifyGpsPositionForListSort(lat, lon) {
+    if (typeof calculateDistance !== 'function') return;
+    const moved = calculateDistance(_sortAnchorLat, _sortAnchorLon, lat, lon);
+    if (moved < _SORT_MOVE_THRESHOLD_KM) return; // not worth re-sorting
+
+    _sortAnchorLat = lat;
+    _sortAnchorLon = lon;
+
+    if (activeTabID === 'list') {
+        // User is actively browsing — only refresh distance badges, no reorder.
+        updateLiveDistancesUI();
+    } else {
+        // User is on another tab — queue the reorder for when they come back.
+        _listSortPending = true;
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 let cachedHardwareString = "Unknown Device Model";
 let gpsStatusCachedBool = false; 
 let activeTabID = 'map';
 
-let liveGpsWatchId = null; 
+let liveGpsWatchId = null;
 let speechBubbleHideTimer = null;
+let _holidayCache = {};  // keyed by "countryCode-year" → array of holiday date strings
 let continuousGpsFailsafeIntervalId = null; 
 let lastGpsSuccessTime = 0; 
 // Pre-populate from the last session so recenter is instant on first load,
@@ -396,6 +467,8 @@ function initializeSessionDashboard() {
     updateUserGreetingCapsule();
     // Start the HUD cycle slot — will snap to GPS row immediately if GPS is not yet active
     _hudStartCycle();
+    // Load per-user Smart Search state (filters, query cache, active filter)
+    if (typeof initSmartSearch === 'function') initSmartSearch();
 }
 
 async function syncData(isManualForce) {
@@ -572,6 +645,16 @@ function switchMasterMenuDashboardTab(targetTabID) {
         updateHeaderBadgeHUDCounters();
     }
 
+    if (targetTabID === 'list' && _listSortPending) {
+        // User has moved ≥200 m since the last sort while they were away.
+        // Apply the new order with a smooth FLIP animation instead of an
+        // instant snap — the flag is cleared here regardless of outcome.
+        _listSortPending = false;
+        // Small rAF delay lets the tab transition paint first so the FLIP
+        // positions are measured against the fully-visible list.
+        requestAnimationFrame(() => renderList());
+    }
+
     if(targetTabID === 'map' && typeof leafletMapInstance !== 'undefined' && leafletMapInstance) {
         setTimeout(() => {
             leafletMapInstance.invalidateSize();
@@ -587,6 +670,8 @@ function switchMasterMenuDashboardTab(targetTabID) {
             if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
             // Refresh map weather widget for the current viewport centre
             if (typeof refreshMapWeatherWidget === 'function') refreshMapWeatherWidget();
+            // Refresh public-holiday notifier for the current city selection
+            updateHolidayNotifierVisibility();
         }, 50);
     } else {
         // Navigating away from map — close drawer and clear HUD
@@ -1091,6 +1176,37 @@ function closeFabMenuIfOpen() {
     if (_fabMenuOpen) toggleFabMenu();
 }
 
+// ── FAB visibility when drawers are open ─────────────────────────────────────
+/**
+ * Hides or shows the main FAB button.
+ * Satellite buttons are already invisible in their default (closed) state;
+ * we close the arc first so no satellite lingers on screen.
+ */
+function _setFabsVisible(visible) {
+    const mainBtn = document.getElementById('globalFloatingActionPlusButton');
+    if (!mainBtn) return;
+    if (visible) {
+        mainBtn.classList.remove('fab-drawer-suppressed');
+    } else {
+        closeFabMenuIfOpen(); // collapse arc before hiding the anchor button
+        mainBtn.classList.add('fab-drawer-suppressed');
+    }
+}
+
+/**
+ * Re-checks whether any drawer is currently open and updates FAB visibility.
+ * Call this in every drawer close handler so FABs only reappear when the
+ * last open drawer has been dismissed.
+ */
+function _updateFabVisibility() {
+    const anyOpen = [
+        document.getElementById('weatherDrawerOverlay'),
+        document.getElementById('unifiedFilterSheetOverlay'),
+        document.getElementById('currencyDrawerOverlay'),
+    ].some(el => el && !el.classList.contains('hidden'));
+    _setFabsVisible(!anyOpen);
+}
+
 // Dismiss the FAB menu on any tap outside the FAB group
 document.addEventListener('click', function _fabOutsideClose(e) {
     if (!_fabMenuOpen) return;
@@ -1243,6 +1359,8 @@ function updateCityHUDTriggerButtonLabelText() {
     }
     // Sync the unified filter capsule badge whenever the city filter changes
     if (typeof updateFilterCapsuleBadge === 'function') updateFilterCapsuleBadge();
+    // Refresh the public-holiday notifier for the newly selected city
+    updateHolidayNotifierVisibility();
 }
 
 function buildDynamicShoppingCheckboxList() {
@@ -1416,6 +1534,7 @@ function openUnifiedFilterSheet(event) {
     if (event) event.stopPropagation();
     killLiveSpeechBubbleHUDState();
     closeFabMenuIfOpen();
+    _setFabsVisible(false); // hide FAB while filter sheet is open
     closeAllActiveHUDDropdownOverlays();
 
     // Always open on page 1 so the user sees and can change the city
@@ -1451,7 +1570,36 @@ function closeUnifiedFilterSheet() {
     const overlay = document.getElementById('unifiedFilterSheetOverlay');
     if (!sheet || !overlay) return;
     sheet.style.transform = 'translateY(100%)';
-    setTimeout(() => overlay.classList.add('hidden'), 310);
+    setTimeout(() => {
+        overlay.classList.add('hidden');
+        _updateFabVisibility(); // restore FAB if no other drawer is open
+    }, 310);
+}
+
+/**
+ * Lock or unlock the filter-sheet close affordances while AI Smart Search
+ * is processing.  Called by submitSmartSearch() in smart_search.js.
+ *
+ * locked = true  → dims X + back buttons, blocks overlay tap
+ * locked = false → restores everything to normal
+ */
+function _ssFilterSheetLockUI(locked) {
+    const closeBtn = document.getElementById('filterSheetCloseBtn');
+    const backBtn  = document.getElementById('filterSheetBackBtn');
+    const overlay  = document.getElementById('unifiedFilterSheetOverlay');
+
+    if (closeBtn) {
+        closeBtn.style.opacity       = locked ? '0.25' : '';
+        closeBtn.style.pointerEvents = locked ? 'none'  : '';
+    }
+    if (backBtn) {
+        backBtn.style.opacity       = locked ? '0.25' : '';
+        backBtn.style.pointerEvents = locked ? 'none'  : '';
+    }
+    // Disable backdrop tap-to-close while AI is running
+    if (overlay) {
+        overlay.style.pointerEvents = locked ? 'none' : '';
+    }
 }
 
 function _filterSheetNavBack() {
@@ -1871,6 +2019,8 @@ function _filterSheetClearAll() {
     localStorage.setItem('compass_active_cities',  JSON.stringify([]));
     localStorage.setItem('compass_active_filters', JSON.stringify([]));
     localStorage.removeItem('compass_itinerary_filter');
+    // Deactivate any active Custom Filter (without deleting it — broom does that)
+    if (typeof deactivateCustomFilter === 'function') deactivateCustomFilter();
 
     // Sync any ghost checkboxes so legacy clear helpers stay consistent
     document.querySelectorAll('#cityHUDChecklistContainer input[type="checkbox"]').forEach(cb => cb.checked = false);
@@ -1975,7 +2125,10 @@ function updateFilterCapsuleBadge() {
     const cityCount  = checkedCitiesStateArray.length;
     const catCount   = checkedFilterStateArray.length;
     const itinActive = !!activeItineraryFilter;
-    const isActive   = cityCount > 0 || catCount > 0 || itinActive;
+    // Pull active custom filter name from smart_search.js (guard for load order)
+    const customFilterName = (typeof getActiveCustomFilterName === 'function')
+        ? getActiveCustomFilterName() : null;
+    const isActive = cityCount > 0 || catCount > 0 || itinActive || !!customFilterName;
 
     // Pink glow via CSS class
     btn.classList.toggle('filter-capsule-active', isActive);
@@ -1989,14 +2142,23 @@ function updateFilterCapsuleBadge() {
     }
 
     // ── Build the ordered segment list ───────────────────────────────────────
-    const segments = [];
+    // Each entry: { text: string, html: string } — text used for pixel-width
+    // measurement, html used for final rendering (allows per-segment colour).
+    const segs = [];
+
+    // Helper: HTML-escape a plain string safely
+    function _fcEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
     // 1. City
-    if (cityCount === 1) segments.push(checkedCitiesStateArray[0]);
+    if (cityCount === 1) {
+        const t = checkedCitiesStateArray[0];
+        segs.push({ text: t, html: _fcEsc(t) });
+    }
 
     // 2. All selected category names, comma-separated
     if (catCount > 0) {
-        segments.push(checkedFilterStateArray.join(', '));
+        const t = checkedFilterStateArray.join(', ');
+        segs.push({ text: t, html: _fcEsc(t) });
     }
 
     // 3. Itinerary title + Day
@@ -2005,28 +2167,57 @@ function updateFilterCapsuleBadge() {
             ? savedItineraries.find(i => i.id === activeItineraryFilter.itineraryId)
             : null;
         if (itin) {
-            segments.push(itin.title || 'Itinerary');
-            // Resolve visual day number (1-based count of non-suggested days)
+            const titleT = itin.title || 'Itinerary';
+            segs.push({ text: titleT, html: _fcEsc(titleT) });
             if (typeof activeItineraryFilter.dayIndex === 'number') {
                 const realDays = (itin.days || []).filter(d => !d?.isSuggested);
                 const rawDay   = (itin.days || [])[activeItineraryFilter.dayIndex];
                 const visIdx   = rawDay ? realDays.indexOf(rawDay) + 1 : activeItineraryFilter.dayIndex + 1;
-                if (visIdx > 0) segments.push('Day ' + visIdx);
+                if (visIdx > 0) segs.push({ text: 'Day ' + visIdx, html: _fcEsc('Day ' + visIdx) });
             }
         } else {
-            segments.push('Itinerary');
+            segs.push({ text: 'Itinerary', html: 'Itinerary' });
         }
     }
 
-    // Update badge count
-    const total = cityCount + catCount + (itinActive ? 1 : 0);
+    // 4. Active custom filter(s) — violet/indigo to match AI Smart Search theme.
+    //    getActiveCustomFilterName() returns string[]|null (one entry per active filter).
+    //    1 active  → show the name
+    //    2 active  → "Name1 + Name2"
+    //    3+ active → "Name1 + N more"
+    if (customFilterName) {
+        let cfText, cfHtml;
+        if (customFilterName.length === 1) {
+            cfText = customFilterName[0];
+            cfHtml = '<span style="color:#a78bfa;font-weight:900;">' + _fcEsc(cfText) + '</span>';
+        } else if (customFilterName.length === 2) {
+            cfText = customFilterName.join(' + ');
+            cfHtml = customFilterName.map(n =>
+                '<span style="color:#a78bfa;font-weight:900;">' + _fcEsc(n) + '</span>'
+            ).join('<span style="color:#a78bfa;opacity:0.6;"> + </span>');
+        } else {
+            cfText = customFilterName[0] + ' + ' + (customFilterName.length - 1) + ' more';
+            cfHtml = '<span style="color:#a78bfa;font-weight:900;">'
+                   + _fcEsc(customFilterName[0])
+                   + '</span><span style="color:#a78bfa;opacity:0.65;"> + '
+                   + (customFilterName.length - 1) + ' more</span>';
+        }
+        segs.push({ text: cfText, html: cfHtml });
+    }
+
+    // Update badge count (each active custom filter counts as +1)
+    const total = cityCount + catCount + (itinActive ? 1 : 0)
+                + (customFilterName ? customFilterName.length : 0);
     badge.textContent = total;
     badge.classList.remove('hidden');
 
     // ── Build label: measure first, then static or animated ─────────────────
-    const fullText = segments.join(' · ');
+    const SEP_TEXT = ' · ';
+    const SEP_HTML = '<span style="opacity:0.45;"> · </span>';
+    const fullText = segs.map(s => s.text).join(SEP_TEXT);
+    const fullHtml = segs.map(s => s.html).join(SEP_HTML);
 
-    // Render a single invisible copy so we can measure its natural pixel width
+    // Render a single invisible plain-text copy to measure natural pixel width
     // before committing to either a static or scrolling layout.
     wrap.innerHTML = '<span id="_fcMeasure" class="text-[11px] font-bold whitespace-nowrap"'
                    + ' style="display:inline-block;visibility:hidden;">' + fullText + '</span>';
@@ -2039,17 +2230,17 @@ function updateFilterCapsuleBadge() {
         if (textWidth <= wrapWidth) {
             // Fits entirely — show plain static text, no animation needed
             wrap.innerHTML = '<span class="text-[11px] font-bold whitespace-nowrap"'
-                           + ' style="display:block;width:100%;">' + fullText + '</span>';
+                           + ' style="display:block;width:100%;">' + fullHtml + '</span>';
         } else {
             // Overflows — activate the looping ticker with pipe bookends
-            const paddedText = '|&nbsp;&nbsp;' + fullText + '&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
+            const paddedHtml = '|&nbsp;&nbsp;' + fullHtml + '&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;';
             const dur = Math.max(8, Math.min(22, Math.round(fullText.length * 0.38)));
             wrap.innerHTML =
                 '<div id="filterCapsuleTicker"'
               + ' style="display:flex;width:max-content;will-change:transform;'
               + 'animation:filterCapsuleScroll ' + dur + 's linear infinite;white-space:nowrap;">'
-              + '<span class="text-[11px] font-bold">' + paddedText + '</span>'
-              + '<span class="text-[11px] font-bold" aria-hidden="true">' + paddedText + '</span>'
+              + '<span class="text-[11px] font-bold">' + paddedHtml + '</span>'
+              + '<span class="text-[11px] font-bold" aria-hidden="true">' + paddedHtml + '</span>'
               + '</div>';
         }
     });
@@ -2255,41 +2446,90 @@ function getCategoryIconClass(category) {
 const getCategoryIconClassForDrawer = getCategoryIconClass;
 
 // ── Weather helpers ──────────────────────────────────────────────────────────
-// Maps OpenWeatherMap icon codes (e.g. "01d", "10n") → Font Awesome 6 Free class strings.
-function getWeatherFAIconClass(owmIconCode) {
-    const c = (owmIconCode || '').substring(0, 2);
-    if (c === '01') return 'fa-sun text-yellow-400';
-    if (c === '02') return 'fa-cloud-sun text-yellow-300';
-    if (c === '03') return 'fa-cloud text-slate-300';
-    if (c === '04') return 'fa-cloud text-slate-400';
-    if (c === '09') return 'fa-cloud-showers-heavy text-blue-400';
-    if (c === '10') return 'fa-cloud-rain text-blue-300';
-    if (c === '11') return 'fa-cloud-bolt text-amber-400';
-    if (c === '13') return 'fa-snowflake text-sky-300';
-    if (c === '50') return 'fa-smog text-slate-300';
+
+/**
+ * Maps WMO weather interpretation codes → Font Awesome 6 Free class strings.
+ * isDay: true = daytime variant (sun/cloud-sun), false = night variant (moon/cloud-moon).
+ */
+function _wmoIconClass(code, isDay) {
+    const c = parseInt(code, 10);
+    if (c === 0 || c === 1)  return isDay ? 'fa-sun text-yellow-400'       : 'fa-moon text-slate-300';
+    if (c === 2)             return isDay ? 'fa-cloud-sun text-yellow-300'  : 'fa-cloud-moon text-slate-400';
+    if (c === 3)             return 'fa-cloud text-slate-400';
+    if (c === 45 || c === 48) return 'fa-smog text-slate-400';
+    if (c >= 51 && c <= 57) return 'fa-cloud-rain text-blue-400';
+    if (c >= 61 && c <= 67) return 'fa-cloud-rain text-blue-300';
+    if (c >= 71 && c <= 77) return 'fa-snowflake text-sky-300';
+    if (c >= 80 && c <= 82) return 'fa-cloud-showers-heavy text-blue-400';
+    if (c === 85 || c === 86) return 'fa-snowflake text-sky-300';
+    if (c >= 95)             return 'fa-cloud-bolt text-amber-400';
     return 'fa-cloud text-slate-400';
 }
 
-// Fetches current weather for the given lat/lon. Results are cached for 30 min.
-// Returns { iconClass, temp } on success, or null on network error.
+/** Maps WMO weather codes → human-readable description string. */
+function _wmoDescription(code) {
+    const c = parseInt(code, 10);
+    const map = {
+        0:'Clear Sky', 1:'Mainly Clear', 2:'Partly Cloudy', 3:'Overcast',
+        45:'Foggy', 48:'Rime Fog',
+        51:'Light Drizzle', 53:'Drizzle', 55:'Dense Drizzle',
+        56:'Light Freezing Drizzle', 57:'Freezing Drizzle',
+        61:'Light Rain', 63:'Rain', 65:'Heavy Rain',
+        66:'Light Freezing Rain', 67:'Freezing Rain',
+        71:'Light Snow', 73:'Snow', 75:'Heavy Snow', 77:'Snow Grains',
+        80:'Light Showers', 81:'Showers', 82:'Heavy Showers',
+        85:'Light Snow Showers', 86:'Snow Showers',
+        95:'Thunderstorm', 96:'Thunderstorm w/ Hail', 99:'Thunderstorm',
+    };
+    return map[c] || 'Cloudy';
+}
+
+// Legacy OWM icon mapper — preserved for future reference but no longer called.
+// function getWeatherFAIconClass(owmIconCode) { ... }
+function getWeatherFAIconClass(owmIconCode) {
+    const code = (owmIconCode || ''); const prefix = code.substring(0, 2); const isNight = code.endsWith('n');
+    if (prefix === '01') return isNight ? 'fa-moon text-slate-300'        : 'fa-sun text-yellow-400';
+    if (prefix === '02') return isNight ? 'fa-cloud-moon text-slate-400'  : 'fa-cloud-sun text-yellow-300';
+    if (prefix === '03') return 'fa-cloud text-slate-300';
+    if (prefix === '04') return 'fa-cloud text-slate-400';
+    if (prefix === '09') return 'fa-cloud-showers-heavy text-blue-400';
+    if (prefix === '10') return isNight ? 'fa-cloud-moon-rain text-blue-400' : 'fa-cloud-rain text-blue-300';
+    if (prefix === '11') return 'fa-cloud-bolt text-amber-400';
+    if (prefix === '13') return 'fa-snowflake text-sky-300';
+    if (prefix === '50') return 'fa-smog text-slate-400';
+    return 'fa-cloud text-slate-400';
+}
+
+/**
+ * Fetches current weather for the given lat/lon via Open-Meteo.
+ * Returns { iconClass, temp, feelsLike, country, city } on success, or null.
+ */
 async function fetchWeatherForCoords(lat, lon) {
     const key    = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
     const cached = weatherCache.get(key);
     if (cached && (Date.now() - cached.fetchedAt) < WEATHER_CACHE_TTL) return cached;
     try {
-        // Route through the Apps Script backend — the OWM key never touches the client.
-        const res  = await fetch(
-            `${BACKEND_URL}?action=get_weather&lat=${lat}&lon=${lon}`
-        );
-        const data = await res.json();
-        if (data.error) return null;
-        const iconClass  = getWeatherFAIconClass(data.icon || '');
-        const temp       = Math.round(data.temp       ?? 0);
-        const feelsLike  = Math.round(data.feels_like ?? data.temp ?? 0);
-        const result     = { iconClass, temp, feelsLike, fetchedAt: Date.now() };
+        const latStr = parseFloat(lat).toFixed(4);
+        const lonStr = parseFloat(lon).toFixed(4);
+        const [wxResp, geo] = await Promise.all([
+            fetch(
+                `https://api.open-meteo.com/v1/forecast` +
+                `?latitude=${latStr}&longitude=${lonStr}` +
+                `&current=temperature_2m,apparent_temperature,weather_code,is_day` +
+                `&timezone=auto&forecast_days=1`
+            ),
+            _reverseGeocode(lat, lon),
+        ]);
+        const wx = await wxResp.json();
+        if (!wx.current) return null;
+        const cur       = wx.current;
+        const iconClass = _wmoIconClass(cur.weather_code, cur.is_day === 1);
+        const temp      = Math.round(cur.temperature_2m      ?? 0);
+        const feelsLike = Math.round(cur.apparent_temperature ?? cur.temperature_2m ?? 0);
+        const result    = { iconClass, temp, feelsLike, country: geo.country, city: geo.city, fetchedAt: Date.now() };
         weatherCache.set(key, result);
         return result;
-    } catch (e) {
+    } catch (_) {
         return null;
     }
 }
@@ -2309,6 +2549,1398 @@ async function refreshAllWeatherBadges() {
         }
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  WEATHER DRAWER
+//  Opened by tapping the map weather capsule (mapWeatherWidget).
+//  Fetches weather (full), AQI, and UV in parallel via the GAS backend proxy.
+//  All times are derived client-side from UNIX timestamps; no extra API calls.
+// ════════════════════════════════════════════════════════════════════════════
+
+const _wdDataCache = new Map(); // "lat,lon" → { data, fetchedAt }
+const _WD_CACHE_TTL = 5 * 60 * 1000; // 5 min — UV changes fast enough to warrant this
+let   _wdRefreshInterval = null;     // live-refresh timer while drawer is open
+
+// ── Open ──────────────────────────────────────────────────────────────────────
+function openWeatherDrawer() {
+    const overlay = document.getElementById('weatherDrawerOverlay');
+    const sheet   = document.getElementById('weatherDrawerSheet');
+    if (!overlay || !sheet) return;
+
+    _setFabsVisible(false); // hide FAB while drawer is open
+
+    // Reveal overlay
+    overlay.classList.remove('hidden');
+
+    // Two rAF frames ensure the browser has painted display:block before
+    // the CSS transition fires — otherwise translateY stays at 100%.
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            sheet.style.transform = 'translateY(0)';
+        });
+    });
+
+    // Reset to loading state
+    const loading = document.getElementById('wdLoading');
+    const content = document.getElementById('wdContent');
+    if (loading) loading.classList.remove('hidden');
+    if (content) content.classList.add('hidden');
+
+    // Reset "Don't show on map" toggle to OFF each open — it's a pending-action
+    // toggle, not a persistent state indicator (Settings controls re-show).
+    _setWeatherHideToggle(false);
+
+    // Resolve best-available coordinates (live GPS → last-known → globals)
+    let lat = userLat, lon = userLon;
+    if (cachedUserCoords) { lat = cachedUserCoords.lat; lon = cachedUserCoords.lon; }
+
+    // Initial fetch
+    _fetchWeatherDrawerData(lat, lon).then(data => {
+        if (data) _renderWeatherDrawer(data);
+    });
+
+    // Live-refresh every 5 min while drawer stays open so UV/AQI stay current.
+    // Clear any stale interval first (e.g. drawer reopened without closing properly).
+    clearInterval(_wdRefreshInterval);
+    _wdRefreshInterval = setInterval(() => {
+        // Always bypass cache on the timed refresh — force a fresh API call
+        const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+        _wdDataCache.delete(key);
+        _fetchWeatherDrawerData(lat, lon).then(data => {
+            if (data) _renderWeatherDrawer(data);
+        });
+    }, _WD_CACHE_TTL); // fires every 5 min
+}
+
+// ── Close ─────────────────────────────────────────────────────────────────────
+function closeWeatherDrawer() {
+    const sheet   = document.getElementById('weatherDrawerSheet');
+    const overlay = document.getElementById('weatherDrawerOverlay');
+    if (!sheet || !overlay) return;
+
+    // If user toggled "Don't show on map" — persist and hide the capsule
+    const toggle = document.getElementById('wdHideCapsuleToggle');
+    if (toggle && toggle.dataset.active === 'true') {
+        localStorage.setItem('compass_show_weather_capsule', 'false');
+        const capsule = document.getElementById('mapWeatherWidget');
+        if (capsule) capsule.style.display = 'none';
+        // Sync settings toggle to OFF
+        _syncSettingsWeatherToggle(false);
+    }
+
+    sheet.style.transform = 'translateY(100%)';
+    setTimeout(() => {
+        overlay.classList.add('hidden');
+        _updateFabVisibility(); // restore FAB if no other drawer is open
+    }, 340);
+    // Stop the live-refresh timer — no point polling while drawer is hidden
+    clearInterval(_wdRefreshInterval);
+    _wdRefreshInterval = null;
+}
+
+// ── Data fetch — fully Open-Meteo ────────────────────────────────────────────
+// Three parallel calls: weather+hourly (Open-Meteo forecast),
+// air quality (Open-Meteo air-quality), and reverse geocode (Nominatim).
+// OWM / GAS proxy is no longer used by the drawer.
+async function _fetchWeatherDrawerData(lat, lon) {
+    const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+    const hit  = _wdDataCache.get(key);
+    if (hit && (Date.now() - hit.fetchedAt) < _WD_CACHE_TTL) return hit.data;
+
+    try {
+        const latStr = parseFloat(lat).toFixed(4);
+        const lonStr = parseFloat(lon).toFixed(4);
+
+        const [wxResp, aqiResp, geo] = await Promise.all([
+            fetch(
+                `https://api.open-meteo.com/v1/forecast` +
+                `?latitude=${latStr}&longitude=${lonStr}` +
+                `&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation` +
+                `,weather_code,wind_speed_10m,uv_index,is_day` +
+                `&hourly=temperature_2m,weather_code,precipitation_probability,wind_speed_10m,is_day` +
+                `&daily=sunrise,sunset` +
+                `&timezone=auto&forecast_days=2`
+            ),
+            fetch(
+                `https://air-quality-api.open-meteo.com/v1/air-quality` +
+                `?latitude=${latStr}&longitude=${lonStr}` +
+                `&current=us_aqi,pm2_5&timezone=auto`
+            ).catch(() => null),
+            _reverseGeocode(lat, lon),
+        ]);
+
+        const wx  = await wxResp.json();
+        const aqi = aqiResp ? await aqiResp.json().catch(() => null) : null;
+
+        if (!wx.current) return null;
+
+        const cur   = wx.current;
+        const daily = wx.daily || {};
+
+        // sunrise/sunset: Open-Meteo returns ISO strings "2024-01-15T07:30" (local TZ)
+        const toUnix = iso => iso ? Math.round(new Date(iso).getTime() / 1000) : 0;
+        const sunriseUnix = toUnix(daily.sunrise?.[0]);
+        const sunsetUnix  = toUnix(daily.sunset?.[0]);
+
+        // AQI: prefer Open-Meteo us_aqi; fall back to PM2.5 EPA calc
+        let aqiValue = 0;
+        if (aqi?.current?.us_aqi != null && isFinite(aqi.current.us_aqi)) {
+            aqiValue = Math.round(aqi.current.us_aqi);
+        } else if (aqi?.current?.pm2_5 != null) {
+            aqiValue = _calcUsAqi(aqi.current.pm2_5);
+        }
+
+        // Build hourly slots: find current-hour index then take next 24 slots
+        const nowH    = new Date();
+        const nowISO  = `${nowH.getFullYear()}-` +
+                        `${String(nowH.getMonth()+1).padStart(2,'0')}-` +
+                        `${String(nowH.getDate()).padStart(2,'0')}T` +
+                        `${String(nowH.getHours()).padStart(2,'0')}:00`;
+        const htimes  = wx.hourly?.time || [];
+        let   startIdx = htimes.findIndex(t => t >= nowISO);
+        if (startIdx < 0) startIdx = 0;
+
+        const hourly = [];
+        for (let i = startIdx; i < Math.min(startIdx + 24, htimes.length); i++) {
+            hourly.push({
+                time:   htimes[i],                                   // "2024-01-15T15:00"
+                temp:   Math.round(wx.hourly.temperature_2m[i] ?? 0),
+                code:   wx.hourly.weather_code[i] ?? 0,
+                isDay:  wx.hourly.is_day[i] === 1,
+                precip: wx.hourly.precipitation_probability[i] ?? 0,
+            });
+        }
+
+        const data = {
+            city:        geo.city    || '',
+            country:     geo.country || '',
+            description: _wmoDescription(cur.weather_code),
+            wmoCode:     cur.weather_code,
+            isDay:       cur.is_day === 1,
+            temp:        Math.round(cur.temperature_2m      ?? 0),
+            feelsLike:   Math.round(cur.apparent_temperature ?? cur.temperature_2m ?? 0),
+            humidity:    cur.relative_humidity_2m ?? null,
+            windSpeed:   cur.wind_speed_10m       ?? null,
+            sunrise:     sunriseUnix,
+            sunset:      sunsetUnix,
+            aqi:         aqiValue,
+            uvi:         cur.uv_index ?? 0,
+            hourly,
+        };
+
+        _wdDataCache.set(key, { data, fetchedAt: Date.now() });
+        return data;
+    } catch (e) {
+        console.warn('[WeatherDrawer] fetch failed:', e.message);
+        return null;
+    }
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function _renderWeatherDrawer(data) {
+    const loading = document.getElementById('wdLoading');
+    const content = document.getElementById('wdContent');
+    if (loading) loading.classList.add('hidden');
+    if (content) content.classList.remove('hidden');
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    const cityEl    = document.getElementById('wdCity');
+    const condEl    = document.getElementById('wdCondition');
+    const tempHero  = document.getElementById('wdTempHero');
+    const feelsLine = document.getElementById('wdFeelsLine');
+    const feelsVal  = document.getElementById('wdFeelsVal');
+
+    if (cityEl) {
+        cityEl.textContent = (data.city && data.country)
+            ? `${data.city}, ${data.country}`
+            : (data.city || 'Your Location');
+    }
+    if (condEl) {
+        const ic = _wmoIconClass(data.wmoCode ?? 0, data.isDay !== false);
+        condEl.innerHTML =
+            `<i class="fa-solid ${ic} text-[10px]"></i>` +
+            `<span>${_wdCapitalize(data.description || '')}</span>`;
+    }
+    if (tempHero && data.temp !== undefined) {
+        tempHero.textContent = `${Math.round(data.temp)}°`;
+    }
+    if (feelsLine && feelsVal && data.feelsLike !== undefined) {
+        feelsVal.textContent = `${Math.round(data.feelsLike)}°`;
+        feelsLine.classList.remove('hidden');
+    }
+
+    // ── AQI ───────────────────────────────────────────────────────────────────
+    const aqiInfo  = _getAqiLabel(data.aqi);
+    const aqiValEl = document.getElementById('wdAqiValue');
+    const aqiLblEl = document.getElementById('wdAqiLabel');
+    if (aqiValEl) {
+        aqiValEl.textContent  = data.aqi || '—';
+        aqiValEl.style.color  = aqiInfo.color;
+    }
+    if (aqiLblEl) {
+        aqiLblEl.textContent  = aqiInfo.label;
+        aqiLblEl.style.color  = aqiInfo.color;
+    }
+
+    // ── UV ────────────────────────────────────────────────────────────────────
+    // The deprecated OWM /data/2.5/uvi endpoint can return stale values (e.g. UV 9 at midnight).
+    // Clamp to 0 client-side whenever the current time is outside sunrise–sunset.
+    const _nowSec       = Date.now() / 1000;
+    const _isNight      = (data.sunrise && data.sunset)
+                            ? (_nowSec < data.sunrise || _nowSec > data.sunset)
+                            : false;
+    const effectiveUvi  = _isNight ? 0 : (data.uvi || 0);
+
+    const uvInfo    = _getUvLabel(effectiveUvi);
+    const uvValEl   = document.getElementById('wdUvValue');
+    const uvPulseEl = document.getElementById('wdUvPulse');
+    const uvLblEl   = document.getElementById('wdUvLabel');
+    const uvAdvEl   = document.getElementById('wdUvAdvice');
+    if (uvValEl) {
+        uvValEl.textContent = Math.round(effectiveUvi);
+        uvValEl.style.color = uvInfo.color;
+    }
+    if (uvLblEl) { uvLblEl.textContent = uvInfo.label;  uvLblEl.style.color = uvInfo.color; }
+    if (uvAdvEl) { uvAdvEl.textContent = _isNight ? 'UV exposure is zero at night' : uvInfo.advice; }
+    if (uvPulseEl) {
+        if (effectiveUvi >= 6) {
+            uvPulseEl.classList.remove('hidden');
+            uvPulseEl.classList.add('wd-uv-pulse');
+            uvPulseEl.style.backgroundColor = uvInfo.color;
+        } else {
+            uvPulseEl.classList.add('hidden');
+            uvPulseEl.classList.remove('wd-uv-pulse');
+        }
+    }
+
+    // ── Golden / Blue Hour ────────────────────────────────────────────────────
+    const goldenEl = document.getElementById('wdGoldenHour');
+    const blueEl   = document.getElementById('wdBlueHour');
+    if (data.sunset) {
+        const golden = _calcGoldenHour(data.sunset);
+        const blue   = _calcBlueHour(data.sunset);
+        if (goldenEl) goldenEl.textContent = `${golden.start} – ${golden.end}`;
+        if (blueEl)   blueEl.textContent   = `${blue.start} – ${blue.end}`;
+    } else {
+        if (goldenEl) goldenEl.textContent = 'Unavailable';
+        if (blueEl)   blueEl.textContent   = 'Unavailable';
+    }
+
+    // ── Solar Cycle ───────────────────────────────────────────────────────────
+    const sunriseEl = document.getElementById('wdSunrise');
+    const sunsetEl  = document.getElementById('wdSunset');
+    if (sunriseEl) sunriseEl.textContent = data.sunrise ? _wdFormatTime(data.sunrise) : '—';
+    if (sunsetEl)  sunsetEl.textContent  = data.sunset  ? _wdFormatTime(data.sunset)  : '—';
+
+    // ── Hourly Forecast (next 24 h from Open-Meteo) ──────────────────────────
+    const strip = document.getElementById('wdForecastStrip');
+    if (strip) {
+        if (data.hourly && data.hourly.length > 0) {
+            strip.innerHTML = data.hourly.map(slot => {
+                const timePart = (slot.time || '').slice(11, 16); // "HH:MM"
+                const ic = _wmoIconClass(slot.code, slot.isDay);
+                return (
+                    `<div class="shrink-0 flex flex-col items-center gap-1 ` +
+                    `bg-slate-900/70 border border-slate-700/40 rounded-xl ` +
+                    `px-3 py-2.5 min-w-[54px]">` +
+                        `<span class="text-[9px] text-slate-500 font-black uppercase tracking-wider tabular-nums">${timePart}</span>` +
+                        `<i class="fa-solid ${ic} text-[14px]"></i>` +
+                        `<span class="text-[11px] font-black text-slate-300 tabular-nums">${slot.temp}°</span>` +
+                        (slot.precip > 0
+                            ? `<span class="text-[8px] text-blue-400 font-bold">${slot.precip}%</span>`
+                            : `<span class="text-[8px] text-transparent">0%</span>`) +
+                    `</div>`
+                );
+            }).join('');
+        } else {
+            strip.innerHTML =
+                `<span class="text-[10px] text-slate-500 italic pl-1">Forecast unavailable</span>`;
+        }
+    }
+}
+
+// _fetchWeatherDrawerForecast is no longer needed — hourly data is embedded
+// in the _fetchWeatherDrawerData response and rendered directly in _renderWeatherDrawer.
+
+// ── Currency Conversion ───────────────────────────────────────────────────────
+// Ambient rate display in a dedicated currency capsule + drawer on the map screen.
+// Rates are fetched from frankfurter.app (free, no API key, CORS-enabled, ECB-backed).
+// The home currency is set inline in the currency drawer and persisted in localStorage.
+// Rate cache has a 24-hour TTL — ECB updates daily.
+
+const _FX_LS_KEY        = 'compass_home_currency';
+const _FX_CACHE_LS_KEY  = 'compass_fx_cache';
+const _FX_CACHE_TTL     = 24 * 60 * 60 * 1000; // 24 h
+// Persists converter FROM / TO / last entered amount across drawer sessions
+const _CD_FROM_LS_KEY   = 'compass_cd_from';
+const _CD_TO_LS_KEY     = 'compass_cd_to';
+const _CD_AMOUNT_LS_KEY = 'compass_cd_amount';
+
+let _homeCurrency = localStorage.getItem(_FX_LS_KEY) || 'USD';
+
+// ISO 3166-1 alpha-2 country code → ISO 4217 currency code
+const _COUNTRY_CURRENCY_MAP = {
+    // Eurozone
+    AD:'EUR', AT:'EUR', BE:'EUR', CY:'EUR', EE:'EUR', FI:'EUR', FR:'EUR', DE:'EUR',
+    GR:'EUR', IE:'EUR', IT:'EUR', LV:'EUR', LT:'EUR', LU:'EUR', MT:'EUR', MC:'EUR',
+    ME:'EUR', NL:'EUR', PT:'EUR', SM:'EUR', SK:'EUR', SI:'EUR', ES:'EUR', VA:'EUR',
+    // Major currencies
+    AU:'AUD', CA:'CAD', CN:'CNY', DK:'DKK', HK:'HKD', HU:'HUF', IN:'INR', ID:'IDR',
+    IL:'ILS', JP:'JPY', KR:'KRW', MY:'MYR', MX:'MXN', NZ:'NZD', NO:'NOK', PH:'PHP',
+    PL:'PLN', QA:'QAR', RO:'RON', RU:'RUB', SA:'SAR', SG:'SGD', ZA:'ZAR', SE:'SEK',
+    CH:'CHF', TW:'TWD', TH:'THB', TR:'TRY', GB:'GBP', US:'USD', AE:'AED', VN:'VND',
+    // Extended travel destinations
+    AR:'ARS', BD:'BDT', BG:'BGN', BR:'BRL', CL:'CLP', CO:'COP', CZ:'CZK', EG:'EGP',
+    GE:'GEL', GH:'GHS', IS:'ISK', JO:'JOD', KZ:'KZT', KE:'KES', KW:'KWD', MA:'MAD',
+    MV:'MVR', MN:'MNT', MM:'MMK', NP:'NPR', NG:'NGN', PK:'PKR', RS:'RSD', LK:'LKR',
+    UA:'UAH', UZ:'UZS', TN:'TND', TZ:'TZS', UG:'UGX', AM:'AMD', AZ:'AZN', BA:'BAM',
+    BH:'BHD', HR:'HRK', KH:'KHR', LA:'LAK', MK:'MKD', OM:'OMR', AL:'ALL', ET:'ETB',
+};
+
+// ISO 3166-1 alpha-2 country code → full English country name
+const _ISO_COUNTRY_NAMES = {
+    AD:'Andorra',         AE:'UAE',              AL:'Albania',         AM:'Armenia',
+    AR:'Argentina',       AT:'Austria',          AU:'Australia',       AZ:'Azerbaijan',
+    BA:'Bosnia',          BD:'Bangladesh',        BE:'Belgium',         BG:'Bulgaria',
+    BH:'Bahrain',         BR:'Brazil',            CA:'Canada',          CH:'Switzerland',
+    CL:'Chile',           CN:'China',             CO:'Colombia',        CY:'Cyprus',
+    CZ:'Czech Republic',  DE:'Germany',           DK:'Denmark',         EE:'Estonia',
+    EG:'Egypt',           ES:'Spain',             ET:'Ethiopia',        FI:'Finland',
+    FR:'France',          GB:'United Kingdom',    GE:'Georgia',         GH:'Ghana',
+    GR:'Greece',          HK:'Hong Kong',         HR:'Croatia',         HU:'Hungary',
+    ID:'Indonesia',       IE:'Ireland',           IL:'Israel',          IN:'India',
+    IS:'Iceland',         IT:'Italy',             JO:'Jordan',          JP:'Japan',
+    KE:'Kenya',           KH:'Cambodia',          KR:'South Korea',     KW:'Kuwait',
+    KZ:'Kazakhstan',      LA:'Laos',              LK:'Sri Lanka',       LT:'Lithuania',
+    LU:'Luxembourg',      LV:'Latvia',            MA:'Morocco',         MC:'Monaco',
+    ME:'Montenegro',      MK:'North Macedonia',   MM:'Myanmar',         MN:'Mongolia',
+    MT:'Malta',           MV:'Maldives',          MX:'Mexico',          MY:'Malaysia',
+    NG:'Nigeria',         NL:'Netherlands',        NO:'Norway',          NP:'Nepal',
+    NZ:'New Zealand',     OM:'Oman',              PH:'Philippines',     PK:'Pakistan',
+    PL:'Poland',          PT:'Portugal',           QA:'Qatar',           RO:'Romania',
+    RS:'Serbia',          RU:'Russia',             SA:'Saudi Arabia',    SE:'Sweden',
+    SG:'Singapore',       SI:'Slovenia',           SK:'Slovakia',        SM:'San Marino',
+    TH:'Thailand',        TN:'Tunisia',            TR:'Turkey',          TW:'Taiwan',
+    TZ:'Tanzania',        UA:'Ukraine',            UG:'Uganda',          US:'United States',
+    UZ:'Uzbekistan',      VA:'Vatican',            VN:'Vietnam',         ZA:'South Africa',
+};
+
+// Currency symbols for display
+const _CURRENCY_SYMBOLS = {
+    AED:'د.إ', ALL:'L',   AMD:'֏',   ARS:'$',   AUD:'A$',  AZN:'₼',  BAM:'KM', BDT:'৳',
+    BGN:'лв',  BHD:'BD',  BRL:'R$',  CAD:'C$',  CHF:'Fr',  CLP:'$',  CNY:'¥',  COP:'$',
+    CZK:'Kč',  DKK:'kr',  EGP:'£',   ETB:'Br',  EUR:'€',   GBP:'£',  GEL:'₾',  GHS:'₵',
+    HKD:'HK$', HRK:'kn',  HUF:'Ft',  IDR:'Rp',  ILS:'₪',   INR:'₹',  ISK:'kr', JOD:'JD',
+    JPY:'¥',   KES:'KSh', KHR:'៛',   KRW:'₩',   KWD:'KD',  KZT:'₸',  LAK:'₭',  LKR:'Rs',
+    MAD:'د.م', MKD:'ден', MMK:'K',   MNT:'₮',   MVR:'Rf',  MXN:'$',  MYR:'RM', NGN:'₦',
+    NOK:'kr',  NPR:'Rs',  NZD:'NZ$', OMR:'﷼',   PHP:'₱',   PKR:'Rs', PLN:'zł', QAR:'﷼',
+    RON:'lei', RSD:'din', RUB:'₽',   SAR:'﷼',   SEK:'kr',  SGD:'S$', THB:'฿',  TND:'د.ت',
+    TRY:'₺',   TWD:'NT$', TZS:'TSh', UAH:'₴',   UGX:'USh', USD:'$',  UZS:'сўм',VND:'₫',
+    ZAR:'R',   AMB:'֏',   BAM:'KM',
+};
+
+// Currency full names (for the Settings selector)
+const _CURRENCY_NAMES = {
+    AED:'UAE Dirham',          ALL:'Albanian Lek',       AMD:'Armenian Dram',
+    ARS:'Argentine Peso',      AUD:'Australian Dollar',  AZN:'Azerbaijani Manat',
+    BAM:'Bosnia Mark',         BDT:'Bangladeshi Taka',   BGN:'Bulgarian Lev',
+    BHD:'Bahraini Dinar',      BRL:'Brazilian Real',     CAD:'Canadian Dollar',
+    CHF:'Swiss Franc',         CLP:'Chilean Peso',       CNY:'Chinese Yuan',
+    COP:'Colombian Peso',      CZK:'Czech Koruna',       DKK:'Danish Krone',
+    EGP:'Egyptian Pound',      ETB:'Ethiopian Birr',     EUR:'Euro',
+    GBP:'British Pound',       GEL:'Georgian Lari',      GHS:'Ghanaian Cedi',
+    HKD:'Hong Kong Dollar',    HRK:'Croatian Kuna',      HUF:'Hungarian Forint',
+    IDR:'Indonesian Rupiah',   ILS:'Israeli Shekel',     INR:'Indian Rupee',
+    ISK:'Icelandic Króna',     JOD:'Jordanian Dinar',    JPY:'Japanese Yen',
+    KES:'Kenyan Shilling',     KHR:'Cambodian Riel',     KRW:'South Korean Won',
+    KWD:'Kuwaiti Dinar',       KZT:'Kazakhstani Tenge',  LAK:'Lao Kip',
+    LKR:'Sri Lankan Rupee',    MAD:'Moroccan Dirham',    MKD:'Macedonian Denar',
+    MMK:'Myanmar Kyat',        MNT:'Mongolian Tögrög',   MVR:'Maldivian Rufiyaa',
+    MXN:'Mexican Peso',        MYR:'Malaysian Ringgit',  NGN:'Nigerian Naira',
+    NOK:'Norwegian Krone',     NPR:'Nepalese Rupee',     NZD:'New Zealand Dollar',
+    OMR:'Omani Rial',          PHP:'Philippine Peso',    PKR:'Pakistani Rupee',
+    PLN:'Polish Złoty',        QAR:'Qatari Riyal',       RON:'Romanian Leu',
+    RSD:'Serbian Dinar',       RUB:'Russian Ruble',      SAR:'Saudi Riyal',
+    SEK:'Swedish Krona',       SGD:'Singapore Dollar',   THB:'Thai Baht',
+    TND:'Tunisian Dinar',      TRY:'Turkish Lira',       TWD:'Taiwan Dollar',
+    TZS:'Tanzanian Shilling',  UAH:'Ukrainian Hryvnia',  UGX:'Ugandan Shilling',
+    USD:'US Dollar',           UZS:'Uzbekistani Som',    VND:'Vietnamese Dong',
+    ZAR:'South African Rand',
+};
+
+// In-memory + localStorage FX rate cache (24 h TTL)
+// Shape: { "EUR→INR": { rate: 92.3, fetchedAt: 1719000000000 }, ... }
+let _fxRateCache = (() => {
+    try { return JSON.parse(localStorage.getItem(_FX_CACHE_LS_KEY)) || {}; }
+    catch (_) { return {}; }
+})();
+
+/**
+ * Fetch the exchange rate  1 fromCur → X toCur.
+ * Returns a number, or null on failure. Results are cached 24 h.
+ *
+ * API: fawazahmed0/exchange-api (open-source, no key, CORS-enabled, daily ECB+IMF data).
+ *   Primary:  https://latest.currency-api.pages.dev  (Cloudflare Pages)
+ *   Fallback: https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest
+ * Both are in sw.js NETWORK_ONLY_HOSTS so the Service Worker never stale-caches them.
+ */
+async function _fetchFXRate(fromCur, toCur) {
+    if (!fromCur || !toCur || fromCur === toCur) return 1;
+    const cacheKey = `${fromCur}→${toCur}`;
+    const hit = _fxRateCache[cacheKey];
+    if (hit && (Date.now() - hit.fetchedAt) < _FX_CACHE_TTL) return hit.rate;
+
+    const from = fromCur.toLowerCase();
+    const to   = toCur.toLowerCase();
+
+    const urls = [
+        `https://latest.currency-api.pages.dev/v1/currencies/${from}.json`,
+        `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/${from}.json`,
+    ];
+
+    for (const url of urls) {
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) continue;
+            const json = await resp.json();
+            const rate = json[from]?.[to];
+            if (rate == null) continue;
+
+            _fxRateCache[cacheKey] = { rate, fetchedAt: Date.now() };
+            try { localStorage.setItem(_FX_CACHE_LS_KEY, JSON.stringify(_fxRateCache)); } catch (_) {}
+            return rate;
+        } catch (_) {
+            // try next URL
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Format a rate number to a readable string based on its magnitude.
+ */
+function _fmtFXRate(r) {
+    if (r >= 100) return r.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (r >= 10)  return r.toLocaleString(undefined, { maximumFractionDigits: 1 });
+    if (r >= 1)   return r.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (r >= 0.01) return r.toLocaleString(undefined, { maximumFractionDigits: 3 });
+    return r.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+// Tracks the most recently resolved country code from the weather fetch,
+// so the currency drawer can populate instantly when opened.
+let _currencyCurrentCountryCode = null;
+let _currencyCurrentCityLabel   = null; // e.g. "Paris, FR"
+
+// ── Currency Drawer (open / close) ────────────────────────────────────────────
+
+/**
+ * Resolves the ISO 3166-1 alpha-2 country code for a given city name.
+ *
+ * Resolution order (fastest → slowest):
+ *  1. weatherCache  – any cached entry for a spot in that city (instant, no network)
+ *  2. fetchWeatherForCoords – OWM call on the first spot with valid coords (populates cache)
+ *  3. Nominatim addressdetails search – last-resort geocode when no spots have coords
+ *
+ * @param   {string}          cityName  – e.g. "Paris", "Tokyo"
+ * @returns {Promise<string|null>}       ISO country code (e.g. "FR") or null
+ */
+async function _resolveCityCountry(cityName) {
+    if (!cityName) return null;
+
+    // ── 1. Find first spot in that city with valid coordinates ────────────────
+    const spot = (typeof travelSpots !== 'undefined' ? travelSpots : []).find(s => {
+        if (s.city !== cityName) return false;
+        const lat = parseFloat(s.latitude);
+        const lon = parseFloat(s.longitude);
+        return !isNaN(lat) && lat !== 0 && !isNaN(lon) && lon !== 0;
+    });
+
+    if (spot) {
+        const lat = parseFloat(spot.latitude);
+        const lon = parseFloat(spot.longitude);
+
+        // Check weatherCache instantly (key format matches map.js)
+        const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+        const hit = weatherCache.get(key);
+        if (hit && hit.country) return hit.country;
+
+        // Not cached — fetch weather (also populates cache for the map capsule)
+        try {
+            const w = await fetchWeatherForCoords(lat, lon);
+            if (w && w.country) return w.country;
+        } catch (_) {}
+    }
+
+    // ── 2. Nominatim geocode fallback (city name → country_code) ──────────────
+    try {
+        const resp = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(cityName)}&format=json&limit=1&addressdetails=1`,
+            { headers: { 'User-Agent': 'Save2Go/5.0 (raj.aryan@miniclip.com)' } }
+        );
+        if (resp.ok) {
+            const hits = await resp.json();
+            if (hits[0]?.address?.country_code) {
+                return hits[0].address.country_code.toUpperCase();
+            }
+        }
+    } catch (_) {}
+
+    return null;
+}
+
+function openCurrencyDrawer() {
+    const overlay = document.getElementById('currencyDrawerOverlay');
+    const sheet   = document.getElementById('currencyDrawerSheet');
+    if (!overlay || !sheet) return;
+
+    // ── Guard: no city filter active → speech bubble hint, same as magnifying glass ──
+    if (!checkedCitiesStateArray || checkedCitiesStateArray.length === 0) {
+        const capsule = document.getElementById('mapCurrencyWidget');
+        if (typeof triggerCuteSpeechBubbleHUD === 'function') {
+            triggerCuteSpeechBubbleHUD('Select a city filter first!', capsule, null);
+        }
+        return;
+    }
+
+    _setFabsVisible(false);
+
+    // Reset the "don't show" toggle to OFF each time the drawer opens
+    _setCurrencyHideToggle(false);
+
+    overlay.classList.remove('hidden');
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            sheet.style.transform  = 'translateY(0)';
+            sheet.style.transition = 'transform 0.32s cubic-bezier(0.32,0.72,0,1)';
+        });
+    });
+
+    initHomeCurrency();
+
+    // ── Derive location from the active city filter (not GPS) ─────────────────
+    const cityName = checkedCitiesStateArray[0];
+    _currencyCurrentCityLabel = cityName;
+
+    // Show loading skeleton immediately, then fill in once the country resolves
+    _populateCurrencyDrawerContent(null, cityName);
+    _resolveCityCountry(cityName).then(countryCode => {
+        _currencyCurrentCountryCode = countryCode || null;
+        // Only re-render if the drawer is still open (user may have closed it during lookup)
+        const o = document.getElementById('currencyDrawerOverlay');
+        if (o && !o.classList.contains('hidden')) {
+            _populateCurrencyDrawerContent(countryCode, cityName);
+        }
+    });
+}
+
+function closeCurrencyDrawer() {
+    const overlay = document.getElementById('currencyDrawerOverlay');
+    const sheet   = document.getElementById('currencyDrawerSheet');
+    if (!sheet) return;
+
+    // If user toggled "Don't show on map" — persist and hide the capsule
+    const toggle = document.getElementById('cdHideCapsuleToggle');
+    if (toggle && toggle.dataset.active === 'true') {
+        localStorage.setItem('compass_show_currency_capsule', 'false');
+        const capsule = document.getElementById('mapCurrencyWidget');
+        if (capsule) capsule.style.display = 'none';
+        // Sync settings toggle to OFF
+        _syncSettingsCurrencyToggle(false);
+    }
+
+    // Close the converter currency picker panel if open
+    closeConverterCurrencyPicker();
+
+    sheet.style.transition = 'transform 0.28s cubic-bezier(0.32,0.72,0,1)';
+    sheet.style.transform  = 'translateY(100%)';
+    setTimeout(() => {
+        if (overlay) overlay.classList.add('hidden');
+        _updateFabVisibility(); // restore FAB if no other drawer is open
+    }, 300);
+}
+
+// ── Currency Drawer content ────────────────────────────────────────────────────
+
+async function _populateCurrencyDrawerContent(countryCode, cityLabel) {
+    const locationEl = document.getElementById('cdLocation');
+    const labelEl    = document.getElementById('cdLocalCurrencyLabel');
+    // Show country name (+ local currency) once resolved; city name during async load
+    if (locationEl) {
+        const countryName = countryCode ? (_ISO_COUNTRY_NAMES[countryCode] || countryCode) : null;
+        if (countryName) {
+            // Derive the country's local currency name for the secondary label
+            const locCode = _COUNTRY_CURRENCY_MAP[countryCode] || '';
+            const locName = locCode ? (_CURRENCY_NAMES[locCode] || locCode) : '';
+            locationEl.innerHTML = locName
+                ? `${countryName}<span class="font-normal text-[13px] text-slate-500 ml-2">— ${locName}</span>`
+                : countryName;
+        } else {
+            locationEl.textContent = cityLabel || 'Your Location';
+        }
+    }
+
+    const loadingEl      = document.getElementById('cdLoading');
+    const rateBlock      = document.getElementById('cdRateBlock');
+    const zoneBlock      = document.getElementById('cdHomeCurrencyZone');
+    const errorBlock     = document.getElementById('cdError');
+    const converterBlock = document.getElementById('cdConverterBlock');
+    if (loadingEl)      loadingEl.classList.remove('hidden');
+    if (rateBlock)      rateBlock.classList.add('hidden');
+    if (zoneBlock)      zoneBlock.classList.add('hidden');   // always hidden — no zone concept
+    if (errorBlock)     errorBlock.classList.add('hidden');
+    if (converterBlock) converterBlock.classList.add('hidden');
+
+    // ── Determine FROM and TO currencies ────────────────────────────────────
+    // Priority (highest → lowest):
+    //   1. User's persisted selection (localStorage) — always wins once set
+    //   2. Location-derived currency (localCur) — only used as a first-visit hint
+    //   3. First-launch defaults: EUR → INR
+    //
+    // localCur must NEVER override a persisted choice.  The previous ordering
+    // (localCur first) was what caused the drawer to revert on reopen.
+    const localCur = _COUNTRY_CURRENCY_MAP[(countryCode || '').toUpperCase()] || null;
+
+    const fromCur = localStorage.getItem(_CD_FROM_LS_KEY) || 'EUR';
+    const toCur   = localStorage.getItem(_CD_TO_LS_KEY)   // 1st: user's saved choice
+        || localCur                                        // 2nd: city's local currency
+        || (fromCur !== 'INR' ? 'INR' : 'USD');            // 3rd: first-launch default (EUR→INR)
+
+    // Update the "local currency" label
+    const localName   = _CURRENCY_NAMES[toCur]  || toCur;
+    const localSymbol = _CURRENCY_SYMBOLS[toCur] || toCur;
+    if (labelEl) labelEl.textContent = `To ${localName} (${toCur})`;
+
+
+    // ── Same currency on both sides → rate is 1 ──────────────────────────────
+    if (fromCur === toCur) {
+        if (loadingEl) loadingEl.classList.add('hidden');
+        _initCurrencyConverter(fromCur, toCur, 1);
+        _updateCurrencyCapsuleText(fromCur, toCur, 1, null);
+        return;
+    }
+
+    // ── Fetch rate and initialise converter ──────────────────────────────────
+    const rate = await _fetchFXRate(fromCur, toCur);
+    if (loadingEl) loadingEl.classList.add('hidden');
+
+    if (rate == null) {
+        if (errorBlock) {
+            const errTxt = document.getElementById('cdErrorText');
+            if (errTxt) errTxt.textContent = `Rate for ${fromCur} → ${toCur} unavailable`;
+            errorBlock.classList.remove('hidden');
+        }
+        _updateCurrencyCapsuleText(null, null, null, null);
+        return;
+    }
+
+    // Initialise the converter — it owns the Live Rate block + capsule text from here on
+    _initCurrencyConverter(fromCur, toCur, rate);
+}
+
+// ── Currency capsule updater ──────────────────────────────────────────────────
+
+/**
+ * Updates the two ticker spans in mapCurrencyWidget and toggles the marquee
+ * animation on/off.  Called from notifyWeatherCountryForCurrency and from
+ * the converter when rate/direction/amount changes.
+ *
+ * @param {string}      fromCur – FROM currency code (e.g. "USD")
+ * @param {string}      toCur   – TO currency code   (e.g. "INR")
+ * @param {number|null} rate    – FROM→TO rate; null clears to "Exchange"
+ * @param {number|null} amount  – the amount typed by the user; falls back to 1
+ */
+function _updateCurrencyCapsuleText(fromCur, toCur, rate, amount) {
+    const ticker = document.getElementById('mapCurrencyTicker');
+    const spanA  = document.getElementById('mapCurrencyRateA');
+    const spanB  = document.getElementById('mapCurrencyRateB');
+    if (!ticker || !spanA || !spanB) return;
+
+    let text;
+    if (fromCur && toCur && rate != null && isFinite(rate) && rate >= 0) {
+        const fromSym      = _CURRENCY_SYMBOLS[fromCur] || fromCur;
+        const toSym        = _CURRENCY_SYMBOLS[toCur]   || toCur;
+        const displayAmt   = (amount != null && isFinite(amount) && amount > 0) ? amount : 1;
+        const converted    = _fmtAmount(displayAmt * rate);
+        text = `${fromSym}${_fmtAmount(displayAmt)} = ${toSym}${converted}`;
+    } else {
+        text = 'Exchange';
+    }
+
+    spanA.textContent = text;
+    spanB.textContent = text;
+
+    if (text !== 'Exchange') {
+        ticker.classList.add('currency-ticker-anim');
+    } else {
+        ticker.classList.remove('currency-ticker-anim');
+    }
+}
+
+async function _updateCurrencyCapsule(countryCode, rate, sameZone) {
+    // sameZone argument is ignored — there is no home-currency zone concept.
+    // Always defer to the active converter state if available.
+    if (_cdFromCur && _cdToCur && _cdCurrentRate != null) {
+        const persistedAmt = parseFloat(localStorage.getItem(_CD_AMOUNT_LS_KEY));
+        _updateCurrencyCapsuleText(
+            _cdFromCur, _cdToCur, _cdCurrentRate,
+            (!isNaN(persistedAmt) && persistedAmt > 0) ? persistedAmt : null
+        );
+        return;
+    }
+
+    // No converter state yet — try to infer from country
+    const localCur = _COUNTRY_CURRENCY_MAP[(countryCode || '').toUpperCase()] || null;
+    const homeCur  = _homeCurrency;
+    if (!localCur) {
+        _updateCurrencyCapsuleText(null, null, null, null);
+        return;
+    }
+
+    let r = rate;
+    if (r == null) {
+        _updateCurrencyCapsuleText(homeCur, localCur, null, null); // "Exchange" while loading
+        r = await _fetchFXRate(homeCur, localCur);
+    }
+    _updateCurrencyCapsuleText(homeCur, localCur, r, null);
+}
+
+/**
+ * Called by map.js after weather data resolves with a country code.
+ * Persists the country so the drawer can open without waiting for GPS.
+ */
+function notifyWeatherCountryForCurrency(countryCode, cityLabel) {
+    if (!countryCode) return;
+    _currencyCurrentCountryCode = countryCode;
+    _currencyCurrentCityLabel   = cityLabel || countryCode;
+    _updateCurrencyCapsule(countryCode, null, false);
+}
+
+/** Load the persisted home currency code at startup. */
+function initHomeCurrency() {
+    _homeCurrency = localStorage.getItem(_FX_LS_KEY) || 'USD';
+}
+
+// ── Converter currency picker (inline, shared for FROM and TO) ────────────────
+
+/** Which side the inline picker is currently open for: 'from' | 'to' | null */
+let _cdPickerSide = null;
+let _cdPickerOpen = false;
+
+/**
+ * Opens the inline cdPickerPanel to let the user choose a currency for
+ * side 'from' (home) or side 'to' (local).
+ */
+function openConverterCurrencyPicker(side) {
+    _cdPickerSide = side;
+    _cdPickerOpen = true;
+    const panel  = document.getElementById('cdPickerPanel');
+    const title  = document.getElementById('cdPickerPanelTitle');
+    const search = document.getElementById('cdPickerSearch');
+    if (!panel) return;
+
+    if (title) title.textContent = side === 'from' ? 'Select FROM currency' : 'Select TO currency';
+
+    panel.classList.remove('hidden');
+    panel.style.maxHeight  = '0px';
+    panel.style.opacity    = '0';
+    panel.style.transition = 'none';
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        panel.style.transition = 'max-height 0.22s ease, opacity 0.18s ease';
+        panel.style.maxHeight  = '340px';
+        panel.style.opacity    = '1';
+    }));
+
+    _renderConverterCurrencyList('');
+    if (search) {
+        search.value = '';
+        setTimeout(() => search.focus(), 80);
+    }
+    // Scroll the converter block into view so the picker is visible
+    setTimeout(() => {
+        const block = document.getElementById('cdConverterBlock');
+        if (block) block.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 120);
+}
+
+/** Closes the inline currency picker panel. */
+function closeConverterCurrencyPicker() {
+    if (!_cdPickerOpen) return;
+    _cdPickerOpen = false;
+    _cdPickerSide = null;
+    const panel = document.getElementById('cdPickerPanel');
+    if (panel) {
+        panel.style.transition = 'max-height 0.18s ease, opacity 0.15s ease';
+        panel.style.maxHeight  = '0px';
+        panel.style.opacity    = '0';
+        setTimeout(() => panel.classList.add('hidden'), 200);
+    }
+}
+
+/** Called by the picker search input's oninput. */
+function filterConverterCurrencyList(query) {
+    _renderConverterCurrencyList(query);
+}
+
+/**
+ * Renders the currency list for the inline picker.
+ * Highlights the currency already selected on the active side.
+ * Sort: exact code → name starts → code starts → name contains.
+ */
+function _renderConverterCurrencyList(query) {
+    const list = document.getElementById('cdPickerList');
+    if (!list) return;
+
+    const q = (query || '').trim().toLowerCase();
+    const allEntries = Object.entries(_CURRENCY_NAMES).sort((a, b) => a[1].localeCompare(b[1]));
+
+    let displayed;
+    if (!q) {
+        displayed = allEntries;
+    } else {
+        const exactCode    = allEntries.filter(([c])    => c.toLowerCase() === q);
+        const nameStarts   = allEntries.filter(([c, n]) => n.toLowerCase().startsWith(q)  && c.toLowerCase() !== q);
+        const codeStarts   = allEntries.filter(([c, n]) => c.toLowerCase().startsWith(q)  && !n.toLowerCase().startsWith(q) && c.toLowerCase() !== q);
+        const nameContains = allEntries.filter(([c, n]) => n.toLowerCase().includes(q)    && !n.toLowerCase().startsWith(q) && c.toLowerCase() !== q);
+        displayed = [...exactCode, ...nameStarts, ...codeStarts, ...nameContains];
+    }
+
+    if (displayed.length === 0) {
+        list.innerHTML = `<div class="px-4 py-6 text-center text-[11px] text-slate-600 italic">No currencies found</div>`;
+        return;
+    }
+
+    const activeCur = _cdPickerSide === 'from' ? _cdFromCur : _cdToCur;
+
+    list.innerHTML = displayed.map(([code, name], idx) => {
+        const sym        = _CURRENCY_SYMBOLS[code] || code;
+        const isSelected = code === activeCur;
+        const borderTop  = idx > 0 ? 'border-t border-slate-800/50' : '';
+        const bgClass    = isSelected ? 'bg-emerald-500/8' : '';
+        return (
+            `<button onclick="selectConverterCurrency('${code}')"` +
+            ` class="w-full flex items-center gap-3 px-4 py-3 text-left ${bgClass} ${borderTop}` +
+            ` active:bg-slate-800/60 transition-colors"` +
+            ` style="-webkit-tap-highlight-color:transparent;">` +
+                `<span class="shrink-0 w-8 h-8 rounded-lg ` +
+                    `${isSelected ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-300' : 'bg-slate-800 border border-slate-700/50 text-slate-400'}` +
+                    ` flex items-center justify-center text-[11px] font-black leading-none">${sym}</span>` +
+                `<div class="flex-1 min-w-0">` +
+                    `<div class="text-[11.5px] font-bold ${isSelected ? 'text-emerald-200' : 'text-slate-300'} leading-tight truncate">${name}</div>` +
+                    `<div class="text-[9.5px] ${isSelected ? 'text-emerald-500' : 'text-slate-600'} font-black leading-tight mt-0.5 tracking-wider">${code}</div>` +
+                `</div>` +
+                (isSelected
+                    ? `<i class="fa-solid fa-circle-check text-emerald-400 text-[13px] shrink-0"></i>`
+                    : `<i class="fa-solid fa-chevron-right text-slate-700 text-[9px] shrink-0"></i>`) +
+            `</button>`
+        );
+    }).join('');
+
+    if (!q) {
+        requestAnimationFrame(() => {
+            const selected = list.querySelector('button:has(.fa-circle-check)');
+            if (selected) selected.scrollIntoView({ block: 'nearest' });
+        });
+    }
+}
+
+/**
+ * Called when the user taps a currency row in the inline picker.
+ * Persists the chosen FROM/TO and refreshes the rate.
+ */
+function selectConverterCurrency(code) {
+    if (_cdPickerSide === 'from') {
+        _cdFromCur    = code;
+        _homeCurrency = code;
+        try {
+            localStorage.setItem(_FX_LS_KEY,      code);
+            localStorage.setItem(_CD_FROM_LS_KEY, code);
+        } catch (_) {}
+    } else {
+        _cdToCur = code;
+        try { localStorage.setItem(_CD_TO_LS_KEY, code); } catch (_) {}
+        // Immediately update the "To …" subtitle so it reflects the new selection
+        // without needing to close and reopen the drawer.
+        const labelEl = document.getElementById('cdLocalCurrencyLabel');
+        if (labelEl) labelEl.textContent = `To ${_CURRENCY_NAMES[code] || code} (${code})`;
+    }
+    _fxRateCache = {};
+    try { localStorage.removeItem(_FX_CACHE_LS_KEY); } catch (_) {}
+
+    _updateConverterRowUI(_cdPickerSide, code);
+    closeConverterCurrencyPicker();
+    _refreshConverterRate();
+}
+
+/** Keeps the FROM/TO row symbol + code labels in sync. */
+function _updateConverterRowUI(side, code) {
+    const sym = _CURRENCY_SYMBOLS[code] || code;
+    if (side === 'from') {
+        const symEl  = document.getElementById('cdConvFromSymbol');
+        const codeEl = document.getElementById('cdConvFromCode');
+        if (symEl) {
+            symEl.textContent = sym;
+            symEl.className   = 'w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-[13px] font-black text-emerald-300';
+        }
+        if (codeEl) codeEl.textContent = code;
+    } else {
+        const symEl  = document.getElementById('cdConvToSymbol');
+        const codeEl = document.getElementById('cdConvToCode');
+        if (symEl) {
+            symEl.textContent = sym;
+            symEl.className   = 'w-8 h-8 rounded-lg bg-slate-800 border border-slate-700/40 flex items-center justify-center text-[13px] font-black text-slate-400';
+        }
+        if (codeEl) codeEl.textContent = code;
+    }
+}
+
+/** Legacy stubs — keep so any stale references don't throw. */
+function toggleCurrencyPicker()   {}
+function saveHomeCurrency()       {}
+function selectCurrencyFromPicker(code) { selectConverterCurrency(code); }
+
+// ── Converter engine ──────────────────────────────────────────────────────────
+
+/** Converter state */
+let _cdFromCur      = null;   // current FROM currency code
+let _cdToCur        = null;   // current TO currency code
+let _cdCurrentRate  = null;   // FROM→TO rate
+
+/**
+ * Formats a converted amount for display in the converter result field.
+ * Always shows at least 2 significant decimal places.
+ */
+function _fmtAmount(v) {
+    if (!isFinite(v) || v === 0) return '0';
+    if (v >= 10000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (v >= 100)   return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (v >= 1)     return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (v >= 0.001) return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+}
+
+/**
+ * Updates the Live Rate block (cdRatePrimary / cdRateInverse) to reflect the
+ * currently active FROM→TO direction and rate.
+ */
+function _updateLiveRateBlock(fromCur, toCur, rate) {
+    const primaryEl = document.getElementById('cdRatePrimary');
+    const inverseEl = document.getElementById('cdRateInverse');
+    const rateBlock = document.getElementById('cdRateBlock');
+    if (!primaryEl) return;
+
+    const fromSym = _CURRENCY_SYMBOLS[fromCur] || fromCur;
+    const toSym   = _CURRENCY_SYMBOLS[toCur]   || toCur;
+    primaryEl.textContent = `1 ${fromSym} = ${toSym}${_fmtFXRate(rate)}`;
+    if (inverseEl) {
+        inverseEl.textContent = `1 ${toSym} = ${fromSym}${_fmtFXRate(1 / rate)}`;
+        inverseEl.classList.remove('hidden');
+    }
+    if (rateBlock) rateBlock.classList.remove('hidden');
+}
+
+/**
+ * Updates the result field, Live Rate block, and map capsule ticker from the
+ * current converter state.  Pass null to reset the result to "—".
+ */
+function _updateConverterDisplay(amount) {
+    const resultEl = document.getElementById('cdConverterResult');
+    const validAmt = (amount != null && !isNaN(amount) && amount >= 0);
+    if (resultEl) {
+        if (!validAmt || _cdCurrentRate == null) {
+            resultEl.textContent = '—';
+        } else {
+            resultEl.textContent = _fmtAmount(amount * _cdCurrentRate);
+        }
+    }
+    if (_cdCurrentRate != null) {
+        _updateLiveRateBlock(_cdFromCur, _cdToCur, _cdCurrentRate);
+        // Pass the actual input amount so the capsule mirrors what the user typed
+        _updateCurrencyCapsuleText(_cdFromCur, _cdToCur, _cdCurrentRate, validAmt ? amount : null);
+    }
+}
+
+/**
+ * Fetches a fresh rate for the current _cdFromCur → _cdToCur pair, then
+ * re-renders the display.  Called after currency selection or swap.
+ */
+async function _refreshConverterRate() {
+    if (!_cdFromCur || !_cdToCur) return;
+
+    // Same currency on both sides → trivial 1:1
+    if (_cdFromCur === _cdToCur) {
+        _cdCurrentRate = 1;
+        const inputEl = document.getElementById('cdConverterInput');
+        const amt = parseFloat(inputEl?.value);
+        _updateConverterDisplay(!isNaN(amt) && amt >= 0 ? amt : 1);
+        return;
+    }
+
+    _cdCurrentRate = null;
+    const inputEl  = document.getElementById('cdConverterInput');
+    const resultEl = document.getElementById('cdConverterResult');
+    if (resultEl) resultEl.textContent = '…';
+
+    const rate = await _fetchFXRate(_cdFromCur, _cdToCur);
+    _cdCurrentRate = rate;
+    if (rate == null) {
+        if (resultEl) resultEl.textContent = '—';
+        return;
+    }
+    const currentInput = parseFloat(inputEl?.value);
+    _updateConverterDisplay(isNaN(currentInput) || currentInput < 0 ? null : currentInput);
+}
+
+/**
+ * Swaps the FROM and TO currencies, mirrors the result → input, refreshes the
+ * rate, and persists the new direction so it survives drawer close / reopen.
+ */
+function swapCurrencyDirection() {
+    if (!_cdFromCur || !_cdToCur) return;
+
+    // Capture the current result to use as the new input after swap
+    const resultEl   = document.getElementById('cdConverterResult');
+    const inputEl    = document.getElementById('cdConverterInput');
+    const prevResult = resultEl ? resultEl.textContent : '';
+
+    // Swap codes and invert the cached rate so we don't need to re-fetch
+    [_cdFromCur, _cdToCur] = [_cdToCur, _cdFromCur];
+    if (_cdCurrentRate != null && _cdCurrentRate !== 0) {
+        _cdCurrentRate = 1 / _cdCurrentRate;
+    }
+
+    // Persist the new FROM/TO directly so direction survives close/reopen
+    try {
+        localStorage.setItem(_CD_FROM_LS_KEY, _cdFromCur);
+        localStorage.setItem(_CD_TO_LS_KEY,   _cdToCur);
+    } catch (_) {}
+
+    _updateConverterRowUI('from', _cdFromCur);
+    _updateConverterRowUI('to',   _cdToCur);
+
+    // Mirror result → input (only if it looks like a number)
+    const numericResult = parseFloat((prevResult || '').replace(/,/g, ''));
+    let newAmt;
+    if (!isNaN(numericResult) && numericResult > 0) {
+        newAmt = numericResult;
+    } else if (_cdCurrentRate) {
+        newAmt = 1 / _cdCurrentRate;
+    } else {
+        newAmt = 1;
+    }
+    if (inputEl) inputEl.value = _fmtAmount(newAmt);
+    try { localStorage.setItem(_CD_AMOUNT_LS_KEY, String(newAmt)); } catch (_) {}
+    _updateConverterDisplay(newAmt);
+}
+
+/**
+ * Initialises the converter block.
+ * Called by _populateCurrencyDrawerContent once the rate is known.
+ * Restores the user's last entered amount from localStorage; if none,
+ * pre-fills so that the result shows exactly 1 toCur (i.e. input = 1/rate).
+ *
+ * @param {string} fromCur – FROM currency code (e.g. "USD")
+ * @param {string} toCur   – TO currency code   (e.g. "INR")
+ * @param {number} rate    – fromCur→toCur rate
+ */
+function _initCurrencyConverter(fromCur, toCur, rate) {
+    _cdFromCur    = fromCur;
+    _cdToCur      = toCur;
+    _cdCurrentRate = rate;
+
+    // Persist FROM and TO so next open restores them
+    try {
+        localStorage.setItem(_CD_FROM_LS_KEY, fromCur);
+        localStorage.setItem(_CD_TO_LS_KEY,   toCur);
+    } catch (_) {}
+
+    _updateConverterRowUI('from', _cdFromCur);
+    _updateConverterRowUI('to',   _cdToCur);
+
+    const block   = document.getElementById('cdConverterBlock');
+    const inputEl = document.getElementById('cdConverterInput');
+    if (block) block.classList.remove('hidden');
+
+    // Restore the last amount the user typed; fall back to inverse-of-rate (shows 1 toCur)
+    const persistedAmt = parseFloat(localStorage.getItem(_CD_AMOUNT_LS_KEY));
+    let displayAmt;
+    if (!isNaN(persistedAmt) && persistedAmt > 0) {
+        displayAmt = persistedAmt;
+    } else if (rate && rate !== 0 && rate !== 1) {
+        displayAmt = 1 / rate; // "how many fromCur to get 1 toCur"
+    } else {
+        displayAmt = 1;
+    }
+
+    if (inputEl) inputEl.value = _fmtAmount(displayAmt);
+    _updateConverterDisplay(displayAmt);
+}
+
+/**
+ * Called on every keystroke in the converter input.
+ * Persists the entered amount so it survives drawer close/reopen.
+ */
+function onCurrencyConverterInput() {
+    const inputEl = document.getElementById('cdConverterInput');
+    if (!inputEl) return;
+    const amount = parseFloat(inputEl.value);
+    const valid  = !isNaN(amount) && amount >= 0;
+    if (valid) {
+        try { localStorage.setItem(_CD_AMOUNT_LS_KEY, String(amount)); } catch (_) {}
+    }
+    _updateConverterDisplay(valid ? amount : null);
+}
+
+// ── Currency capsule visibility preference ────────────────────────────────────
+
+/**
+ * Sets the visual state of the "Don't show on map" toggle inside the currency drawer.
+ * @param {boolean} active – true = toggle is ON (red; capsule will be hidden on close)
+ */
+function _setCurrencyHideToggle(active) {
+    const toggle  = document.getElementById('cdHideCapsuleToggle');
+    const infoMsg = document.getElementById('cdHideCapsuleInfo');
+    if (!toggle) return;
+
+    toggle.dataset.active = active ? 'true' : 'false';
+    toggle.setAttribute('aria-pressed', String(active));
+
+    if (active) {
+        toggle.classList.add('cd-toggle-on');
+    } else {
+        toggle.classList.remove('cd-toggle-on');
+    }
+
+    if (infoMsg) {
+        if (active) {
+            infoMsg.classList.remove('hidden');
+        } else {
+            infoMsg.classList.add('hidden');
+        }
+    }
+}
+
+/**
+ * Called by the toggle's onclick — flips the "don't show on map" state.
+ */
+function toggleCurrencyHidePreference() {
+    const toggle = document.getElementById('cdHideCapsuleToggle');
+    if (!toggle) return;
+    const current = toggle.dataset.active === 'true';
+    _setCurrencyHideToggle(!current);
+}
+
+/**
+ * Reads compass_show_currency_capsule from localStorage and shows/hides the
+ * map capsule accordingly. Called once at app startup.
+ */
+function _applyCurrencyCapsuleVisibility() {
+    const capsule = document.getElementById('mapCurrencyWidget');
+    if (!capsule) return;
+    // Default is to show (pref is null on first run, or 'true')
+    const pref = localStorage.getItem('compass_show_currency_capsule');
+    capsule.style.display = (pref === 'false') ? 'none' : '';
+}
+
+/**
+ * Syncs the Settings toggle visual state to match the current capsule preference.
+ * @param {boolean} visible – true = capsule is showing (toggle ON / emerald)
+ */
+function _syncSettingsCurrencyToggle(visible) {
+    const btn = document.getElementById('settingsCurrencyToggle');
+    if (!btn) return;
+    btn.setAttribute('aria-pressed', String(visible));
+    if (visible) {
+        btn.classList.add('cd-toggle-settings-on');
+    } else {
+        btn.classList.remove('cd-toggle-settings-on');
+    }
+}
+
+/**
+ * Called by the Settings toggle onclick — flips capsule visibility, persists the
+ * preference and keeps both toggles in sync.
+ */
+function settingsToggleCurrencyCapsule() {
+    const current = localStorage.getItem('compass_show_currency_capsule') !== 'false';
+    const next    = !current;
+    localStorage.setItem('compass_show_currency_capsule', next ? 'true' : 'false');
+    const capsule = document.getElementById('mapCurrencyWidget');
+    if (capsule) capsule.style.display = next ? '' : 'none';
+    _syncSettingsCurrencyToggle(next);
+    // Keep the in-drawer "don't show" toggle consistent
+    if (next) _setCurrencyHideToggle(false);
+}
+
+/**
+ * Called at app startup — initialises the Settings toggle to reflect the stored preference.
+ */
+function initSettingsCurrencyToggle() {
+    const visible = localStorage.getItem('compass_show_currency_capsule') !== 'false';
+    _syncSettingsCurrencyToggle(visible);
+}
+
+// ── Weather capsule visibility preference ─────────────────────────────────────
+
+/**
+ * Sets the visual state of the "Don't show on map" toggle inside the weather drawer.
+ * @param {boolean} active – true = toggle is ON (red; capsule will be hidden on close)
+ */
+function _setWeatherHideToggle(active) {
+    const toggle  = document.getElementById('wdHideCapsuleToggle');
+    const infoMsg = document.getElementById('wdHideCapsuleInfo');
+    if (!toggle) return;
+
+    toggle.dataset.active = active ? 'true' : 'false';
+    toggle.setAttribute('aria-pressed', String(active));
+    toggle.classList.toggle('cd-toggle-on', active);
+
+    if (infoMsg) infoMsg.classList.toggle('hidden', !active);
+}
+
+/** Called by the toggle's onclick — flips the "don't show on map" state. */
+function toggleWeatherHidePreference() {
+    const toggle = document.getElementById('wdHideCapsuleToggle');
+    if (!toggle) return;
+    _setWeatherHideToggle(toggle.dataset.active !== 'true');
+}
+
+/**
+ * Reads compass_show_weather_capsule from localStorage and shows/hides the
+ * map capsule accordingly. Called once at app startup.
+ */
+function _applyWeatherCapsuleVisibility() {
+    const capsule = document.getElementById('mapWeatherWidget');
+    if (!capsule) return;
+    const pref = localStorage.getItem('compass_show_weather_capsule');
+    capsule.style.display = (pref === 'false') ? 'none' : '';
+}
+
+/**
+ * Syncs the Settings toggle visual state to match the current capsule preference.
+ * @param {boolean} visible – true = capsule is showing (toggle ON / emerald)
+ */
+function _syncSettingsWeatherToggle(visible) {
+    const btn = document.getElementById('settingsWeatherToggle');
+    if (!btn) return;
+    btn.setAttribute('aria-pressed', String(visible));
+    btn.classList.toggle('cd-toggle-settings-on', visible);
+}
+
+/**
+ * Called by the Settings toggle onclick — flips capsule visibility, persists the
+ * preference and keeps both toggles in sync.
+ */
+function settingsToggleWeatherCapsule() {
+    const current = localStorage.getItem('compass_show_weather_capsule') !== 'false';
+    const next    = !current;
+    localStorage.setItem('compass_show_weather_capsule', next ? 'true' : 'false');
+    const capsule = document.getElementById('mapWeatherWidget');
+    if (capsule) capsule.style.display = next ? '' : 'none';
+    _syncSettingsWeatherToggle(next);
+    // Keep the in-drawer "don't show" toggle consistent
+    if (next) _setWeatherHideToggle(false);
+}
+
+/** Called at app startup — initialises the Settings toggle to reflect the stored preference. */
+function initSettingsWeatherToggle() {
+    const visible = localStorage.getItem('compass_show_weather_capsule') !== 'false';
+    _syncSettingsWeatherToggle(visible);
+}
+
+// ── Time helpers ──────────────────────────────────────────────────────────────
+
+// Golden Hour: sunset − 60 min → sunset − 5 min
+function _calcGoldenHour(sunsetUnix) {
+    return {
+        start: _wdFormatTime(sunsetUnix - 60 * 60),
+        end:   _wdFormatTime(sunsetUnix -  5 * 60),
+    };
+}
+
+// Blue Hour: sunset → sunset + 30 min
+function _calcBlueHour(sunsetUnix) {
+    return {
+        start: _wdFormatTime(sunsetUnix),
+        end:   _wdFormatTime(sunsetUnix + 30 * 60),
+    };
+}
+
+// Format a UNIX timestamp (seconds) to HH:MM using the device's local time zone.
+function _wdFormatTime(unixSec) {
+    return new Date(unixSec * 1000).toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+}
+
+// ── Label helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Converts a PM2.5 concentration (µg/m³) to the US EPA AQI (0–500 scale).
+ * Uses the official EPA piecewise linear formula with the 2024 PM2.5 breakpoints.
+ *
+ * Other sites (IQAir, Weather.com, Apple Weather) all use this scale, so the
+ * value here will match what the user expects to see.
+ *
+ * @param {number} pm25 – PM2.5 concentration in µg/m³ (from OWM components.pm2_5)
+ * @returns {number} US AQI integer 0–500
+ */
+function _calcUsAqi(pm25) {
+    if (pm25 == null || isNaN(pm25) || pm25 < 0) return 0;
+    // EPA PM2.5 AQI breakpoints [cLow, cHigh, iLow, iHigh]
+    const bp = [
+        [0.0,   9.0,   0,  50],   // 2024 revised breakpoints
+        [9.1,  35.4,  51, 100],
+        [35.5,  55.4, 101, 150],
+        [55.5, 125.4, 151, 200],
+        [125.5, 225.4, 201, 300],
+        [225.5, 325.4, 301, 400],
+        [325.5, 500.4, 401, 500],
+    ];
+    // Truncate to 1 decimal as per EPA guidance
+    const c = Math.floor(pm25 * 10) / 10;
+    for (const [cL, cH, iL, iH] of bp) {
+        if (c >= cL && c <= cH) {
+            return Math.round(((iH - iL) / (cH - cL)) * (c - cL) + iL);
+        }
+    }
+    return c > 500 ? 500 : 0;
+}
+
+/**
+ * UV index label + SPF advice.
+ * Pulse animation threshold set to 6 (High) — calibrated for Fitzpatrick IV–V
+ * (Indian skin tones with higher melanin protection up to UV 5).
+ */
+function _getUvLabel(uvi) {
+    const u = Math.round(uvi || 0);
+    if (u <= 2)  return { label: 'Low',       color: '#4ade80', advice: 'Sunscreen optional'    };
+    if (u <= 5)  return { label: 'Moderate',  color: '#facc15', advice: 'SPF 30+ recommended'  };
+    if (u <= 7)  return { label: 'High',      color: '#fb923c', advice: 'SPF 50+ advised'       };
+    if (u <= 10) return { label: 'Very High', color: '#f87171', advice: 'Limit 10am – 4pm'      };
+    return              { label: 'Extreme',   color: '#e879f9', advice: 'Avoid midday sun'       };
+}
+
+/**
+ * US EPA AQI label + colour (0–500 scale).
+ * Mirrors the colour coding used by IQAir, Weather.com, and Apple Weather.
+ */
+function _getAqiLabel(aqi) {
+    const v = Math.round(aqi || 0);
+    if (v <= 50)  return { label: 'Good',                    color: '#4ade80' };
+    if (v <= 100) return { label: 'Moderate',                color: '#facc15' };
+    if (v <= 150) return { label: 'Unhealthy (Sensitive)',   color: '#fb923c' };
+    if (v <= 200) return { label: 'Unhealthy',               color: '#f87171' };
+    if (v <= 300) return { label: 'Very Unhealthy',          color: '#e879f9' };
+    return              { label: 'Hazardous',                color: '#dc2626' };
+}
+
+function _wdCapitalize(str) {
+    return str ? str.charAt(0).toUpperCase() + str.slice(1) : '';
+}
+
+// ── END WEATHER DRAWER ────────────────────────────────────────────────────────
 
 function openHiddenPinsDrawer() {
     const overlay = document.getElementById('hiddenPinsDrawerOverlay');
@@ -2570,7 +4202,8 @@ function getFilteredDatasetRows() {
         const lngStr = spot.longitude ? String(spot.longitude).trim() : "";
         const hasLatLon = latStr !== "" && latStr !== "0" && lngStr !== "" && lngStr !== "0";
         
-        let distanceOutputLabel = !hasLatLon ? "Missing Location" : (!gpsStatusCachedBool ? "<i class='fa-solid fa-location-dot mr-1'></i>GPS Off" : "");
+        // Keep fallback strings short — the badge has a max-width and long text overflows.
+        let distanceOutputLabel = !hasLatLon ? "<i class='fa-solid fa-triangle-exclamation'></i>" : (!gpsStatusCachedBool ? "<i class='fa-solid fa-location-dot'></i>" : "");
         let rawDistanceValue = 99999;
         let stableDistanceZoneBucket = 4; 
 
@@ -2602,7 +4235,13 @@ function getFilteredDatasetRows() {
         if (checkedFilterStateArray.length > 0) {
             if (!s.category) return false;
             const spotCats = s.category.split(',').map(item => item.trim().toLowerCase());
-            return checkedFilterStateArray.some(checkedCat => spotCats.includes(checkedCat.toLowerCase()));
+            if (!checkedFilterStateArray.some(checkedCat => spotCats.includes(checkedCat.toLowerCase()))) return false;
+        }
+        // Custom Smart Search filter — AND-gated with city + category above.
+        // getActiveCustomFilterRowIds() returns a Set<string> or null.
+        if (typeof getActiveCustomFilterRowIds === 'function') {
+            const _cfRowIds = getActiveCustomFilterRowIds();
+            if (_cfRowIds !== null && !_cfRowIds.has(String(s.rowid))) return false;
         }
         return true;
     }).sort((a, b) => {
@@ -2615,6 +4254,11 @@ function getFilteredDatasetRows() {
         if (aStarred !== bStarred) return bStarred - aStarred; 
 
         if (a.distZone !== b.distZone) return a.distZone - b.distZone;
+
+        // Within the same zone sort by exact distance (nearest first).
+        // Spots without coordinates all land at distRaw=99999 so they cluster
+        // together at the bottom of their group; rowId is the tiebreaker there.
+        if (a.distRaw !== b.distRaw) return a.distRaw - b.distRaw;
 
         const aRowId = parseInt(a.rowid) || 0;
         const bRowId = parseInt(b.rowid) || 0;
@@ -2632,10 +4276,11 @@ function updateLiveDistancesUI() {
             distHUD.innerHTML = spot.distStr;
             const latVal = spot.latitude ? String(spot.latitude).trim() : "";
             const hasCoordinates = latVal !== "" && latVal !== "0";
+            const _baseDistClass = "text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit max-w-[5rem] truncate whitespace-nowrap";
             if (!hasCoordinates) {
-                distHUD.className = "text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-amber-500/10 text-amber-400 border border-amber-500/20";
+                distHUD.className = `${_baseDistClass} bg-amber-500/10 text-amber-400 border border-amber-500/20`;
             } else {
-                distHUD.className = "text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400";
+                distHUD.className = `${_baseDistClass} bg-pink-500/10 text-pink-400`;
             }
         }
     });
@@ -2912,7 +4557,7 @@ function renderList() {
         const cardWrapper = document.createElement('div');
         cardWrapper.id = uniqueCardContainerId;
         cardWrapper.dataset.rowid = String(spot.rowid); // used by renderListAnimated FLIP engine
-        cardWrapper.className = "dynamic-card-node w-full min-h-[260px] h-auto flip-perspective-container transform transition-transform duration-200 shrink-0 block";
+        cardWrapper.className = "dynamic-card-node w-full min-h-[260px] h-auto flip-perspective-container transform transition-transform duration-200 shrink-0 block overflow-hidden";
 
         // Category icon class for the badge (icon · category · city)
         const catIconClass = getCategoryIconClass(spot.category);
@@ -2933,14 +4578,14 @@ function renderList() {
 
                 <div class="flip-card-front-face w-full h-full p-4 rounded-2xl border flex flex-col justify-between ${isDone ? 'itin-done-card' : 'bg-slate-900 ' + (isHigh ? 'starred-gold-glow' : 'border-slate-800')}">
                     <div>
-                        <div class="flex justify-between items-start gap-2">
-                            <div class="max-w-[70%]">
-                                <span class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800 ${isDone ? 'opacity-40' : ''}"><i class="fa-solid ${catIconClass} text-[8px] shrink-0"></i><span class="uppercase tracking-wider">${spot.category || 'General'}</span><span class="text-slate-700 font-normal">•</span><span class="uppercase tracking-wider text-slate-500">${spot.city || 'Global'}</span></span>
+                        <div class="flex justify-between items-start gap-2 overflow-hidden">
+                            <div class="min-w-0 flex-1">
+                                <span class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800 max-w-full overflow-hidden ${isDone ? 'opacity-40' : ''}"><i class="fa-solid ${catIconClass} text-[8px] shrink-0"></i><span class="uppercase tracking-wider truncate">${spot.category || 'General'}</span><span class="text-slate-700 font-normal shrink-0">•</span><span class="uppercase tracking-wider text-slate-500 truncate">${spot.city || 'Global'}</span></span>
                                 <h3 class="text-base font-bold ${isDone ? 'text-slate-500 line-through' : 'text-slate-200'} mt-1.5 truncate">${spot.spot_name}</h3>
                             </div>
-                            <div class="flex items-stretch gap-1.5 shrink-0">
-                                <span id="weather-badge-${spot.rowid}" class="inline-flex items-center justify-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg min-w-[3.25rem] ${weatherBadgeClass} ${isDone ? 'opacity-30' : ''}">${weatherBadgeInitHTML}</span>
-                                <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit ${isDone ? 'bg-slate-800/20 text-slate-600 opacity-40' : (!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400')}">${spot.distStr}</span>
+                            <div class="flex items-stretch gap-1.5 shrink-0 max-w-[44%] overflow-hidden">
+                                <span id="weather-badge-${spot.rowid}" class="inline-flex items-center justify-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg min-w-[3.25rem] shrink-0 ${weatherBadgeClass} ${isDone ? 'opacity-30' : ''}">${weatherBadgeInitHTML}</span>
+                                <span id="dist-badge-${spot.rowid}" class="text-xs font-mono font-bold px-2 py-1 rounded-lg h-fit max-w-[5rem] truncate whitespace-nowrap ${isDone ? 'bg-slate-800/20 text-slate-600 opacity-40' : (!hasCoordinates ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-pink-500/10 text-pink-400')}">${spot.distStr}</span>
                             </div>
                         </div>
                         <div class="mt-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60 min-h-[90px] overflow-hidden">
@@ -3013,21 +4658,32 @@ function renderList() {
 function toggleSettingsMenu(show) {
     const drawer = document.getElementById('settingsDrawer');
     if (drawer) drawer.classList.toggle('hidden', !show);
+    // When opening settings, force-close the profile drawer (mutually exclusive)
+    if (show) {
+        const pd = document.getElementById('profileDrawer');
+        if (pd) pd.classList.add('hidden');
+    }
+}
+
+/** Open/close the profile drawer (greeting capsule → person icon tap). */
+function toggleProfileDrawer(show) {
+    const drawer = document.getElementById('profileDrawer');
+    if (drawer) drawer.classList.toggle('hidden', !show);
 
     if (show) {
+        // When opening profile drawer, force-close settings (mutually exclusive)
+        const sd = document.getElementById('settingsDrawer');
+        if (sd) sd.classList.add('hidden');
+
         const switchUserBox    = document.getElementById('settingsSwitchUserDropdown');
         const mainSelectionBox = document.getElementById('user-dropdown-select');
-
         if (switchUserBox && mainSelectionBox) {
-            // If the settings dropdown somehow still has no options (extremely rare —
-            // cache was empty AND fetch not yet done), mirror the login dropdown as a
-            // last-resort fallback.
             if (switchUserBox.options.length <= 1 && mainSelectionBox.options.length > 1) {
                 switchUserBox.innerHTML = mainSelectionBox.innerHTML;
             }
             if (currentUser) switchUserBox.value = currentUser;
         }
-        // Reset rename input and validation state each time settings opens
+        // Reset rename input and validation state each time the drawer opens
         resetProfileRenameValidationUI();
     }
 }
@@ -3267,6 +4923,7 @@ let _sConfirmCb          = null;  // stored callback for executeSettingsConfirmA
 let _sConfirmShowLoading  = false; // when true, executeSettingsConfirmAction shows loading state
 let _sConfirmLoadingLabel = '';    // text shown in the button during loading (no dots suffix)
 let _sConfirmDotsInterval = null;  // setInterval handle for animated dots
+let _sConfirmCancelCb    = null;  // optional — when set, X dismisses to its target instead of toggleSettingsMenu
 
 /**
  * Open the reusable confirm modal.
@@ -3294,6 +4951,7 @@ function openSettingsConfirmModal(cfg) {
     btn.textContent  = cfg.btnLabel;
     btn.className    = `w-full py-3 ${cfg.btnClass || 'bg-gradient-to-r from-red-600 to-rose-700'} font-black text-xs uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-lg`;
     _sConfirmCb          = cfg.callback || null;
+    _sConfirmCancelCb    = cfg.cancelCallback || null;
     _sConfirmShowLoading  = !!cfg.showLoading;
     _sConfirmLoadingLabel = cfg.loadingLabel || cfg.btnLabel || 'Processing';
     document.getElementById('settingsConfirmModal').classList.remove('hidden');
@@ -3304,17 +4962,24 @@ function closeSettingsConfirmModal() {
     _exitConfirmModalLoadingState();
     document.getElementById('settingsConfirmModal').classList.add('hidden');
     _sConfirmCb          = null;
+    _sConfirmCancelCb    = null;
     _sConfirmShowLoading  = false;
     _sConfirmLoadingLabel = '';
 }
 
 function cancelSettingsConfirmModal() {
-    // X button dismiss — user cancelled, navigate back to settings drawer.
+    // X button dismiss — navigate back to whoever opened the modal.
     // Guard: do nothing if currently in a loading state (X is visually disabled
     // but belt-and-suspenders here in case it fires via keyboard or AT).
     if (_sConfirmDotsInterval !== null) return;
+    // Save cancel callback before closeSettingsConfirmModal nulls it out.
+    const cancelCb = _sConfirmCancelCb;
     closeSettingsConfirmModal();
-    toggleSettingsMenu(true);
+    if (cancelCb) {
+        cancelCb();
+    } else {
+        toggleSettingsMenu(true);
+    }
 }
 
 async function executeSettingsConfirmAction() {
@@ -3558,6 +5223,7 @@ function switchUserSessionViaSettings() {
         body:  `Switch active session to "${selectedUser}"? Your cached data will reload for this profile.`,
         btnLabel: 'Switch Session',
         btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
+        cancelCallback: () => toggleProfileDrawer(true),
         callback: () => {
             localStorage.setItem('compass_user', selectedUser);
             currentUser = selectedUser;
@@ -3580,7 +5246,7 @@ function switchUserSessionViaSettings() {
                 renderItineraryMasterDashboardWorkspace();
             }
 
-            toggleSettingsMenu(false);
+            toggleProfileDrawer(false);
             openSettingsResultModal('success', 'Session Switched', `Now signed in as "${selectedUser}". Loading your itineraries...`);
 
             // ── Background itinerary-only sync ────────────────────────────────
@@ -3666,6 +5332,7 @@ function commitProfileRename() {
         title: 'Rename Profile',
         body:  `Change your identity from "${oldName}" to "${newName}"?`,
         btnLabel: 'Update Profile',
+        cancelCallback: () => toggleProfileDrawer(true),
         btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
         showLoading:  true,
         loadingLabel: 'Updating Profile Name',
@@ -3727,7 +5394,7 @@ function commitProfileRename() {
             localStorage.removeItem(_oldSyncKey);
 
             resetProfileRenameValidationUI();
-            toggleSettingsMenu(false);
+            toggleProfileDrawer(false);
             // Only re-fetch itineraries (spots don't change on rename)
             if (typeof loadUserItineraries === 'function') loadUserItineraries();
             openSettingsResultModal('success', 'Profile Updated', `Identity profile updated to "${newName}". Syncing resources...`);
@@ -3778,6 +5445,19 @@ window.onload = function() {
     // 1-3 s to dismiss (tile load), so the fetch almost always completes before
     // the user ever sees the login screen — making the dropdown immediately ready.
     populateUserDropdown();
+    // Migrate: clear any FX rate cache written by the old frankfurter.app integration.
+    // Those entries used the reversed direction (localCur→homeCur) and a different API
+    // shape, so they must never be replayed.  One-time guard key prevents re-clearing.
+    if (!localStorage.getItem('compass_fx_cache_v2')) {
+        localStorage.removeItem(_FX_CACHE_LS_KEY);
+        _fxRateCache = {};
+        localStorage.setItem('compass_fx_cache_v2', '1');
+    }
+    initHomeCurrency();
+    _applyCurrencyCapsuleVisibility();
+    initSettingsCurrencyToggle();
+    _applyWeatherCapsuleVisibility();
+    initSettingsWeatherToggle();
 
     cachedHardwareString = parseReadableDeviceHardware();
     document.getElementById('meta-id').innerText = `Device ID: ${deviceId}`;
@@ -3934,5 +5614,294 @@ window.onload = function() {
                  toggleSettingsMenu(false);
              }
          }
+
+         // Close the profile drawer when clicking outside it (same guard pattern)
+         const profileMenu = document.getElementById('profileDrawer');
+         if (profileMenu && !profileMenu.classList.contains('hidden')) {
+             const subModalOpen = document.getElementById('settingsConfirmModal')?.classList.contains('hidden') === false
+                               || document.getElementById('settingsResultModal')?.classList.contains('hidden') === false;
+             if (!subModalOpen
+                 && !event.target.closest('#profileDrawerContentBody')
+                 && !event.target.closest('#settingsConfirmModal')
+                 && !event.target.closest('#settingsResultModal')
+                 && !event.target.closest('#userGreetingCapsule')) {
+                 toggleProfileDrawer(false);
+             }
+         }
      });
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC HOLIDAY NOTIFIER
+// Uses Nager.Date free API — no auth, CORS-supported
+// GET https://date.nager.at/api/v3/PublicHolidays/{year}/{countryCode}
+// ═══════════════════════════════════════════════════════════════════════════
+
+// City name (lowercase) → ISO 3166-1 alpha-2 country code
+// Covers the most common international travel destinations.
+// Add more entries here as new cities are added to the database.
+const _CITY_COUNTRY_MAP = {
+    // Europe
+    'amsterdam': 'NL', 'rotterdam': 'NL', 'the hague': 'NL', 'utrecht': 'NL',
+    'paris': 'FR', 'lyon': 'FR', 'marseille': 'FR', 'nice': 'FR', 'bordeaux': 'FR', 'toulouse': 'FR',
+    'london': 'GB', 'manchester': 'GB', 'birmingham': 'GB', 'edinburgh': 'GB', 'glasgow': 'GB', 'bristol': 'GB', 'liverpool': 'GB',
+    'berlin': 'DE', 'munich': 'DE', 'hamburg': 'DE', 'frankfurt': 'DE', 'cologne': 'DE', 'düsseldorf': 'DE', 'dusseldorf': 'DE', 'stuttgart': 'DE',
+    'madrid': 'ES', 'barcelona': 'ES', 'seville': 'ES', 'valencia': 'ES', 'bilbao': 'ES', 'malaga': 'ES',
+    'rome': 'IT', 'milan': 'IT', 'florence': 'IT', 'venice': 'IT', 'naples': 'IT', 'turin': 'IT', 'bologna': 'IT',
+    'lisbon': 'PT', 'porto': 'PT', 'faro': 'PT',
+    'athens': 'GR', 'thessaloniki': 'GR', 'santorini': 'GR', 'mykonos': 'GR',
+    'vienna': 'AT', 'salzburg': 'AT', 'innsbruck': 'AT',
+    'zurich': 'CH', 'geneva': 'CH', 'bern': 'CH', 'lausanne': 'CH', 'basel': 'CH',
+    'brussels': 'BE', 'bruges': 'BE', 'ghent': 'BE', 'antwerp': 'BE',
+    'stockholm': 'SE', 'gothenburg': 'SE', 'malmo': 'SE',
+    'oslo': 'NO', 'bergen': 'NO', 'trondheim': 'NO',
+    'copenhagen': 'DK', 'aarhus': 'DK',
+    'helsinki': 'FI', 'tampere': 'FI',
+    'reykjavik': 'IS',
+    'dublin': 'IE', 'cork': 'IE', 'galway': 'IE',
+    'warsaw': 'PL', 'krakow': 'PL', 'wroclaw': 'PL', 'gdansk': 'PL',
+    'prague': 'CZ', 'brno': 'CZ',
+    'budapest': 'HU',
+    'bucharest': 'RO', 'cluj-napoca': 'RO',
+    'sofia': 'BG',
+    'zagreb': 'HR', 'dubrovnik': 'HR', 'split': 'HR',
+    'sarajevo': 'BA',
+    'belgrade': 'RS',
+    'ljubljana': 'SI',
+    'bratislava': 'SK',
+    'tallinn': 'EE',
+    'riga': 'LV',
+    'vilnius': 'LT',
+    'moscow': 'RU', 'saint petersburg': 'RU', 'st. petersburg': 'RU',
+    'kyiv': 'UA', 'lviv': 'UA', 'odesa': 'UA',
+    'valletta': 'MT',
+    'nicosia': 'CY', 'limassol': 'CY',
+    'luxembourg': 'LU',
+    'monaco': 'MC',
+    'andorra': 'AD',
+    // Americas
+    'new york': 'US', 'los angeles': 'US', 'chicago': 'US', 'houston': 'US', 'miami': 'US',
+    'san francisco': 'US', 'seattle': 'US', 'boston': 'US', 'washington dc': 'US', 'washington d.c.': 'US',
+    'las vegas': 'US', 'new orleans': 'US', 'nashville': 'US', 'austin': 'US', 'denver': 'US',
+    'portland': 'US', 'san diego': 'US', 'phoenix': 'US', 'atlanta': 'US', 'minneapolis': 'US',
+    'toronto': 'CA', 'vancouver': 'CA', 'montreal': 'CA', 'calgary': 'CA', 'ottawa': 'CA', 'quebec': 'CA',
+    'mexico city': 'MX', 'cancun': 'MX', 'guadalajara': 'MX', 'monterrey': 'MX', 'oaxaca': 'MX', 'tulum': 'MX',
+    'buenos aires': 'AR', 'cordoba': 'AR', 'mendoza': 'AR', 'bariloche': 'AR',
+    'são paulo': 'BR', 'sao paulo': 'BR', 'rio de janeiro': 'BR', 'brasilia': 'BR', 'salvador': 'BR', 'recife': 'BR',
+    'santiago': 'CL', 'valparaiso': 'CL',
+    'lima': 'PE', 'cusco': 'PE',
+    'bogota': 'CO', 'medellín': 'CO', 'medellin': 'CO', 'cartagena': 'CO',
+    'quito': 'EC', 'galapagos': 'EC',
+    'montevideo': 'UY',
+    'asuncion': 'PY',
+    'la paz': 'BO',
+    'caracas': 'VE',
+    'havana': 'CU',
+    'san jose': 'CR',
+    'panama city': 'PA',
+    'guatemala city': 'GT',
+    'santo domingo': 'DO',
+    'san juan': 'PR',
+    // Asia
+    'tokyo': 'JP', 'osaka': 'JP', 'kyoto': 'JP', 'hiroshima': 'JP', 'sapporo': 'JP', 'fukuoka': 'JP', 'nagoya': 'JP',
+    'beijing': 'CN', 'shanghai': 'CN', 'guangzhou': 'CN', 'shenzhen': 'CN', 'chengdu': 'CN', 'xian': 'CN', "xi'an": 'CN',
+    'hong kong': 'HK',
+    'macau': 'MO',
+    'taipei': 'TW', 'kaohsiung': 'TW',
+    'seoul': 'KR', 'busan': 'KR', 'jeju': 'KR',
+    'singapore': 'SG',
+    'bangkok': 'TH', 'chiang mai': 'TH', 'phuket': 'TH', 'pattaya': 'TH', 'koh samui': 'TH',
+    'kuala lumpur': 'MY', 'penang': 'MY', 'langkawi': 'MY', 'kota kinabalu': 'MY',
+    'jakarta': 'ID', 'bali': 'ID', 'yogyakarta': 'ID', 'surabaya': 'ID', 'medan': 'ID', 'lombok': 'ID',
+    'manila': 'PH', 'cebu': 'PH', 'davao': 'PH',
+    'hanoi': 'VN', 'ho chi minh city': 'VN', 'hoi an': 'VN', 'da nang': 'VN', 'nha trang': 'VN',
+    'phnom penh': 'KH', 'siem reap': 'KH',
+    'vientiane': 'LA', 'luang prabang': 'LA',
+    'yangon': 'MM', 'mandalay': 'MM',
+    'colombo': 'LK',
+    'dhaka': 'BD',
+    'kathmandu': 'NP',
+    'mumbai': 'IN', 'delhi': 'IN', 'new delhi': 'IN', 'bangalore': 'IN', 'bengaluru': 'IN',
+    'kolkata': 'IN', 'chennai': 'IN', 'hyderabad': 'IN', 'jaipur': 'IN', 'goa': 'IN', 'agra': 'IN',
+    'karachi': 'PK', 'lahore': 'PK', 'islamabad': 'PK',
+    'kabul': 'AF',
+    'tehran': 'IR',
+    'baghdad': 'IQ',
+    'dubai': 'AE', 'abu dhabi': 'AE', 'sharjah': 'AE',
+    'doha': 'QA',
+    'kuwait city': 'KW',
+    'manama': 'BH',
+    'muscat': 'OM',
+    'riyadh': 'SA', 'jeddah': 'SA', 'mecca': 'SA', 'medina': 'SA',
+    'amman': 'JO',
+    'beirut': 'LB',
+    'damascus': 'SY',
+    'jerusalem': 'IL', 'tel aviv': 'IL', 'haifa': 'IL',
+    'ankara': 'TR', 'istanbul': 'TR', 'izmir': 'TR', 'antalya': 'TR', 'cappadocia': 'TR',
+    'baku': 'AZ',
+    'yerevan': 'AM',
+    'tbilisi': 'GE',
+    'tashkent': 'UZ', 'samarkand': 'UZ',
+    'almaty': 'KZ',
+    'ulaanbaatar': 'MN',
+    // Africa
+    'cairo': 'EG', 'luxor': 'EG', 'alexandria': 'EG', 'aswan': 'EG',
+    'casablanca': 'MA', 'marrakech': 'MA', 'fez': 'MA', 'rabat': 'MA', 'tangier': 'MA',
+    'tunis': 'TN',
+    'algiers': 'DZ',
+    'tripoli': 'LY',
+    'nairobi': 'KE', 'mombasa': 'KE',
+    'dar es salaam': 'TZ', 'zanzibar': 'TZ', 'arusha': 'TZ',
+    'kampala': 'UG',
+    'addis ababa': 'ET',
+    'accra': 'GH',
+    'lagos': 'NG', 'abuja': 'NG',
+    'dakar': 'SN',
+    'cape town': 'ZA', 'johannesburg': 'ZA', 'durban': 'ZA', 'pretoria': 'ZA',
+    'harare': 'ZW',
+    'lusaka': 'ZM',
+    'maputo': 'MZ',
+    'antananarivo': 'MG',
+    'luanda': 'AO',
+    'kinshasa': 'CD',
+    'kigali': 'RW',
+    // Oceania
+    'sydney': 'AU', 'melbourne': 'AU', 'brisbane': 'AU', 'perth': 'AU', 'adelaide': 'AU',
+    'gold coast': 'AU', 'cairns': 'AU', 'darwin': 'AU', 'canberra': 'AU',
+    'auckland': 'NZ', 'wellington': 'NZ', 'christchurch': 'NZ', 'queenstown': 'NZ',
+    'suva': 'FJ',
+    'nuku\'alofa': 'TO',
+    'apia': 'WS',
+    'port moresby': 'PG',
+    // Caribbean
+    'bridgetown': 'BB',
+    'kingston': 'JM',
+    'port of spain': 'TT',
+    'nassau': 'BS',
+    'george town': 'KY',
+};
+
+/**
+ * Fetch public holidays for a country+year from Nager.Date API.
+ * Results are cached in _holidayCache by "CC-YYYY" key.
+ * Returns an array of date strings "YYYY-MM-DD", or [] on error.
+ */
+async function _fetchPublicHolidays(countryCode, year) {
+    const cacheKey = `${countryCode}-${year}`;
+    if (_holidayCache[cacheKey] !== undefined) return _holidayCache[cacheKey];
+
+    try {
+        const res = await fetch(
+            `https://date.nager.at/api/v3/PublicHolidays/${year}/${countryCode}`,
+            { signal: AbortSignal.timeout(6000) }
+        );
+        if (!res.ok) { _holidayCache[cacheKey] = []; return []; }
+        const data = await res.json();
+        const dates = Array.isArray(data) ? data.map(h => h.date) : [];
+        _holidayCache[cacheKey] = dates;
+        return dates;
+    } catch (e) {
+        _holidayCache[cacheKey] = [];
+        return [];
+    }
+}
+
+/**
+ * Returns true if today is a public holiday in the given city.
+ * Returns false if the city is not in the lookup map, or on any error.
+ */
+async function _isTodayPublicHoliday(cityName) {
+    if (!cityName) return false;
+    const countryCode = _CITY_COUNTRY_MAP[cityName.toLowerCase().trim()];
+    if (!countryCode) return false;
+
+    const today = new Date();
+    const year  = today.getFullYear();
+    const todayStr = `${year}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    const holidays = await _fetchPublicHolidays(countryCode, year);
+    return holidays.includes(todayStr);
+}
+
+/**
+ * Show or hide #holidayNotifierWrapper based on:
+ *  - user is on the map tab
+ *  - exactly one city is selected
+ *  - that city has a public holiday today
+ */
+async function updateHolidayNotifierVisibility() {
+    const wrapper = document.getElementById('holidayNotifierWrapper');
+    if (!wrapper) return;
+
+    // Must be on the map tab
+    if (typeof activeTabID !== 'undefined' && activeTabID !== 'map') {
+        wrapper.classList.add('hidden');
+        return;
+    }
+
+    // Must have exactly one city selected
+    if (!Array.isArray(checkedCitiesStateArray) || checkedCitiesStateArray.length !== 1) {
+        wrapper.classList.add('hidden');
+        return;
+    }
+
+    const isHoliday = await _isTodayPublicHoliday(checkedCitiesStateArray[0]);
+    if (isHoliday) {
+        wrapper.classList.remove('hidden');
+    } else {
+        wrapper.classList.add('hidden');
+    }
+}
+
+/**
+ * Tap handler for the holiday notifier button.
+ * Shows a two-line persistent speech bubble using the shared HUD,
+ * auto-dismisses after 2.6 s (same as other bubbles) or on any tap.
+ */
+function handleHolidayNotifierTap(event) {
+    if (event) event.stopPropagation();
+
+    const hud       = document.getElementById('globalToastSpeechBubbleHUD');
+    const textNode  = document.getElementById('speechBubbleTextContainer');
+    const pointer   = document.getElementById('bubblePointerNode');
+    if (!hud || !textNode) return;
+
+    // Dismiss any live bubble first
+    if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
+
+    // Two-line message via innerHTML (content is hardcoded / safe)
+    textNode.innerHTML = 'Public Holiday Reminder!<br>Check the calendar of the selected city.';
+
+    // Position bubble above the notifier button
+    const btn = document.getElementById('holidayNotifierBtn');
+    if (btn) {
+        const rect          = btn.getBoundingClientRect();
+        const anchorCenterX = rect.left + rect.width / 2;
+        const bubbleWidth   = 240;
+        const margin        = 8;
+        const leftPos = Math.max(margin,
+            Math.min(window.innerWidth - bubbleWidth - margin,
+                anchorCenterX - bubbleWidth / 2));
+
+        hud.style.left = leftPos + 'px';
+        hud.style.top  = rect.top  + 'px';
+
+        if (pointer) {
+            const pLeft = Math.max(8, Math.min(bubbleWidth - 20,
+                Math.round(anchorCenterX - leftPos - 6)));
+            pointer.style.left  = pLeft + 'px';
+            pointer.style.right = 'auto';
+        }
+    }
+
+    // Show with pop animation
+    hud.classList.remove('hidden');
+    hud.classList.remove('bubble-popup-anim');
+    void hud.offsetWidth; // force reflow
+    hud.classList.add('bubble-popup-anim');
+
+    // Auto-dismiss after 2.6 s
+    speechBubbleHideTimer = setTimeout(() => {
+        if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
+    }, 2600);
+}

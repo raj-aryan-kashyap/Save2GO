@@ -672,6 +672,11 @@ function startLiveHardwareGPSTracking() {
             if (typeof checkForNearbyHiddenSpots === 'function') checkForNearbyHiddenSpots();
             updateProximityRippleState();
             refreshMapWeatherWidget();
+            // Notify the proximity-sort engine — triggers a background re-sort if
+            // the user has moved ≥200 m since the last sort and isn't on the list tab.
+            if (typeof notifyGpsPositionForListSort === 'function') {
+                notifyGpsPositionForListSort(userLat, userLon);
+            }
 
             updateGpsHudStatus('active', 'GPS Active');
             // NOTE: do NOT forcefully set isCameraLocked = true here.
@@ -1937,15 +1942,18 @@ function removeProximityRippleMarker() {
 // the same width to the weather widget so both components are visually aligned.
 // Called after map init, after every style change, and after weather data loads.
 function _syncWeatherWidgetWidth() {
-    const widget = document.getElementById('mapWeatherWidget');
+    const widget    = document.getElementById('mapWeatherWidget');
+    const currency  = document.getElementById('mapCurrencyWidget');
     if (!widget) return;
-    // The style button is a sibling inside the same flex-col items-end container
     const container = widget.parentElement;
     if (!container) return;
     const styleBtn = container.querySelector('button[onclick*="mapLayerStyleDropdownDeck"]');
     if (!styleBtn) return;
     const bw = styleBtn.getBoundingClientRect().width;
-    if (bw > 0) widget.style.width = Math.round(bw) + 'px';
+    if (bw > 0) {
+        widget.style.width = Math.round(bw) + 'px';
+        if (currency) currency.style.width = Math.round(bw) + 'px';
+    }
 }
 
 // ── Map Weather Widget ───────────────────────────────────────────────────────
@@ -1960,7 +1968,7 @@ function _syncWeatherWidgetWidth() {
 //   2. localStorage cache  (compass_user_live_lat / _lng written by watchPosition)
 //   3. No data → animated three-icon fallback
 
-const MAP_WEATHER_USER_MIN_INTERVAL = 15 * 60 * 1000; // 15 min between real API calls
+const MAP_WEATHER_USER_MIN_INTERVAL = 10 * 60 * 1000; // 10 min between real API calls
 let   _mapWeatherLastFetchTime  = 0;
 let   _mapWeatherFallbackActive = false; // true while the animated fallback is showing
 
@@ -2036,6 +2044,11 @@ function refreshMapWeatherWidget() {
         const hit = weatherCache.get(key);
         if (hit && (Date.now() - hit.fetchedAt) < WEATHER_CACHE_TTL) {
             _applyMapWeatherData(hit); // instant — no network call
+            // Keep currency capsule in sync even on cache hits
+            if (typeof notifyWeatherCountryForCurrency === 'function' && hit.country) {
+                const cityLabel = hit.city ? `${hit.city}, ${hit.country}` : hit.country;
+                notifyWeatherCountryForCurrency(hit.country, cityLabel);
+            }
             return;
         }
     }
@@ -2051,7 +2064,13 @@ function refreshMapWeatherWidget() {
     // ── Step 5: fire the API call ─────────────────────────────────────────────
     _mapWeatherLastFetchTime = now;
     fetchWeatherForCoords(lat, lon).then(w => {
-        if (w) _applyMapWeatherData(w);
+        if (!w) return;
+        _applyMapWeatherData(w);
+        // Notify currency system of the resolved country code
+        if (typeof notifyWeatherCountryForCurrency === 'function' && w.country) {
+            const cityLabel = w.city ? `${w.city}, ${w.country}` : w.country;
+            notifyWeatherCountryForCurrency(w.country, cityLabel);
+        }
     });
 }
 

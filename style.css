@@ -34,11 +34,24 @@
     margin-bottom: 6px;
 }
 
+/* Block horizontal scrolling on the list scroll container.
+   overflow-y:auto implicitly sets overflow-x:auto in CSS, which lets
+   overflowing card content create an invisible horizontal scroll axis that
+   users can accidentally swipe — breaking the UI.  Locking overflow-x here
+   at the CSS level (not just via Tailwind) ensures it can never be overridden
+   by a utility class collision. */
+#gesture-touch-container {
+    overflow-x: hidden !important;
+}
+
 /* Cards inside the list must also declare pan-y so that touches starting
    anywhere on a card (buttons, flip faces, etc.) still pass vertical scroll
    intent up to gesture-touch-container. */
 #gesture-touch-container .dynamic-card-node {
     touch-action: pan-y;
+    /* Clip any child element that overflows the card's width (e.g. a long
+       distance badge or an unexpectedly wide label). */
+    overflow: hidden;
 }
 
 /* Use overflow-y: scroll instead of auto — more reliable on iOS WebKit when
@@ -564,6 +577,20 @@ body {
     animation: weatherTickerScroll 12s linear infinite;
 }
 
+/* ── Map Currency Widget — conversion rate seamless marquee ─────────────────
+   Same two-span trick as weather ticker.  Slower (16s) so the longer
+   conversion string is fully readable before it loops.                       */
+@keyframes currencyTickerScroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+.currency-ticker-anim {
+    display: flex;
+    width: max-content;
+    will-change: transform;
+    animation: currencyTickerScroll 16s linear infinite;
+}
+
 /* ── Custom Itinerary Time Picker — Drum-Roll ───────────────────────────────
    Each column (.itin-drum-wrap) is a fixed-height viewport.
    The scrollable inner div (.itin-drum-scroll) uses CSS scroll-snap so items
@@ -848,6 +875,59 @@ body {
 #fabSat2.fab-open { transition-delay: 0.07s; }
 #fabSat3.fab-open { transition-delay: 0.14s; }
 
+/* Suppressed state when any bottom drawer is open.
+   Applied to #globalFloatingActionPlusButton so users can't open the FAB
+   menu while weather / filter / currency drawers are in view. */
+#globalFloatingActionPlusButton.fab-drawer-suppressed {
+    opacity:        0 !important;
+    pointer-events: none !important;
+    transform:      scale(0.75) !important;
+    transition:     opacity 0.18s ease, transform 0.18s ease !important;
+}
+
+/* ── Currency drawer toggle switch (shared with any future toggles) ────────── */
+.cd-toggle-track {
+    width: 2.75rem;   /* 44px */
+    height: 1.5rem;   /* 24px */
+    border-radius: 9999px;
+    background: #1e293b;   /* slate-800 */
+    border: 1px solid #334155; /* slate-700 */
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.2s ease, border-color 0.2s ease;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.cd-toggle-track.cd-toggle-on {
+    background:    rgba(239,68,68,0.18);  /* red tint */
+    border-color:  rgba(239,68,68,0.45);
+}
+.cd-toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 1.25rem;  /* 20px */
+    height: 1.25rem;
+    border-radius: 9999px;
+    background: #64748b;  /* slate-500 */
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1), background 0.2s ease;
+}
+.cd-toggle-track.cd-toggle-on .cd-toggle-knob {
+    transform:  translateX(1.25rem); /* 20px */
+    background: #ef4444;             /* red-500 */
+}
+
+/* Settings toggle — same knob but emerald-accented */
+.cd-toggle-track.cd-toggle-settings-on {
+    background:   rgba(16,185,129,0.15);
+    border-color: rgba(16,185,129,0.45);
+}
+.cd-toggle-track.cd-toggle-settings-on .cd-toggle-knob {
+    transform:  translateX(1.25rem);
+    background: #10b981; /* emerald-500 */
+}
+
 /* Plus icon rotation when the menu is open */
 #fabPlusIcon {
     display:    inline-block;
@@ -932,10 +1012,10 @@ body {
 #priorityToggleTrack {
     position: relative;
     width: 100%;
-    height: 30px;
+    height: 38px;
     background: rgba(2, 6, 23, 0.88);             /* near-black smoked glass */
     border: 1px solid rgba(51, 65, 85, 0.50);
-    border-radius: 999px;
+    border-radius: 12px;                           /* matches filter capsule rounded-xl */
     display: flex;
     align-items: center;
     overflow: hidden;
@@ -989,7 +1069,7 @@ body {
     left:   2px;
     width:  calc(50% - 3px);
     height: calc(100% - 4px);
-    border-radius: 999px;
+    border-radius: 9px;                            /* inset from 12px outer → clean inset look */
     background: rgba(71, 85, 105, 0.70);          /* neutral slate — "All" state */
     z-index: 1;
     transition: left        0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
@@ -1149,6 +1229,21 @@ body {
     pointer-events: none;
 }
 
+/* ── Public Holiday notifier — subtle periodic shake ───────────────────────── */
+/* Calm for ~88% of the cycle; rattles briefly then settles — never feels spammy */
+@keyframes holidayShakeAnim {
+    0%, 88%, 100% { transform: rotate(0deg); }
+    90%            { transform: rotate(-11deg); }
+    92%            { transform: rotate(11deg); }
+    94%            { transform: rotate(-7deg); }
+    96%            { transform: rotate(7deg); }
+    98%            { transform: rotate(-3deg); }
+}
+.holiday-notifier-shake {
+    animation: holidayShakeAnim 2.8s ease-in-out infinite;
+    transform-origin: center center;
+}
+
 /* ── AI Assist Smart Search input ──────────────────────────────────────── */
 #aiAssistFilterInput::placeholder {
     color: #475569; /* slate-600 */
@@ -1157,4 +1252,190 @@ body {
     border-color: rgba(139, 92, 246, 0.45);
     box-shadow:   0 0 0 2px rgba(139, 92, 246, 0.12);
     outline:      none;
+}
+
+/* ── Custom Filter Buttons ──────────────────────────────────────────────
+   Pill-style buttons for AI Smart Search custom filters.
+   Smaller than the city filter grid buttons and using the violet/indigo
+   AI palette so they read as part of the same intelligent feature group.
+────────────────────────────────────────────────────────────────────────── */
+.custom-filter-btn {
+    display:         inline-flex;
+    align-items:     center;
+    gap:             4px;
+    padding:         5px 10px;
+    border-radius:   10px;
+    font-size:       10px;
+    font-weight:     800;
+    letter-spacing:  0.025em;
+    white-space:     nowrap;
+    max-width:       160px;
+    overflow:        hidden;
+    border:          1px solid rgba(139, 92, 246, 0.22);
+    background:      rgba(139, 92, 246, 0.08);
+    color:           rgba(196, 181, 253, 0.72);
+    cursor:          pointer;
+    transition:      background 0.16s ease,
+                     border-color 0.16s ease,
+                     color 0.16s ease,
+                     box-shadow 0.16s ease;
+}
+
+.custom-filter-btn.active {
+    background:    rgba(139, 92, 246, 0.24);
+    border-color:  rgba(139, 92, 246, 0.52);
+    color:         rgb(221, 214, 254);   /* violet-200 */
+    box-shadow:    0 0 10px rgba(139, 92, 246, 0.20),
+                   inset 0 0 0 1px rgba(139, 92, 246, 0.08);
+}
+
+.custom-filter-btn:active {
+    transform:   scale(0.93);
+    transition:  transform 0.08s ease;
+}
+
+/* Count badge — the number of matched spots in this filter */
+.custom-filter-count {
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    background:      rgba(139, 92, 246, 0.16);
+    color:           rgba(167, 139, 250, 0.85);  /* violet-400 */
+    font-size:       8px;
+    font-weight:     900;
+    font-family:     ui-monospace, monospace;
+    border-radius:   5px;
+    padding:         0 4px;
+    min-width:       16px;
+    height:          14px;
+    line-height:     1;
+    flex-shrink:     0;
+}
+
+.custom-filter-btn.active .custom-filter-count {
+    background: rgba(139, 92, 246, 0.32);
+    color:      rgb(221, 214, 254);
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   WEATHER DRAWER
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Sheet slide-up/down transition */
+.weather-drawer-sheet {
+    transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+    /* Momentum scrolling on iOS — required for overflow-y:auto in fixed elements */
+    -webkit-overflow-scrolling: touch;
+    /* Prevent overscroll from bouncing the whole drawer off-screen */
+    overscroll-behavior: contain;
+}
+
+/* ── UV pulse animation ───────────────────────────────────────────────────── */
+/* Only plays when the user hasn't requested reduced motion (accessibility). */
+@media (prefers-reduced-motion: no-preference) {
+    .wd-uv-pulse {
+        animation: wd-uv-pulse-anim 1.4s ease-in-out infinite;
+    }
+}
+
+@keyframes wd-uv-pulse-anim {
+    0%,  100% { transform: scale(1);   opacity: 1;   }
+    50%        { transform: scale(1.6); opacity: 0.4; }
+}
+
+/* ── 3-hour forecast filmstrip — hide scrollbar on all platforms ──────────── */
+.wd-forecast-strip {
+    scrollbar-width: none;          /* Firefox */
+    -ms-overflow-style: none;       /* IE / Edge */
+}
+.wd-forecast-strip::-webkit-scrollbar {
+    display: none;                  /* Chrome / Safari / WebKit */
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SMART SEARCH v2 — Tag Chips & AI Badge
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Base chip ───────────────────────────────────────────────────────────── */
+.ss-chip {
+    display:         inline-flex;
+    align-items:     center;
+    gap:             4px;
+    padding:         3px 8px 3px 9px;
+    border-radius:   999px;
+    border:          1px solid transparent;
+    font-size:       10px;
+    font-weight:     700;
+    line-height:     1.3;
+    cursor:          pointer;
+    white-space:     nowrap;
+    /* smooth transition when chips upgrade from neutral → confidence colour */
+    transition:      background 0.35s ease,
+                     border-color 0.35s ease,
+                     color 0.35s ease,
+                     box-shadow 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ss-chip:active {
+    transform:   scale(0.90);
+    transition:  transform 0.08s ease;
+}
+
+/* ── Phase 1 — neutral (before AI arrives) ───────────────────────────────── */
+.ss-chip--neutral {
+    background:   rgba(51, 65, 85, 0.55);   /* slate-700/55 */
+    border-color: rgba(100, 116, 139, 0.35); /* slate-500/35 */
+    color:        rgb(148, 163, 184);        /* slate-400 */
+}
+
+/* ── Phase 2 — high confidence (violet — matches app accent) ─────────────── */
+.ss-chip--high {
+    background:   rgba(139, 92, 246, 0.18);  /* violet-500/18 */
+    border-color: rgba(139, 92, 246, 0.50);
+    color:        rgb(196, 181, 253);         /* violet-300 */
+    box-shadow:   0 0 6px rgba(139, 92, 246, 0.14);
+}
+
+/* ── Phase 2 — medium confidence (sky blue) ──────────────────────────────── */
+.ss-chip--medium {
+    background:   rgba(56, 189, 248, 0.12);  /* sky-400/12 */
+    border-color: rgba(56, 189, 248, 0.38);
+    color:        rgb(125, 211, 252);         /* sky-300 */
+}
+
+/* ── Phase 2 — low confidence (barely lifted from neutral) ───────────────── */
+.ss-chip--low {
+    background:   rgba(51, 65, 85, 0.40);
+    border-color: rgba(100, 116, 139, 0.28);
+    color:        rgb(100, 116, 139);         /* slate-500 */
+}
+
+/* ── Chip remove icon ────────────────────────────────────────────────────── */
+.ss-chip-x {
+    font-size:   8px;
+    opacity:     0.55;
+    flex-shrink: 0;
+    transition:  opacity 0.15s ease;
+}
+
+.ss-chip:hover .ss-chip-x,
+.ss-chip:active .ss-chip-x {
+    opacity: 0.90;
+}
+
+/* ── AI badge dot pulse (while refining) ─────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+    .ss-badge-pulse {
+        animation: ss-dot-pulse 1.2s ease-in-out infinite;
+    }
+}
+
+@keyframes ss-dot-pulse {
+    0%,  100% { opacity: 1;    transform: scale(1);    }
+    50%        { opacity: 0.35; transform: scale(0.65); }
 }

@@ -150,38 +150,75 @@ const CATEGORY_DEFAULTS = {
 };
 
 // ── Itinerary weather cache ──────────────────────────────────────────────────
-// Keyed by lowercase city name. Each entry: { days: [{date, iconClass, temp}], fetchedAt }
+// Keyed by lowercase city name. Each entry:
+//   { days: [{date, iconClass, wmoCode, temp, tempMax, tempMin}], fetchedAt }
+// Populated by fetchItineraryForecast(lat, lon, city) via Open-Meteo daily.
 const itinWeatherCache    = new Map();
 const ITIN_WEATHER_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 /**
- * Fetches a 5-day weather forecast for a city via the Apps Script proxy.
- * Returns { days: [{date, iconClass, temp}] } from cache or network,
- * or null if the city is invalid / the network request fails.
+ * Extract the first valid [lat, lon] pair from an itinerary's days array.
+ * Walks days[n].timeline[m].latitude/longitude until it finds real coords.
+ * Returns [null, null] when no spot has coordinates.
  */
-async function fetchItineraryForecast(city) {
-    if (!city || !city.trim()) return null;
-    const cacheKey = city.trim().toLowerCase();
+function _getItinLatLon(days) {
+    for (const day of (days || [])) {
+        for (const spot of (day.timeline || [])) {
+            const lat = parseFloat(spot.latitude  || spot._lat  || 0);
+            const lon = parseFloat(spot.longitude || spot._lng  || 0);
+            if (lat && lon && lat !== 0 && lon !== 0) return [lat, lon];
+        }
+    }
+    return [null, null];
+}
+
+/**
+ * Fetches a 7-day daily forecast via Open-Meteo (no API key needed).
+ * @param {number|null} lat  – WGS-84 latitude  (required)
+ * @param {number|null} lon  – WGS-84 longitude (required)
+ * @param {string}      city – used as cache key; falls back to lat/lon key
+ * Returns { days: [{date, iconClass, wmoCode, temp, tempMax, tempMin}] }
+ * or null on failure.
+ */
+async function fetchItineraryForecast(lat, lon, city) {
+    if (!lat || !lon) return null;
+    const cacheKey = city ? city.trim().toLowerCase()
+                          : `${parseFloat(lat).toFixed(2)},${parseFloat(lon).toFixed(2)}`;
     const cached   = itinWeatherCache.get(cacheKey);
     if (cached && (Date.now() - cached.fetchedAt) < ITIN_WEATHER_CACHE_TTL) return cached;
 
     try {
-        const base = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL
-                   : (typeof API_URL    !== 'undefined') ? API_URL : null;
-        if (!base) return null;
-
-        const res  = await fetch(`${base}?action=get_forecast&city=${encodeURIComponent(city.trim())}`);
+        const latStr = parseFloat(lat).toFixed(4);
+        const lonStr = parseFloat(lon).toFixed(4);
+        const res  = await fetch(
+            `https://api.open-meteo.com/v1/forecast` +
+            `?latitude=${latStr}&longitude=${lonStr}` +
+            `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
+            `&timezone=auto&forecast_days=7`
+        );
         const data = await res.json();
-        if (data.error || !Array.isArray(data.days) || data.days.length === 0) return null;
+        if (!data.daily || !Array.isArray(data.daily.time) || data.daily.time.length === 0) return null;
 
+        const { time, weather_code, temperature_2m_max, temperature_2m_min } = data.daily;
         const result = {
-            days:      data.days.map(d => ({
-                date:      d.date,
-                iconClass: (typeof getWeatherFAIconClass === 'function')
-                               ? getWeatherFAIconClass(d.icon)
-                               : 'fa-cloud text-slate-400',
-                temp:      d.temp,
-            })),
+            days: time.map((date, i) => {
+                const code    = weather_code[i]        ?? 0;
+                const tMax    = temperature_2m_max[i]  ?? null;
+                const tMin    = temperature_2m_min[i]  ?? null;
+                const temp    = (tMax !== null && tMin !== null)
+                    ? Math.round((tMax + tMin) / 2)
+                    : (tMax ?? tMin ?? 0);
+                return {
+                    date,
+                    iconClass: (typeof _wmoIconClass === 'function')
+                        ? _wmoIconClass(code, true)
+                        : 'fa-cloud text-slate-400',
+                    wmoCode:  code,
+                    temp,
+                    tempMax:  tMax !== null ? Math.round(tMax) : null,
+                    tempMin:  tMin !== null ? Math.round(tMin) : null,
+                };
+            }),
             fetchedAt: Date.now(),
         };
         itinWeatherCache.set(cacheKey, result);
@@ -191,48 +228,56 @@ async function fetchItineraryForecast(city) {
     }
 }
 
-// ── 3-hour interval forecast cache ──────────────────────────────────────────
-// Keyed by lowercase city name. Each entry: { slots: [{dt_txt, date, hour, iconClass, temp}], fetchedAt }
-// OWM's 3-hour forecast updates every 3 h, so we match the TTL.
+// ── Hourly forecast cache ────────────────────────────────────────────────────
+// Keyed by lowercase city name. Each entry:
+//   { slots: [{date, hour, iconClass, wmoCode, temp, precip}], fetchedAt }
+// Populated by fetchItineraryForecast3h(lat, lon, city) via Open-Meteo hourly.
 const itinForecast3hCache    = new Map();
 const ITIN_FORECAST_3H_CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
 
 /**
- * Fetches a 5-day / 3-hour interval forecast for a city via the Apps Script proxy.
- * Returns { slots: [{dt_txt, date, hour, iconClass, temp}] } from cache or network,
- * or null if the city is invalid / the network request fails.
- * The backend action is "get_forecast_3h" — see Apps Script for the implementation.
+ * Fetches a 3-day hourly forecast via Open-Meteo (no API key needed).
+ * @param {number|null} lat  – WGS-84 latitude  (required)
+ * @param {number|null} lon  – WGS-84 longitude (required)
+ * @param {string}      city – used as cache key; falls back to lat/lon key
+ * Returns { slots: [{date, hour, iconClass, wmoCode, temp, precip}] }
+ * or null on failure.
  */
-async function fetchItineraryForecast3h(city) {
-    if (!city || !city.trim()) return null;
-    const cacheKey = city.trim().toLowerCase();
+async function fetchItineraryForecast3h(lat, lon, city) {
+    if (!lat || !lon) return null;
+    const cacheKey = city ? city.trim().toLowerCase()
+                          : `${parseFloat(lat).toFixed(2)},${parseFloat(lon).toFixed(2)}`;
     const cached   = itinForecast3hCache.get(cacheKey);
     if (cached && (Date.now() - cached.fetchedAt) < ITIN_FORECAST_3H_CACHE_TTL) return cached;
 
     try {
-        const base = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL
-                   : (typeof API_URL    !== 'undefined') ? API_URL : null;
-        if (!base) return null;
-
-        const res  = await fetch(`${base}?action=get_forecast_3h&city=${encodeURIComponent(city.trim())}`);
+        const latStr = parseFloat(lat).toFixed(4);
+        const lonStr = parseFloat(lon).toFixed(4);
+        const res  = await fetch(
+            `https://api.open-meteo.com/v1/forecast` +
+            `?latitude=${latStr}&longitude=${lonStr}` +
+            `&hourly=temperature_2m,weather_code,precipitation_probability,is_day` +
+            `&timezone=auto&forecast_days=3`
+        );
         const data = await res.json();
-        if (data.error || !Array.isArray(data.slots) || data.slots.length === 0) return null;
+        if (!data.hourly || !Array.isArray(data.hourly.time) || data.hourly.time.length === 0) return null;
 
+        const { time, temperature_2m, weather_code, precipitation_probability, is_day: isDay } = data.hourly;
         const result = {
-            slots: data.slots.map(s => {
-                // dt_txt format from OWM: "2025-05-28 15:00:00"
-                const parts    = (s.dt_txt || '').split(' ');
-                const datePart = parts[0] || '';
-                const timePart = parts[1] || '';
-                const hour     = timePart ? parseInt(timePart.split(':')[0], 10) : 0;
+            slots: time.map((t, i) => {
+                // Open-Meteo hourly time format: "2024-01-15T14:00"
+                const datePart = t.slice(0, 10);              // YYYY-MM-DD
+                const hour     = parseInt(t.slice(11, 13), 10);
+                const code     = weather_code[i] ?? 0;
                 return {
-                    dt_txt:    s.dt_txt,
                     date:      datePart,
                     hour,
-                    iconClass: (typeof getWeatherFAIconClass === 'function')
-                                   ? getWeatherFAIconClass(s.icon)
-                                   : 'fa-cloud text-slate-400',
-                    temp:      s.temp,
+                    iconClass: (typeof _wmoIconClass === 'function')
+                        ? _wmoIconClass(code, (isDay?.[i] ?? 1) === 1)
+                        : 'fa-cloud text-slate-400',
+                    wmoCode:   code,
+                    temp:      temperature_2m[i] ?? null,
+                    precip:    precipitation_probability[i] ?? 0,
                 };
             }),
             fetchedAt: Date.now(),
@@ -1944,7 +1989,9 @@ async function _populateItineraryWeatherStrip(itinId, city, days) {
             </span>`;
     };
 
-    const forecast = await fetchItineraryForecast(city);
+    const [lat, lon] = _getItinLatLon(days);
+    if (!lat || !lon) { _noData(); return; }
+    const forecast = await fetchItineraryForecast(lat, lon, city);
     if (!forecast || !forecast.days || forecast.days.length === 0) { _noData(); return; }
 
     // Normalise trip dates to YYYY-MM-DD strings
@@ -2022,8 +2069,9 @@ async function _populateItineraryWeatherStrip(itinId, city, days) {
  * @param {string}         city     – itinerary city name
  * @param {string|Date}    dateStr  – date of the active day
  * @param {number}         dayIndex – 0-based index of the active day (fallback)
+ * @param {Array}          [days]   – itinerary days array (used to derive lat/lon)
  */
-async function _fetchAndRenderDetailDayWeather(city, dateStr, dayIndex) {
+async function _fetchAndRenderDetailDayWeather(city, dateStr, dayIndex, days) {
     const badge = document.getElementById('detailDayWeatherBadge');
     if (!badge) return;
 
@@ -2031,7 +2079,8 @@ async function _fetchAndRenderDetailDayWeather(city, dateStr, dayIndex) {
 
     if (!city) { badge.innerHTML = ''; return; }
 
-    const forecast = await fetchItineraryForecast(city);
+    const [lat, lon] = _getItinLatLon(days);
+    const forecast = await fetchItineraryForecast(lat, lon, city);
     if (!forecast || !forecast.days || forecast.days.length === 0) {
         badge.innerHTML = `<i class="fa-solid fa-cloud text-slate-700 text-[9px]"></i>`;
         return;
@@ -2129,12 +2178,18 @@ async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayInde
         }
     }
 
-    // ── Path B: 3-hour slot forecast ─────────────────────────────────────────
-    // Calls the get_forecast_3h backend action, which returns up to 40 slots
-    // (5 days × 8 slots/day) at 3-hour intervals.  We pick the slot whose hour
-    // is closest to the activity's scheduled start hour so each spot gets a
+    // ── Path B: hourly slot forecast ─────────────────────────────────────────
+    // Uses Open-Meteo hourly data for the next 3 days.  We pick the slot whose
+    // hour is closest to the activity's scheduled start hour so each spot gets a
     // genuinely time-matched forecast rather than the day's single average.
-    const forecast3h = await fetchItineraryForecast3h(city);
+    const _spotLat  = spotObj ? parseFloat(spotObj.latitude  || spotObj._lat  || 0) : 0;
+    const _spotLon  = spotObj ? parseFloat(spotObj.longitude || spotObj._lng  || 0) : 0;
+    const _hasCoords = _spotLat !== 0 && _spotLon !== 0;
+    const forecast3h = await fetchItineraryForecast3h(
+        _hasCoords ? _spotLat : null,
+        _hasCoords ? _spotLon : null,
+        city
+    );
     if (forecast3h && Array.isArray(forecast3h.slots) && forecast3h.slots.length > 0) {
         const daySlots = forecast3h.slots.filter(s => s.date === targetDate);
         if (daySlots.length > 0) {
@@ -2158,9 +2213,13 @@ async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayInde
 
     // ── Path C: no 3h data or date out of range → city-level daily forecast ──
     // All activities on the same day share one daily snapshot.  This path acts
-    // as a reliable fallback when the 3h endpoint is unavailable or the date is
-    // too far out for the 5-day/3h window.
-    const forecast = await fetchItineraryForecast(city);
+    // as a reliable fallback when the hourly endpoint is unavailable or the date
+    // is beyond the 3-day hourly window.
+    const forecast = await fetchItineraryForecast(
+        _hasCoords ? _spotLat : null,
+        _hasCoords ? _spotLon : null,
+        city
+    );
     if (!forecast || !forecast.days || forecast.days.length === 0) {
         el.innerHTML = `<i class="fa-solid fa-cloud text-[8px] opacity-30"></i>`;
         return;
@@ -2194,14 +2253,24 @@ async function _populateItinActivityWeatherBadge(badgeId, city, dateStr, dayInde
  * @param {string} category  — spot category string (matched via getCategoryLogic)
  * @param {boolean} isDone   — done spots never show the badge
  */
-async function _updateRainRiskBadge(badgeId, city, dateYMD, category, isDone) {
+async function _updateRainRiskBadge(badgeId, city, dateYMD, category, isDone, spotObj) {
     if (isDone) return;
     const el = document.getElementById(badgeId);
     if (!el) return;
 
-    // Warm up the cache if needed (no-op when already cached within TTL)
+    // Warm up BOTH forecast caches (daily + hourly) before evaluating rain.
+    // _dayHasRain checks daily cache first, then falls back to hourly — this
+    // ensures the badge agrees with whatever the weather badge actually shows.
+    // Both fetches are no-ops when the cache is already warm within its TTL.
     if (city) {
-        await fetchItineraryForecast(city);
+        const _rrLat = spotObj ? parseFloat(spotObj.latitude  || spotObj._lat  || 0) : 0;
+        const _rrLon = spotObj ? parseFloat(spotObj.longitude || spotObj._lng  || 0) : 0;
+        const latArg = _rrLat || null;
+        const lonArg = _rrLon || null;
+        await Promise.all([
+            fetchItineraryForecast(latArg, lonArg, city),
+            fetchItineraryForecast3h(latArg, lonArg, city),
+        ]);
     }
 
     const hasRain   = _dayHasRain(city, dateYMD);
@@ -2719,7 +2788,7 @@ function renderDetailViewTimeline() {
     const activeDay = itin.days[activeItineraryDayTracker];
     document.getElementById('detailDateLabel').innerText = new Date(activeDay.date)
         .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-    _fetchAndRenderDetailDayWeather(itin.city, activeDay.date, activeItineraryDayTracker);
+    _fetchAndRenderDetailDayWeather(itin.city, activeDay.date, activeItineraryDayTracker, itin.days);
 
     container.innerHTML = '';
     container.scrollTop = 0; // reset scroll on every render so banners always start visible
@@ -3094,11 +3163,11 @@ function renderDetailViewTimeline() {
                                      : 'bg-amber-500/10 border-amber-500/20 text-amber-400 active:bg-amber-500/20'}">
                         <i class="fa-solid fa-${_isHigh ? 'star-half-stroke' : 'star'} text-[11px]"></i>
                     </button>
-                    <!-- Swap — disabled on done -->
-                    <button onclick="swapActivityInTimeline(${activeItineraryDayTracker}, ${spotIndex})"
-                            class="w-9 h-9 flex items-center justify-center bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-xl active:bg-indigo-500/20 transition-colors ${spot.isDone ? 'opacity-40 pointer-events-none' : ''}">
-                        <i class="fa-solid fa-arrows-rotate text-[11px]"></i>
-                    </button>
+                    <!-- Info — opens Skip / Defer menu; hidden on done cards -->
+                    ${spot.isDone ? '' : `<button onclick="openSpotContextMenuAt(${activeItineraryDayTracker}, ${spotIndex}, this)"
+                            class="w-9 h-9 flex items-center justify-center bg-slate-700/20 border border-slate-600/30 text-slate-400 rounded-xl active:bg-slate-700/40 transition-colors">
+                        <i class="fa-solid fa-circle-info text-[11px]"></i>
+                    </button>`}
                 </div>
             </div>`;
 
@@ -3110,62 +3179,6 @@ function renderDetailViewTimeline() {
             openSpotTrayFromItinerary(spot);
         });
 
-        // ── Feature 3: Long-press → skip / defer context menu ────────────────
-        if (!spot.isDone) {
-            let _lpTimer = null;
-            const _capturedDay = activeItineraryDayTracker;
-            const _capturedIdx = spotIndex;
-            card.addEventListener('touchstart', function (e) {
-                if (e.target.closest('button, a')) return;
-                _lpTimer = setTimeout(() => {
-                    e.preventDefault();
-                    const menu     = document.getElementById('spotContextMenu');
-                    const backdrop = document.getElementById('spotContextMenuBackdrop');
-                    if (!menu) return;
-                    menu.dataset.dayIndex  = _capturedDay;
-                    menu.dataset.spotIndex = _capturedIdx;
-
-                    // Disable "Defer to Last Day" when the current day IS the last
-                    // real day, or the itinerary has only one real day.
-                    const _itin      = getActiveItinerary();
-                    const _deferBtn  = document.getElementById('spotContextDeferBtn');
-                    const _deferSub  = document.getElementById('spotContextDeferSubtitle');
-                    if (_deferBtn && _itin) {
-                        const _realDays  = (_itin.days || [])
-                            .filter(d => !d?.isSuggested && d?.date)
-                            .sort((a, b) => a.date > b.date ? 1 : -1);
-                        const _curDate   = _itin.days[_capturedDay]?.date;
-                        const _lastDate  = _realDays[_realDays.length - 1]?.date;
-                        const _canDefer  = _realDays.length > 1 && _curDate && _lastDate && _curDate < _lastDate;
-                        _deferBtn.disabled = !_canDefer;
-                        _deferBtn.classList.toggle('opacity-40',  !_canDefer);
-                        _deferBtn.classList.toggle('pointer-events-none', !_canDefer);
-                        if (_deferSub) {
-                            _deferSub.textContent = _canDefer
-                                ? 'Move to the final day of your trip'
-                                : 'Already on the last day of the trip';
-                        }
-                    }
-
-                    if (backdrop) backdrop.classList.remove('hidden');
-                    menu.classList.remove('hidden');
-                    // Position near touch
-                    const t   = e.touches[0];
-                    const vw  = window.innerWidth;
-                    const vh  = window.innerHeight;
-                    const mw  = 200;
-                    const mh  = 110;
-                    let  left = Math.min(t.clientX, vw - mw - 10);
-                    let  top  = Math.min(t.clientY - mh - 10, vh - mh - 10);
-                    if (top < 80) top = t.clientY + 10;
-                    menu.style.left = `${left}px`;
-                    menu.style.top  = `${top}px`;
-                }, 500);
-            }, { passive: true });
-            card.addEventListener('touchend',    () => clearTimeout(_lpTimer));
-            card.addEventListener('touchmove',   () => clearTimeout(_lpTimer));
-            card.addEventListener('touchcancel', () => clearTimeout(_lpTimer));
-        }
 
         block.appendChild(card);
         container.appendChild(block);
@@ -3227,6 +3240,7 @@ function renderDetailViewTimeline() {
         date:     activeDay.date,
         category: spot.category,
         isDone:   spot.isDone,
+        spot,
     }));
 
     setTimeout(() => {
@@ -3234,7 +3248,7 @@ function renderDetailViewTimeline() {
             _populateItinActivityWeatherBadge(job.badgeId, itin.city, job.date, job.dayIndex, job.spot)
         );
         _rainRiskJobs.forEach(job =>
-            _updateRainRiskBadge(job.badgeId, itin.city, job.date, job.category, job.isDone)
+            _updateRainRiskBadge(job.badgeId, itin.city, job.date, job.category, job.isDone, job.spot)
         );
     }, 0);
 
@@ -3529,15 +3543,49 @@ function _calcConfidence(spot, slotStart, slotEnd, dayStart, dayEnd, catCountMap
     return Math.max(0, Math.min(100, score));
 }
 
-/** Check if a day's date has a rainy/stormy forecast using the warm cache. */
+/** Check if a day's date has a rainy/stormy forecast using the warm cache.
+ *  Uses WMO weather codes: drizzle/rain (51-67), showers (80-82), thunder (95+).
+ *  Falls back to iconClass string matching for any legacy cache entries.
+ */
 function _dayHasRain(city, dateYMD) {
     if (!city || !dateYMD) return false;
-    const cached = itinWeatherCache.get(city.trim().toLowerCase());
-    if (!cached) return false;
-    const dayFc = cached.days.find(d => d.date === dateYMD);
-    if (!dayFc) return false;
-    const ic = (dayFc.iconClass || '').toLowerCase();
-    return ic.includes('rain') || ic.includes('storm') || ic.includes('thunder') || ic.includes('drizzle');
+    const cacheKey = city.trim().toLowerCase();
+
+    // ── Primary: daily forecast cache ────────────────────────────────────────
+    const cached = itinWeatherCache.get(cacheKey);
+    if (cached) {
+        const dayFc = cached.days.find(d => d.date === dateYMD);
+        if (dayFc) {
+            if (dayFc.wmoCode !== undefined) {
+                const c = parseInt(dayFc.wmoCode, 10);
+                if ((c >= 51 && c <= 67) || (c >= 80 && c <= 82) || c >= 95) return true;
+            } else {
+                // Legacy cache entries that only have iconClass
+                const ic = (dayFc.iconClass || '').toLowerCase();
+                if (ic.includes('rain') || ic.includes('storm') || ic.includes('thunder') || ic.includes('drizzle')) return true;
+            }
+            // Daily code says no rain — still check hourly for partial-day rain.
+            // Open-Meteo's daily weather_code is a "dominant" summary and can read
+            // "mainly clear" even on days with a rainy spell during a few hours.
+            // The activity weather badge uses hourly data so may already show rain;
+            // the risk badge must agree, hence the fallback below.
+        }
+    }
+
+    // ── Supplement: hourly forecast cache ────────────────────────────────────
+    // Any single rainy hourly slot on this date is enough to trigger the badge.
+    const _isRainyCode = c => (c >= 51 && c <= 67) || (c >= 80 && c <= 82) || c >= 95;
+    const cached3h = itinForecast3hCache.get(cacheKey);
+    if (cached3h && Array.isArray(cached3h.slots)) {
+        const daySlots = cached3h.slots.filter(s => s.date === dateYMD);
+        if (daySlots.some(s => {
+            if (s.wmoCode !== undefined) return _isRainyCode(parseInt(s.wmoCode, 10));
+            const ic = (s.iconClass || '').toLowerCase();
+            return ic.includes('rain') || ic.includes('storm') || ic.includes('thunder') || ic.includes('drizzle');
+        })) return true;
+    }
+
+    return false;
 }
 
 function executeRecalculateEngine() {
@@ -4036,6 +4084,57 @@ function closeSpotContextMenu() {
     const b = document.getElementById('spotContextMenuBackdrop');
     if (m) m.classList.add('hidden');
     if (b) b.classList.add('hidden');
+}
+
+/**
+ * Open the spot context menu anchored to a card info-button tap.
+ * Positions the menu above (or below) the tapped button, clamped inside viewport.
+ */
+function openSpotContextMenuAt(dayIndex, spotIndex, btnEl) {
+    const menu     = document.getElementById('spotContextMenu');
+    const backdrop = document.getElementById('spotContextMenuBackdrop');
+    if (!menu) return;
+
+    menu.dataset.dayIndex  = dayIndex;
+    menu.dataset.spotIndex = spotIndex;
+
+    // Enable / disable "Defer to Last Day" based on whether current day is last
+    const _itin     = getActiveItinerary();
+    const _deferBtn = document.getElementById('spotContextDeferBtn');
+    const _deferSub = document.getElementById('spotContextDeferSubtitle');
+    if (_deferBtn && _itin) {
+        const _realDays = (_itin.days || [])
+            .filter(d => !d?.isSuggested && d?.date)
+            .sort((a, b) => a.date > b.date ? 1 : -1);
+        const _curDate  = _itin.days[dayIndex]?.date;
+        const _lastDate = _realDays[_realDays.length - 1]?.date;
+        const _canDefer = _realDays.length > 1 && _curDate && _lastDate && _curDate < _lastDate;
+        _deferBtn.disabled = !_canDefer;
+        _deferBtn.classList.toggle('opacity-40', !_canDefer);
+        _deferBtn.classList.toggle('pointer-events-none', !_canDefer);
+        if (_deferSub) {
+            _deferSub.textContent = _canDefer
+                ? 'Move to the final day of your trip'
+                : 'Already on the last day of the trip';
+        }
+    }
+
+    if (backdrop) backdrop.classList.remove('hidden');
+    menu.classList.remove('hidden');
+
+    // Position the menu above the button; fall back to below if not enough room
+    const rect = btnEl.getBoundingClientRect();
+    const vw   = window.innerWidth;
+    const vh   = window.innerHeight;
+    const mw   = 208; // w-52 = 13rem ≈ 208px
+    const mh   = 160;
+    let left = Math.min(rect.left, vw - mw - 10);
+    if (left < 8) left = 8;
+    let top = rect.top - mh - 8;
+    if (top < 80) top = rect.bottom + 8;
+    if (top + mh > vh - 10) top = vh - mh - 10;
+    menu.style.left = `${left}px`;
+    menu.style.top  = `${top}px`;
 }
 
 // ── Feature 7: Promote suggested extra days directly into the real itinerary ──

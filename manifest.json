@@ -1,0 +1,23 @@
+{
+  "name": "Save2Go",
+  "short_name": "Save2Go",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "description": "AI-powered travel spot tracker with smart search, custom filters, and live weather — synced with Google Sheets.",
+  "icons": [
+    {
+      "src": "save2go_app_icon_192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "save2go_app_icon_512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
