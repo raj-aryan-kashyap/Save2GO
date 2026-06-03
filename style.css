@@ -120,6 +120,7 @@ body {
 
 #view-map {
     top: 0 !important;
+    bottom: 0 !important; /* map tiles extend behind the floating nav bar */
 }
 
 .flip-perspective-container {

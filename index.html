@@ -20,6 +20,23 @@
     <script>
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js');
+
+            // When a new service worker takes control via skipWaiting + clients.claim(),
+            // reload the page so the updated shell files (aap.js, map.js, etc.) are
+            // actually loaded into memory — not just cached in the background.
+            //
+            // Guard 1: `refreshing` flag prevents a double-reload if controllerchange
+            //          fires more than once in rapid succession (harmless edge case).
+            // Guard 2: only reload when there WAS a previous controller, meaning this
+            //          is a genuine update — not the very first SW install on a clean
+            //          browser, which would cause a premature reload before the app loads.
+            let _swRefreshing = false;
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (_swRefreshing) return;
+                if (!navigator.serviceWorker.controller) return; // first-ever install — skip
+                _swRefreshing = true;
+                window.location.reload();
+            });
         }
     </script>
     
@@ -2103,6 +2120,12 @@
                 </div>
                 <div id="wdFeelsLine" class="text-[9.5px] text-slate-500 mt-0.5 hidden">
                     Feels like <span id="wdFeelsVal" class="font-bold text-slate-400">—°</span>
+                </div>
+                <!-- Sync status: shows "Syncing…" or "Updated X mins ago" -->
+                <div id="wdSyncStatus"
+                     class="flex items-center gap-1 mt-1 text-[9px] font-bold text-slate-600">
+                    <i class="fa-solid fa-rotate fa-spin text-[8px] text-sky-500/60"></i>
+                    <span>Syncing…</span>
                 </div>
             </div>
             <button onclick="closeWeatherDrawer()"

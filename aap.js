@@ -2562,9 +2562,78 @@ async function refreshAllWeatherBadges() {
 //  All times are derived client-side from UNIX timestamps; no extra API calls.
 // ════════════════════════════════════════════════════════════════════════════
 
-const _wdDataCache = new Map(); // "lat,lon" → { data, fetchedAt }
-const _WD_CACHE_TTL = 5 * 60 * 1000; // 5 min — UV changes fast enough to warrant this
-let   _wdRefreshInterval = null;     // live-refresh timer while drawer is open
+const _wdDataCache         = new Map();            // "lat,lon" → { data, fetchedAt } — in-session mem cache
+const _WD_CACHE_TTL        = 5  * 60 * 1000;      // 5 min  — how long mem cache is considered fresh
+const _WD_BG_INTERVAL      = 30 * 60 * 1000;      // 30 min — background refresh cadence (drawer closed)
+const _WD_LS_KEY           = 'compass_wd_cache_v2'; // localStorage key for persisted weather cache
+let   _wdRefreshInterval   = null;                 // in-drawer live-refresh (5 min)
+let   _wdStatusTickId      = null;                 // 1-min tick to keep "Updated X mins ago" current
+let   _wdBgRefreshInterval = null;                 // background refresh while drawer is closed
+let   _wdLastFetchedAt     = null;                 // ms timestamp of the most recent successful fetch
+
+// ── localStorage cache helpers ─────────────────────────────────────────────────
+/** Persist a weather payload to localStorage (capped at 5 locations). */
+function _wdSaveToStorage(key, data) {
+    try {
+        const raw   = localStorage.getItem(_WD_LS_KEY);
+        const store = raw ? JSON.parse(raw) : {};
+        store[key]  = { data, fetchedAt: Date.now() };
+        // Evict oldest entries if we're above 5 locations
+        const keys = Object.keys(store);
+        if (keys.length > 5) {
+            keys.sort((a, b) => store[a].fetchedAt - store[b].fetchedAt)
+                .slice(0, keys.length - 5)
+                .forEach(k => delete store[k]);
+        }
+        localStorage.setItem(_WD_LS_KEY, JSON.stringify(store));
+    } catch (_) {}
+}
+
+/** Load the persisted weather entry for given coords, or null if absent. */
+function _wdLoadFromStorage(lat, lon) {
+    try {
+        const key   = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+        const raw   = localStorage.getItem(_WD_LS_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw)[key] || null;   // { data, fetchedAt } | null
+    } catch (_) { return null; }
+}
+
+// ── Sync-status label ─────────────────────────────────────────────────────────
+/**
+ * Update the small status line in the drawer header.
+ * @param {'syncing'|'done'} state
+ */
+function _wdSetSyncStatus(state) {
+    const el = document.getElementById('wdSyncStatus');
+    if (!el) return;
+    if (state === 'syncing') {
+        el.innerHTML =
+            `<i class="fa-solid fa-rotate fa-spin text-[8px] text-sky-500/70"></i>` +
+            `<span>Syncing…</span>`;
+        el.className = 'flex items-center gap-1 mt-1 text-[9px] font-bold text-slate-500';
+    } else {
+        if (!_wdLastFetchedAt) { el.innerHTML = ''; return; }
+        const mins  = Math.round((Date.now() - _wdLastFetchedAt) / 60000);
+        const label = mins < 1
+            ? 'Updated just now'
+            : `Updated ${mins} min${mins !== 1 ? 's' : ''} ago`;
+        el.innerHTML =
+            `<i class="fa-solid fa-circle-check text-[8px] text-emerald-500/80"></i>` +
+            `<span>${label}</span>`;
+        el.className = 'flex items-center gap-1 mt-1 text-[9px] font-bold text-emerald-700/70';
+    }
+}
+
+/** Start a 60-second tick that keeps the "Updated X mins ago" label counting up. */
+function _wdStartStatusTick() {
+    clearInterval(_wdStatusTickId);
+    _wdStatusTickId = setInterval(() => {
+        // Only update if we're showing the "done" state (i.e. not currently syncing)
+        const el = document.getElementById('wdSyncStatus');
+        if (el && el.querySelector('.fa-circle-check')) _wdSetSyncStatus('done');
+    }, 60 * 1000);
+}
 
 // ── Open ──────────────────────────────────────────────────────────────────────
 function openWeatherDrawer() {
@@ -2572,53 +2641,88 @@ function openWeatherDrawer() {
     const sheet   = document.getElementById('weatherDrawerSheet');
     if (!overlay || !sheet) return;
 
-    _setFabsVisible(false); // hide FAB while drawer is open
+    _setFabsVisible(false);
 
     // Hide bottom nav so the drawer gets the full bottom screen space
     const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
     if (_wdNav) _wdNav.style.display = 'none';
 
-    // Reveal overlay
+    // Reveal overlay + animate sheet in
     overlay.classList.remove('hidden');
-
-    // Two rAF frames ensure the browser has painted display:block before
-    // the CSS transition fires — otherwise translateY stays at 100%.
     requestAnimationFrame(() => {
         requestAnimationFrame(() => {
             sheet.style.transform = 'translateY(0)';
         });
     });
 
-    // Reset to loading state
-    const loading = document.getElementById('wdLoading');
-    const content = document.getElementById('wdContent');
-    if (loading) loading.classList.remove('hidden');
-    if (content) content.classList.add('hidden');
-
-    // Reset "Don't show on map" toggle to OFF each open — it's a pending-action
-    // toggle, not a persistent state indicator (Settings controls re-show).
+    // Reset "Don't show on map" toggle — it's a per-session pending action, not persistent state
     _setWeatherHideToggle(false);
 
     // Resolve best-available coordinates (live GPS → last-known → globals)
     let lat = userLat, lon = userLon;
     if (cachedUserCoords) { lat = cachedUserCoords.lat; lon = cachedUserCoords.lon; }
 
-    // Initial fetch
-    _fetchWeatherDrawerData(lat, lon).then(data => {
-        if (data) _renderWeatherDrawer(data);
-    });
+    const loading = document.getElementById('wdLoading');
+    const content = document.getElementById('wdContent');
+
+    // ── Stale-while-revalidate ────────────────────────────────────────────────
+    // If we have persisted data from a previous session or background refresh,
+    // render it instantly (no loading spinner) and kick off a background refresh.
+    // On mobile this means the user sees weather data in <10ms instead of waiting
+    // for a cold network fetch.
+    const cached = _wdLoadFromStorage(lat, lon);
+    if (cached) {
+        // Show cached data immediately — skip the loading spinner
+        if (loading) loading.classList.add('hidden');
+        if (content) content.classList.remove('hidden');
+        _renderWeatherDrawer(cached.data);
+        _wdSetSyncStatus('syncing');
+
+        // Force-bypass in-session mem cache so we always hit the network here
+        const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+        _wdDataCache.delete(key);
+        _fetchWeatherDrawerData(lat, lon).then(data => {
+            if (data) {
+                _renderWeatherDrawer(data);
+                _wdSetSyncStatus('done');
+            } else {
+                // Network failed — restore "Updated X mins ago" based on cached age
+                _wdLastFetchedAt = cached.fetchedAt;
+                _wdSetSyncStatus('done');
+            }
+        });
+    } else {
+        // No cache at all — show loading spinner until first fetch completes
+        if (loading) loading.classList.remove('hidden');
+        if (content) content.classList.add('hidden');
+        _wdSetSyncStatus('syncing');
+
+        _fetchWeatherDrawerData(lat, lon).then(data => {
+            if (data) {
+                _renderWeatherDrawer(data);
+                _wdSetSyncStatus('done');
+            }
+            // If fetch fails with no cache, the spinner stays — acceptable cold-start behaviour
+        });
+    }
+
+    // Start the 1-min tick so "Updated X mins ago" counts up while drawer is open
+    _wdStartStatusTick();
 
     // Live-refresh every 5 min while drawer stays open so UV/AQI stay current.
     // Clear any stale interval first (e.g. drawer reopened without closing properly).
     clearInterval(_wdRefreshInterval);
     _wdRefreshInterval = setInterval(() => {
-        // Always bypass cache on the timed refresh — force a fresh API call
         const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
         _wdDataCache.delete(key);
+        _wdSetSyncStatus('syncing');
         _fetchWeatherDrawerData(lat, lon).then(data => {
-            if (data) _renderWeatherDrawer(data);
+            if (data) {
+                _renderWeatherDrawer(data);
+                _wdSetSyncStatus('done');
+            }
         });
-    }, _WD_CACHE_TTL); // fires every 5 min
+    }, _WD_CACHE_TTL);
 }
 
 // ── Close ─────────────────────────────────────────────────────────────────────
@@ -2640,15 +2744,17 @@ function closeWeatherDrawer() {
     // Hide overlay immediately — removes blur/dim at the moment of close
     overlay.classList.add('hidden');
     sheet.style.transform = 'translateY(100%)';
-    // Stop the live-refresh timer — no point polling while drawer is hidden
+    // Stop both in-drawer timers
     clearInterval(_wdRefreshInterval);
+    clearInterval(_wdStatusTickId);
+    _wdRefreshInterval = null;
+    _wdStatusTickId    = null;
     // Post-animation cleanup only (nav + FAB restore)
     setTimeout(() => {
         const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
         if (_wdNav) _wdNav.style.display = '';
         _updateFabVisibility();
     }, 340);
-    _wdRefreshInterval = null;
 }
 
 // ── Data fetch — fully Open-Meteo ────────────────────────────────────────────
@@ -2741,7 +2847,10 @@ async function _fetchWeatherDrawerData(lat, lon) {
             hourly,
         };
 
-        _wdDataCache.set(key, { data, fetchedAt: Date.now() });
+        const now = Date.now();
+        _wdDataCache.set(key, { data, fetchedAt: now });
+        _wdLastFetchedAt = now;          // track for "Updated X mins ago"
+        _wdSaveToStorage(key, data);     // persist across sessions + page reloads
         return data;
     } catch (e) {
         console.warn('[WeatherDrawer] fetch failed:', e.message);
@@ -2874,6 +2983,36 @@ function _renderWeatherDrawer(data) {
                 `<span class="text-[10px] text-slate-500 italic pl-1">Forecast unavailable</span>`;
         }
     }
+}
+
+// ── Background refresh (drawer closed) ───────────────────────────────────────
+/**
+ * Starts a 30-min background interval that keeps the localStorage weather cache
+ * warm even when the drawer is never opened.  This means the very first time the
+ * user taps the weather capsule after a long idle period they still see
+ * near-current data instantly instead of a cold-start spinner.
+ *
+ * The interval is intentionally skipped if the drawer is already open — the
+ * in-drawer 5-min timer handles freshness while the user is looking at it.
+ */
+function _wdStartBgRefresh() {
+    clearInterval(_wdBgRefreshInterval);
+    _wdBgRefreshInterval = setInterval(() => {
+        // Skip if drawer is currently open — its own interval handles freshness
+        const overlay = document.getElementById('weatherDrawerOverlay');
+        if (overlay && !overlay.classList.contains('hidden')) return;
+
+        // Resolve best-available coordinates
+        let lat = userLat, lon = userLon;
+        if (cachedUserCoords) { lat = cachedUserCoords.lat; lon = cachedUserCoords.lon; }
+        if (!lat || !lon) return;
+
+        // Bypass in-session mem cache to force a live API call
+        const key = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+        _wdDataCache.delete(key);
+        // Fire-and-forget — _fetchWeatherDrawerData saves result to LS automatically
+        _fetchWeatherDrawerData(lat, lon).catch(() => {});
+    }, _WD_BG_INTERVAL);
 }
 
 // _fetchWeatherDrawerForecast is no longer needed — hourly data is embedded
@@ -5487,6 +5626,7 @@ window.onload = function() {
     initSettingsCurrencyToggle();
     _applyWeatherCapsuleVisibility();
     initSettingsWeatherToggle();
+    _wdStartBgRefresh(); // keep localStorage weather cache warm every 30 min
 
     cachedHardwareString = parseReadableDeviceHardware();
     document.getElementById('meta-id').innerText = `Device ID: ${deviceId}`;
