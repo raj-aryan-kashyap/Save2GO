@@ -109,7 +109,8 @@ let activeTabID = 'map';
 
 let liveGpsWatchId = null;
 let speechBubbleHideTimer = null;
-let _holidayCache = {};  // keyed by "countryCode-year" → array of holiday date strings
+let _holidayCache = {};      // keyed by "countryCode-year" → array of holiday date strings
+let _holidayRichCache = {};  // keyed by "countryCode-year" → array of { date, name, localName }
 let continuousGpsFailsafeIntervalId = null; 
 let lastGpsSuccessTime = 0; 
 // Pre-populate from the last session so recenter is instant on first load,
@@ -515,6 +516,8 @@ async function syncData(isManualForce) {
             }
             
             updateNetworkStatusHUD();
+
+            if (typeof initTasksBadge === 'function') initTasksBadge();
 
             if (typeof prefetchBordersCountryTilesMapEngine === 'function') {
                 prefetchBordersCountryTilesMapEngine();
@@ -4658,10 +4661,10 @@ function renderList() {
 function toggleSettingsMenu(show) {
     const drawer = document.getElementById('settingsDrawer');
     if (drawer) drawer.classList.toggle('hidden', !show);
-    // When opening settings, force-close the profile drawer (mutually exclusive)
+    // When opening settings, force-close all other right-side drawers
     if (show) {
-        const pd = document.getElementById('profileDrawer');
-        if (pd) pd.classList.add('hidden');
+        document.getElementById('profileDrawer')?.classList.add('hidden');
+        document.getElementById('tasksDrawer')?.classList.add('hidden');
     }
 }
 
@@ -5551,6 +5554,7 @@ window.onload = function() {
     if (travelSpots.length > 0) {
         calculateSmartCityDefaultFilters();
         renderList();
+        initTasksBadge();
 
         // NOTE: intentionally NOT calling triggerOptimalLandingViewportRecalculation here.
         // The map was already positioned correctly by initLeafletMapEngineCanvas using the
@@ -5626,6 +5630,15 @@ window.onload = function() {
                  && !event.target.closest('#settingsResultModal')
                  && !event.target.closest('#userGreetingCapsule')) {
                  toggleProfileDrawer(false);
+             }
+         }
+
+         // Close the tasks drawer when clicking outside it
+         const tasksDrawerEl = document.getElementById('tasksDrawer');
+         if (tasksDrawerEl && !tasksDrawerEl.classList.contains('hidden')) {
+             if (!event.target.closest('#tasksDrawerBody')
+                 && !event.target.closest('button[onclick*="toggleTasksDrawer"]')) {
+                 toggleTasksDrawer(false);
              }
          }
      });
@@ -5807,6 +5820,46 @@ async function _fetchPublicHolidays(countryCode, year) {
 }
 
 /**
+ * Fetch full public holiday objects for a country+year from Nager.Date.
+ * Shares the same API endpoint as _fetchPublicHolidays but stores rich objects.
+ * Returns an array of { date: "YYYY-MM-DD", name: string, localName: string }.
+ */
+async function _fetchPublicHolidaysRich(countryCode, year) {
+    const cacheKey = `${countryCode}-${year}`;
+    if (_holidayRichCache[cacheKey] !== undefined) return _holidayRichCache[cacheKey];
+    try {
+        const res = await fetch(
+            `https://date.nager.at/api/v3/PublicHolidays/${year}/${countryCode}`,
+            { signal: AbortSignal.timeout(6000) }
+        );
+        if (!res.ok) { _holidayRichCache[cacheKey] = []; return []; }
+        const data = await res.json();
+        const rich = Array.isArray(data)
+            ? data.map(h => ({ date: h.date, name: h.name, localName: h.localName }))
+            : [];
+        _holidayRichCache[cacheKey] = rich;
+        return rich;
+    } catch (e) {
+        _holidayRichCache[cacheKey] = [];
+        return [];
+    }
+}
+
+/**
+ * Returns the public holiday object { date, name, localName } for a given city
+ * and date string "YYYY-MM-DD", or null if the day is not a public holiday.
+ * Called by the itinerary timeline banner renderer.
+ */
+async function getPublicHolidayForDate(cityName, dateYMD) {
+    if (!cityName || !dateYMD) return null;
+    const countryCode = _CITY_COUNTRY_MAP[cityName.toLowerCase().trim()];
+    if (!countryCode) return null;
+    const year = parseInt(dateYMD.slice(0, 4), 10);
+    const holidays = await _fetchPublicHolidaysRich(countryCode, year);
+    return holidays.find(h => h.date === dateYMD) || null;
+}
+
+/**
  * Returns true if today is a public holiday in the given city.
  * Returns false if the city is not in the lookup map, or on any error.
  */
@@ -5904,4 +5957,691 @@ function handleHolidayNotifierTap(event) {
     speechBubbleHideTimer = setTimeout(() => {
         if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
     }, 2600);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TASKS DRAWER
+// Smart booking/reservation reminder list derived from saved spots and
+// future itinerary entries.
+//
+// • Action labels are computed locally by a multi-field scoring engine —
+//   no API call needed.  Fields scanned: booking_requirement (highest weight),
+//   category, spot_name, notes, long_description, opening_hours.
+// • State (done, muted) is stored in localStorage and survives reloads.
+// • Entry point: fa-clipboard-check button in the top HUD, between sync and settings.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const _TASKS_LS_DONE  = 'save2go_tasks_done_v1';
+const _TASKS_LS_MUTED = 'save2go_tasks_muted_v1';
+
+let _tasksTab    = 'saved'; // 'saved' | 'itin'
+let _tasksFilter = 'all';   // 'all' | 'muted'
+
+// ── State helpers ─────────────────────────────────────────────────────────
+function _tasksGetDone()      { try { return new Set(JSON.parse(localStorage.getItem(_TASKS_LS_DONE)  || '[]')); } catch { return new Set(); } }
+function _tasksGetMuted()     { try { return new Set(JSON.parse(localStorage.getItem(_TASKS_LS_MUTED) || '[]')); } catch { return new Set(); } }
+function _tasksSaveDone(s)    { localStorage.setItem(_TASKS_LS_DONE,  JSON.stringify([...s])); }
+function _tasksSaveMuted(s)   { localStorage.setItem(_TASKS_LS_MUTED, JSON.stringify([...s])); }
+
+// ── Action scoring engine ─────────────────────────────────────────────────
+/**
+ * Scans all available fields on a spot and returns
+ * { label: string, urgency: 1|2|3 } or null if the spot needs no action.
+ *
+ * urgency 3 = required (red)   · 2 = recommended (amber)   · 1 = optional (sky)
+ */
+function _tasksComputeAction(spot) {
+    const lc = t => (t || '').toLowerCase();
+    const bookingReq = lc(spot.booking_requirement);
+    const cat        = lc(spot.category);
+    const allText    = [spot.spot_name, spot.notes, spot.long_description, spot.opening_hours].join(' ').toLowerCase();
+
+    // ── Tier 1: explicit booking_requirement field ─────────────────────────
+    if (bookingReq && bookingReq !== 'n/a' && bookingReq !== 'none'
+        && bookingReq !== '-' && bookingReq.length > 2) {
+        const raw = (spot.booking_requirement || '').trim();
+        return { label: raw.length <= 48 ? raw : 'Booking required', urgency: 3 };
+    }
+
+    let score = 0;
+    let label = null;
+    let urgency = 1;
+
+    // ── Tier 2: category signals ───────────────────────────────────────────
+    if (/food|restaurant|dining|cafe|café|eatery|bistro|brasserie/.test(cat)) {
+        score += 2; label = 'Reservation recommended';
+    } else if (/activity|tour|excursion|experience|adventure|sport/.test(cat)) {
+        score += 2; label = 'Pre-booking recommended';
+    } else if (/nightlife|bar|drink|club|cocktail|lounge/.test(cat)) {
+        score += 1; label = 'Reservation recommended';
+    } else if (/culture|museum|gallery|exhibit|theatre|theater/.test(cat)) {
+        score += 1; label = 'Tickets recommended';
+    }
+    // Photo, Viewpoint, Nature, Shopping, Landmark → no inherent booking need
+
+    // ── Tier 3: keyword scan across all text fields ────────────────────────
+    const BOOK_KW = [
+        'book', 'reserv', 'ticket', 'advance', 'popular', 'queue',
+        'limited seat', 'capacity', 'sell out', 'sold out',
+        'waiting list', 'pre-book', 'must book', 'booking required',
+    ];
+    const BOOST_KW = ['michelin', 'award', 'famous', 'iconic', 'exclusive', 'world-class'];
+    const NEG_KW   = ['free entry', 'free admission', 'walk-in', 'walk in',
+                      'no booking', 'no reserv', 'always open', 'open to public'];
+
+    let kwHits = 0;
+    for (const kw of BOOK_KW)  { if (allText.includes(kw) && ++kwHits >= 3) break; }
+    for (const kw of BOOST_KW) { if (allText.includes(kw)) { urgency = Math.min(urgency + 1, 3); break; } }
+    let negHit = false;
+    for (const kw of NEG_KW)   { if (allText.includes(kw)) { negHit = true; break; } }
+
+    score += kwHits;
+    if (negHit) score -= 2;
+
+    if (score >= 4) urgency = 3;
+    else if (score >= 2) urgency = Math.max(urgency, 2);
+
+    if (score < 2) return null;   // below threshold — not actionable
+    if (!label)    label = 'Check availability';
+
+    return { label, urgency };
+}
+
+// ── Drawer open/close ─────────────────────────────────────────────────────
+function toggleTasksDrawer(show) {
+    const drawer = document.getElementById('tasksDrawer');
+    if (!drawer) return;
+    drawer.classList.toggle('hidden', !show);
+    if (show) {
+        // Mutual exclusion with other right-side drawers
+        document.getElementById('settingsDrawer')?.classList.add('hidden');
+        document.getElementById('profileDrawer')?.classList.add('hidden');
+        // Always start with the spot panel closed
+        document.getElementById('tasksSpotPanel')?.classList.add('hidden');
+        _tasksFilter = 'all';
+        _tasksTab    = 'saved';
+        _syncTasksTabUI();
+        _syncTasksFilterUI();
+        _renderTasksList();
+    } else {
+        // Ensure the spot panel is hidden when the drawer closes
+        document.getElementById('tasksSpotPanel')?.classList.add('hidden');
+    }
+}
+
+// ── Tab and filter UI sync ────────────────────────────────────────────────
+function _syncTasksTabUI() {
+    const savedBtn = document.getElementById('tasksTabBtnSaved');
+    const itinBtn  = document.getElementById('tasksTabBtnItin');
+    const activeC  = 'bg-pink-600 text-white';
+    const inactiveC = 'bg-slate-800 text-slate-400';
+    if (savedBtn) savedBtn.className = `flex-1 text-[10px] font-bold py-1.5 rounded-xl transition-colors ${_tasksTab === 'saved' ? activeC : inactiveC}`;
+    if (itinBtn)  itinBtn.className  = `flex-1 text-[10px] font-bold py-1.5 rounded-xl transition-colors ${_tasksTab === 'itin'  ? activeC : inactiveC}`;
+}
+
+function _syncTasksFilterUI() {
+    const allBtn   = document.getElementById('tasksToggleBtnAll');
+    const mutedBtn = document.getElementById('tasksToggleBtnMuted');
+    const activeC  = 'bg-slate-700 text-slate-200';
+    const inactiveC = 'text-slate-500';
+    if (allBtn)   allBtn.className   = `text-[9px] font-bold px-2.5 py-1 rounded-lg transition-colors ${_tasksFilter === 'all'   ? activeC : inactiveC}`;
+    if (mutedBtn) mutedBtn.className = `text-[9px] font-bold px-2.5 py-1 rounded-lg transition-colors ${_tasksFilter === 'muted' ? activeC : inactiveC}`;
+}
+
+function switchTasksTab(tab) {
+    _tasksTab = tab;
+    _syncTasksTabUI();
+    _renderTasksList();
+}
+
+function setTasksFilter(filter) {
+    _tasksFilter = filter;
+    _syncTasksFilterUI();
+    _renderTasksList();
+}
+
+// ── Badge + pending notch helpers ─────────────────────────────────────────
+function _tasksUpdateBadge(count) {
+    [document.getElementById('tasksHudBadge'),
+     document.getElementById('tasksHeaderBadge')].forEach(el => {
+        if (!el) return;
+        el.classList.toggle('hidden', count < 1);
+        el.textContent = count > 99 ? '99+' : String(count);
+    });
+}
+
+/** Updates the "X/Y Pending" notch below the drawer header. */
+function _tasksUpdatePendingNotch(pending, total) {
+    const pEl = document.getElementById('tasksPendingCount');
+    const tEl = document.getElementById('tasksTotalCount');
+    if (pEl) pEl.textContent = String(pending);
+    if (tEl) tEl.textContent = String(total);
+}
+
+/** Called after data loads — pre-computes the pending count for the HUD badge. */
+function initTasksBadge() {
+    const rows  = Array.isArray(travelSpots) ? travelSpots : [];
+    const done  = _tasksGetDone();
+    const muted = _tasksGetMuted();
+    let count = 0;
+    for (const row of rows) {
+        if (!_tasksComputeAction(row)) continue;
+        const key = String(row.rowid);
+        if (!done.has(key) && !muted.has(key)) count++;
+    }
+    _tasksUpdateBadge(count);
+}
+
+// ── Urgency pill style ────────────────────────────────────────────────────
+function _tasksUrgencyPill(urgency) {
+    if (urgency >= 3) return 'text-red-400 bg-red-500/10 border border-red-500/20';
+    if (urgency >= 2) return 'text-amber-400 bg-amber-500/10 border border-amber-500/20';
+    return 'text-sky-400 bg-sky-500/10 border border-sky-500/20';
+}
+
+// ── Row builder ───────────────────────────────────────────────────────────
+function _tasksBuildRow(spot, taskKey, action, isDone, isMuted) {
+    const row = document.createElement('div');
+    row.className = `flex items-start gap-2.5 bg-slate-800/40 border border-slate-700/30 rounded-2xl px-3 py-2.5 transition-opacity ${isDone ? 'opacity-40' : ''}`;
+
+    const _esc    = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    const noteRaw = (spot.notes || spot.long_description || '').trim();
+    const note    = noteRaw.length > 68 ? noteRaw.slice(0, 68) + '…' : noteRaw;
+    const pillCls = _tasksUrgencyPill(action.urgency);
+    const safeKey = _esc(taskKey);
+    const rowid   = _esc(String(spot.rowid || ''));
+
+    row.innerHTML = `
+        <button onclick="tasksToggleDone('${safeKey}')"
+                title="${isDone ? 'Mark pending' : 'Mark done'}"
+                class="mt-1 shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all active:scale-90
+                       ${isDone ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 hover:border-emerald-500/70'}">
+            <i class="fa-solid fa-check text-[7px] ${isDone ? 'text-white' : 'text-transparent'}"></i>
+        </button>
+        <div class="flex-1 min-w-0">
+            <p class="text-[12px] font-black text-slate-200 leading-tight truncate">${_esc(spot.spot_name)}</p>
+            <div class="flex items-center gap-1.5 mt-1 mb-1 min-w-0 overflow-hidden">
+                <span class="text-[8px] font-black px-1.5 py-0.5 rounded-lg min-w-0 truncate ${pillCls}">${_esc(action.label)}</span>
+                <button onclick="tasksToggleMute('${safeKey}')"
+                        class="shrink-0 whitespace-nowrap inline-flex items-center gap-1 text-[9px] font-bold text-slate-500 border border-slate-700/50 rounded-lg px-2 py-0.5 active:bg-slate-800 transition-colors">
+                    <i class="fa-solid ${isMuted ? 'fa-bell' : 'fa-bell-slash'} text-[8px]"></i>
+                    ${isMuted ? 'Unmute' : "Don't remind"}
+                </button>
+            </div>
+            ${note ? `<p class="text-[10px] text-slate-500 font-medium line-clamp-1">${_esc(note)}</p>` : ''}
+        </div>
+        <button onclick="tasksOpenTray('${rowid}')"
+                title="View details"
+                class="mt-0.5 shrink-0 w-7 h-7 flex items-center justify-center rounded-xl bg-slate-700/30 border border-slate-700/40 text-slate-400 active:bg-slate-700 transition-colors">
+            <i class="fa-solid fa-circle-info text-[11px]"></i>
+        </button>`;
+
+    return row;
+}
+
+// ── Empty-state helper ────────────────────────────────────────────────────
+function _tasksEmptyState(container, msg) {
+    const el = document.createElement('div');
+    el.className = 'flex flex-col items-center gap-2 mt-10 px-4 text-center';
+    el.innerHTML = `<i class="fa-solid fa-circle-check text-slate-700 text-2xl"></i>
+                    <p class="text-[11px] text-slate-500 font-medium">${msg}</p>`;
+    container.appendChild(el);
+}
+
+// ── Main render ───────────────────────────────────────────────────────────
+function _renderTasksList() {
+    const container = document.getElementById('tasksListContent');
+    if (!container) return;
+    container.innerHTML = '';
+    if (_tasksTab === 'saved') _tasksRenderSavedTab(container);
+    else                       _tasksRenderItinTab(container);
+}
+
+// ── Saved Spots tab ───────────────────────────────────────────────────────
+function _tasksRenderSavedTab(container) {
+    const rows = Array.isArray(travelSpots) ? travelSpots : [];
+    if (!rows.length) { _tasksEmptyState(container, 'No saved spots yet.'); return; }
+
+    const done  = _tasksGetDone();
+    const muted = _tasksGetMuted();
+
+    // Score every row
+    const all = [];
+    for (const row of rows) {
+        const action = _tasksComputeAction(row);
+        if (!action) continue;
+        const key = String(row.rowid);
+        all.push({ row, action, key, isDone: done.has(key), isMuted: muted.has(key) });
+    }
+
+    if (!all.length) { _tasksUpdatePendingNotch(0, 0); _tasksEmptyState(container, 'No action items found in your saved spots.'); return; }
+
+    // Update HUD badge and pending notch with live counts
+    const pendingCount = all.filter(i => !i.isDone && !i.isMuted).length;
+    _tasksUpdateBadge(pendingCount);
+    _tasksUpdatePendingNotch(pendingCount, all.length);
+
+    // Apply filter: 'muted' shows only muted; 'all' shows non-muted
+    const visible = _tasksFilter === 'muted' ? all.filter(i => i.isMuted)
+                                              : all.filter(i => !i.isMuted);
+    if (!visible.length) {
+        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items.' : 'All clear — nothing pending!');
+        return;
+    }
+
+    // Sort: pending first sorted by urgency desc, done items last
+    visible.sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        return b.action.urgency - a.action.urgency;
+    });
+
+    for (const item of visible) {
+        container.appendChild(_tasksBuildRow(item.row, item.key, item.action, item.isDone, item.isMuted));
+    }
+}
+
+// ── Itinerary tab ─────────────────────────────────────────────────────────
+function _tasksRenderItinTab(container) {
+    const itins = Array.isArray(savedItineraries) ? savedItineraries : [];
+    if (!itins.length) { _tasksEmptyState(container, 'No itineraries yet.'); return; }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const done  = _tasksGetDone();
+    const muted = _tasksGetMuted();
+    const rows  = Array.isArray(travelSpots) ? travelSpots : [];
+
+    const all = [];
+    for (const itin of itins) {
+        if (!Array.isArray(itin.days)) continue;
+        const futureDays = itin.days.filter(d => d.date && d.date >= today && !d.isSuggested);
+        if (!futureDays.length) continue;
+
+        for (const day of futureDays) {
+            for (const spot of (day.timeline || [])) {
+                // Enrich with full row data for richer field scanning
+                const full = rows.find(r => r.rowid != null && String(r.rowid) === String(spot.rowid))
+                          || rows.find(r => r.spot_name === spot.spot_name);
+                const spotData = full ? { ...spot, ...full } : spot;
+
+                const action = _tasksComputeAction(spotData);
+                if (!action) continue;
+
+                const key = `itin:${itin.id}:${spot.rowid || spot.spot_name}`;
+                all.push({
+                    row: spotData, action, key,
+                    isDone:  done.has(key),
+                    isMuted: muted.has(key),
+                    itinTitle: itin.title || 'Itinerary',
+                    date: day.date,
+                });
+            }
+        }
+    }
+
+    if (!all.length) { _tasksUpdatePendingNotch(0, 0); _tasksEmptyState(container, 'No upcoming itinerary items need action.'); return; }
+
+    // Update pending notch
+    _tasksUpdatePendingNotch(all.filter(i => !i.isDone && !i.isMuted).length, all.length);
+
+    const visible = _tasksFilter === 'muted' ? all.filter(i => i.isMuted)
+                                              : all.filter(i => !i.isMuted);
+    if (!visible.length) {
+        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items.' : 'All clear — nothing pending!');
+        return;
+    }
+
+    // Sort: pending first → earliest date → urgency desc, done last
+    visible.sort((a, b) => {
+        if (a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+        if (a.date   !== b.date)   return a.date < b.date ? -1 : 1;
+        return b.action.urgency - a.action.urgency;
+    });
+
+    // Render grouped by itinerary name
+    let lastTitle = null;
+    for (const item of visible) {
+        if (item.itinTitle !== lastTitle) {
+            const header = document.createElement('div');
+            header.className = 'flex items-center gap-1.5 px-1 pt-2 pb-1';
+            header.innerHTML = `<i class="fa-solid fa-route text-pink-500/50 text-[9px]"></i>
+                                <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">${(item.itinTitle).replace(/</g,'&lt;')}</span>`;
+            container.appendChild(header);
+            lastTitle = item.itinTitle;
+        }
+        container.appendChild(_tasksBuildRow(item.row, item.key, item.action, item.isDone, item.isMuted));
+    }
+}
+
+// ── Action handlers ───────────────────────────────────────────────────────
+function tasksToggleDone(taskKey) {
+    const done = _tasksGetDone();
+    if (done.has(taskKey)) done.delete(taskKey); else done.add(taskKey);
+    _tasksSaveDone(done);
+    _renderTasksList();
+}
+
+function tasksToggleMute(taskKey) {
+    const muted = _tasksGetMuted();
+    if (muted.has(taskKey)) muted.delete(taskKey); else muted.add(taskKey);
+    _tasksSaveMuted(muted);
+    _renderTasksList();
+}
+
+// ── Tasks spot panel state ────────────────────────────────────────────────
+let _tspCurrentRow    = null;  // full spot object currently shown in the panel
+let _tspCurrentTaskKey = null; // task key for done-toggle from panel
+
+/**
+ * Open the self-contained spot detail panel inside #tasksDrawerBody.
+ * Exact replica of revealMapItemDetailTrayHUD — same logic, tsp* element IDs.
+ */
+function tasksOpenTray(rowid) {
+    const rows = Array.isArray(travelSpots) ? travelSpots : [];
+    const row  = rows.find(r => String(r.rowid) === String(rowid));
+    if (!row) return;
+
+    _tspCurrentRow     = row;
+    _tspCurrentTaskKey = String(row.rowid);
+
+    const panel = document.getElementById('tasksSpotPanel');
+    if (!panel) return;
+
+    const isDone    = (row.status || '').toLowerCase().trim() === 'done';
+    const isStarred = !!(
+        row.priority === 'high' || row.isHigh ||
+        (row.priority || '').toLowerCase() === 'starred'
+    );
+    const ticketLink = (row.ticket_url || '').trim();
+
+    // ── Reset flip to front face ──────────────────────────────────────────
+    const flipContainer = document.getElementById('tspFlipContainer');
+    if (flipContainer) flipContainer.classList.remove('flipped');
+
+    // ── Distance badge — computed on-the-fly ─────────────────────────────
+    // travelSpots objects never carry distStr (that's only on the enriched
+    // copies returned by getFilteredDatasetRows). Mirror the same logic.
+    const distBadge = document.getElementById('tspDistanceBadge');
+    if (distBadge) {
+        const _dLat = row.latitude  ? String(row.latitude).trim()  : '';
+        const _dLng = row.longitude ? String(row.longitude).trim() : '';
+        const _hasLatLon = _dLat !== '' && _dLat !== '0' && _dLng !== '' && _dLng !== '0';
+        let _distLabel, _distWarn = false;
+        if (!_hasLatLon) {
+            _distLabel = "<i class='fa-solid fa-triangle-exclamation'></i>";
+            _distWarn  = true;
+        } else if (!gpsStatusCachedBool) {
+            _distLabel = "<i class='fa-solid fa-location-dot'></i>";
+        } else {
+            const _d = calculateDistance(userLat, userLon, parseFloat(_dLat), parseFloat(_dLng));
+            _distLabel = _d < 1 ? `${Math.round(_d * 1000)}m` : `${_d.toFixed(1)}km`;
+        }
+        distBadge.innerHTML   = _distLabel;
+        distBadge.className   = _distWarn
+            ? 'text-xs font-mono font-bold bg-amber-500/10 text-amber-400 px-2 py-1 rounded-lg border border-amber-500/20 shrink-0 h-fit'
+            : 'text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400';
+    }
+
+    // ── Weather badge ─────────────────────────────────────────────────────
+    const weatherBadge = document.getElementById('tspWeatherBadge');
+    if (weatherBadge) {
+        const wLat = row.latitude  ? String(row.latitude).trim()  : '';
+        const wLng = row.longitude ? String(row.longitude).trim() : '';
+        const hasCoords = wLat !== '' && wLat !== '0' && wLng !== '' && wLng !== '0';
+        if (!hasCoords) {
+            weatherBadge.className = 'inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-slate-900/50 text-slate-600';
+            weatherBadge.innerHTML = '<i class="fa-solid fa-cloud text-[10px]" style="opacity:0.35"></i>' +
+                                     '<i class="fa-solid fa-slash text-[7px]" style="margin-left:-0.55em;opacity:0.35"></i>';
+        } else {
+            weatherBadge.className = 'inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-sky-500/10 text-sky-300';
+            weatherBadge.innerHTML = '<i class="fa-solid fa-cloud text-[10px] opacity-40"></i>';
+            if (typeof fetchWeatherForCoords === 'function') {
+                fetchWeatherForCoords(parseFloat(wLat), parseFloat(wLng)).then(w => {
+                    const badge = document.getElementById('tspWeatherBadge');
+                    if (w && badge) {
+                        badge.innerHTML = `<i class="fa-solid ${w.iconClass} text-[10px]"></i><span>${w.temp}°</span>`;
+                    }
+                });
+            }
+        }
+    }
+
+    // ── City / category badge ─────────────────────────────────────────────
+    const iconCls = (typeof getCategoryIconClass === 'function')
+        ? getCategoryIconClass(row.category) : 'fa-location-dot text-slate-400';
+    const cat  = row.category || 'General';
+    const city = row.city     || 'Global';
+    const cityBadge = document.getElementById('tspCityBadge');
+    if (cityBadge) cityBadge.innerHTML =
+        `<i class="fa-solid ${iconCls} text-[8px] shrink-0"></i>` +
+        `<span class="uppercase tracking-wider">${cat}</span>` +
+        `<span class="text-slate-700 font-normal">•</span>` +
+        `<span class="uppercase tracking-wider text-slate-500">${city}</span>`;
+
+    // ── Booked badge ──────────────────────────────────────────────────────
+    const bookedBadge = document.getElementById('tspBookedBadge');
+    if (bookedBadge) bookedBadge.classList.toggle(
+        'hidden', (row.status || '').toLowerCase().trim() !== 'booked');
+
+    // ── Spot title ────────────────────────────────────────────────────────
+    const titleEl = document.getElementById('tspSpotTitle');
+    if (titleEl) {
+        titleEl.innerText = row.spot_name || 'Unnamed Destination';
+        titleEl.className = isDone
+            ? 'text-base font-black text-slate-500 line-through mt-2 truncate max-w-[185px]'
+            : 'text-base font-black text-slate-200 mt-2 truncate max-w-[185px]';
+    }
+
+    // ── Notes ─────────────────────────────────────────────────────────────
+    const notesEl = document.getElementById('tspSpotNotes');
+    if (notesEl) {
+        notesEl.innerText = row.notes || 'No custom notes assigned.';
+        notesEl.className = isDone
+            ? 'text-xs text-slate-500 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] line-through pr-1 select-none'
+            : 'text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none';
+    }
+
+    // ── Reference button ──────────────────────────────────────────────────
+    const refBtn = document.getElementById('tspOpenReferenceBtn');
+    const refUrl = (row.instagram_url || '').trim();
+    if (refBtn) refBtn.href = refUrl || '#';
+
+    // ── Action button (Map view / no-location warning) ────────────────────
+    const actionBtn     = document.getElementById('tspActionBtn');
+    const directMapsUrl = (row.maps_url  ? String(row.maps_url)  : '').trim();
+    const rawLat        = (row.latitude  ? String(row.latitude)  : '').trim();
+    const rawLng        = (row.longitude ? String(row.longitude) : '').trim();
+    const hasValidMapDest = (directMapsUrl !== '' && directMapsUrl !== 'N/A') ||
+                            (rawLat !== '' && rawLat !== '0' && rawLng !== '' && rawLng !== '0');
+    if (actionBtn) {
+        if (!hasValidMapDest) {
+            actionBtn.innerHTML = "<i class='fa-solid fa-triangle-exclamation'></i>";
+            actionBtn.className = "px-6 bg-slate-950 border border-slate-800 text-amber-400 flex items-center justify-center rounded-xl text-sm font-black h-12 whitespace-nowrap";
+        } else {
+            actionBtn.innerHTML = "<i class='fa-solid fa-map mr-1.5 text-sm'></i> Directions";
+            actionBtn.className = "px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 whitespace-nowrap";
+        }
+    }
+
+    // ── Ticket row ────────────────────────────────────────────────────────
+    const ticketRow = document.getElementById('tspTicketRow');
+    const ticketBtn = document.getElementById('tspTicketBtn');
+    if (ticketRow) ticketRow.classList.toggle('hidden', !ticketLink);
+    if (ticketBtn && ticketLink) ticketBtn.href = ticketLink;
+
+    // ── Star glow on both faces ───────────────────────────────────────────
+    const tspFaces = document.querySelectorAll(
+        '#tspFlipContainer .flip-card-front-face, #tspFlipContainer .flip-card-back-face');
+    tspFaces.forEach(face => {
+        if (isStarred) face.classList.add('starred-gold-glow');
+        else           face.classList.remove('starred-gold-glow');
+    });
+
+    // ── Done button ───────────────────────────────────────────────────────
+    const doneBtn = document.getElementById('tspDoneToggleBtn');
+    if (doneBtn) doneBtn.innerHTML = isDone
+        ? '<i class="fa-solid fa-arrow-rotate-left mr-1"></i> Undo'
+        : '<i class="fa-solid fa-check mr-1"></i> Mark Done';
+
+    // ── Star button ───────────────────────────────────────────────────────
+    const starBtn = document.getElementById('tspStarToggleBtn');
+    if (starBtn) starBtn.innerHTML = isStarred
+        ? '<i class="fa-solid fa-star-half-stroke mr-1"></i> Unstar'
+        : '<i class="fa-solid fa-star mr-1"></i> Star';
+
+    // ── Back face: long description ───────────────────────────────────────
+    const backDesc = document.getElementById('tspBackLongDescription');
+    if (backDesc) backDesc.innerText = (row.long_description && row.long_description !== 'N/A')
+        ? row.long_description : 'Disclaimer: Deep background details unpopulated.';
+
+    // ── Back face: opening hours grid ────────────────────────────────────
+    const hoursGrid = document.getElementById('tspBackHoursGrid');
+    if (hoursGrid) {
+        hoursGrid.innerHTML = '';
+        const hoursRaw = (row.opening_hours || '').trim();
+        if (hoursRaw && hoursRaw !== 'N/A') {
+            hoursRaw.split(/[\n;]+/).forEach(tok => {
+                if (!tok.trim()) return;
+                const d = document.createElement('div');
+                d.className = 'flex justify-between items-center py-0.5 border-b border-slate-900/40 last:border-0';
+                d.innerHTML = `<span>${tok.trim()}</span>`;
+                hoursGrid.appendChild(d);
+            });
+        } else {
+            hoursGrid.innerHTML = '<div class="text-slate-500 italic text-[10px] p-1">Disclaimer: Schedule data unavailable.</div>';
+        }
+    }
+
+    // ── Back face: booking warning card ──────────────────────────────────
+    const warningCard = document.getElementById('tspBackBookingWarningCard');
+    const warningText = document.getElementById('tspBackBookingValueText');
+    const bookingStr  = (row.booking_requirement || '').trim();
+    const hasBooking  = bookingStr && bookingStr !== 'N/A' && bookingStr.toLowerCase() !== 'none';
+    if (warningText) warningText.innerText = bookingStr;
+    if (warningCard) warningCard.classList.toggle('hidden', !hasBooking);
+
+    // ── Done-state dimming (mirrors map tray exactly) ─────────────────────
+    // Each interactive element is dimmed individually — no parent filter,
+    // so the Undo / close buttons remain fully active.
+    const _frontFace = flipContainer ? flipContainer.querySelector('.flip-card-front-face') : null;
+    const flipBtn    = document.getElementById('tspFlipToBackBtn');
+
+    if (isDone) {
+        // Card background — subtle grey wash
+        if (_frontFace) {
+            _frontFace.style.backgroundColor = 'rgba(15,23,42,0.60)';
+            _frontFace.style.borderColor     = 'rgba(100,116,139,0.18)';
+        }
+        // Badges — wash out
+        if (cityBadge)    cityBadge.style.opacity    = '0.35';
+        if (bookedBadge)  bookedBadge.style.opacity   = '0.35';
+        if (weatherBadge) weatherBadge.style.opacity  = '0.30';
+        if (distBadge)    distBadge.className =
+            'text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-slate-800/20 text-slate-600 opacity-40';
+        // Open Reference — strip gradient, grey + no-click
+        if (refBtn) refBtn.className =
+            'flex-1 bg-slate-800/40 border border-slate-700/30 text-slate-600 text-center text-xs font-bold py-3.5 rounded-xl flex items-center justify-center opacity-40 pointer-events-none';
+        // Directions / Map — grey + no-click
+        if (actionBtn) actionBtn.className =
+            'px-4 bg-slate-800/30 border border-slate-700/20 text-slate-600 flex items-center justify-center rounded-xl text-xs font-bold h-12 whitespace-nowrap opacity-40 pointer-events-none';
+        // Ticket row — hide when done
+        if (ticketRow) ticketRow.classList.add('hidden');
+        // Extra Info flip button — grey + no-click
+        if (flipBtn) flipBtn.className =
+            'text-slate-600 bg-slate-950/50 border border-slate-800/30 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto opacity-40 pointer-events-none';
+        // Star toggle — grey + no-click
+        if (starBtn) starBtn.className =
+            'text-xs px-3 py-2 font-black rounded-lg bg-slate-950/50 border border-slate-800/30 text-slate-600 opacity-40 pointer-events-none';
+        // Undo — muted pink, fully active
+        if (doneBtn) doneBtn.className =
+            'text-xs px-3 py-2 font-bold rounded-lg bg-pink-600/10 border border-pink-600/20 text-pink-400 active:bg-pink-600/20';
+    } else {
+        // Restore all default styles
+        if (_frontFace) {
+            _frontFace.style.backgroundColor = '';
+            _frontFace.style.borderColor     = '';
+        }
+        if (cityBadge)    cityBadge.style.opacity    = '';
+        if (bookedBadge)  bookedBadge.style.opacity   = '';
+        if (weatherBadge) weatherBadge.style.opacity  = '';
+        // distBadge class already set correctly in the distance block above
+        if (refBtn) refBtn.className =
+            'flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg';
+        // actionBtn class already set correctly in the has/no-destination branch above
+        if (flipBtn) flipBtn.className =
+            'text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20';
+        if (starBtn) starBtn.className =
+            'text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800';
+        if (doneBtn) doneBtn.className =
+            'text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800';
+    }
+
+    // ── Show panel ────────────────────────────────────────────────────────
+    panel.classList.remove('hidden');
+
+    // ── Opening spring animation on the card (flip container) ────────────
+    if (flipContainer) {
+        flipContainer.classList.remove('tray-spring-in');
+        void flipContainer.offsetWidth;  // force reflow
+        flipContainer.classList.add('tray-spring-in');
+        flipContainer.addEventListener('animationend',
+            () => flipContainer.classList.remove('tray-spring-in'), { once: true });
+    }
+}
+
+function tasksCloseSpotPanel() {
+    const panel = document.getElementById('tasksSpotPanel');
+    if (panel) panel.classList.add('hidden');
+    _tspCurrentRow     = null;
+    _tspCurrentTaskKey = null;
+}
+
+/** Done toggle from the spot panel — mirrors map tray done handler. */
+function tasksSpotPanelToggleDone() {
+    if (!_tspCurrentRow || !_tspCurrentTaskKey) return;
+    const isDoneNow = (_tspCurrentRow.status || '').toLowerCase().trim() === 'done';
+    // Toggle status on the shared row object (same reference held by travelSpots)
+    _tspCurrentRow.status = isDoneNow ? 'Pending' : 'done';
+    if (typeof updateCloudAction === 'function' && _tspCurrentRow.rowid) {
+        updateCloudAction(_tspCurrentRow.rowid, 'update_status', isDoneNow ? 'Pending' : 'Done');
+    }
+    // Re-render task list badges in the background
+    _renderTasksList();
+    // Re-populate the panel so done-state styling updates (stays on front face)
+    tasksOpenTray(_tspCurrentRow.rowid);
+}
+
+/** Star toggle from the spot panel — mirrors map tray star handler. */
+function tasksSpotPanelToggleStar() {
+    if (!_tspCurrentRow) return;
+    const isStarredNow = !!(
+        _tspCurrentRow.priority === 'high' || _tspCurrentRow.isHigh ||
+        (_tspCurrentRow.priority || '').toLowerCase() === 'starred'
+    );
+    const newVal = isStarredNow ? 'Normal' : 'Starred';
+    _tspCurrentRow.priority = newVal;
+    if (typeof updateCloudAction === 'function' && _tspCurrentRow.rowid) {
+        updateCloudAction(_tspCurrentRow.rowid, 'toggle_priority', newVal);
+    }
+    _renderTasksList();
+    tasksOpenTray(_tspCurrentRow.rowid);
+}
+
+/** Close the drawer and navigate to the map tab showing the spot. */
+function tasksSpotPanelViewOnMap() {
+    if (!_tspCurrentRow) return;
+    const spotRef = _tspCurrentRow;
+    tasksCloseSpotPanel();
+    toggleTasksDrawer(false);
+    if (typeof switchMasterMenuDashboardTab === 'function') {
+        switchMasterMenuDashboardTab('map');
+    }
+    setTimeout(() => {
+        if (typeof revealMapItemDetailTrayHUD === 'function') {
+            const starred = !!(
+                spotRef.priority === 'high' || spotRef.isHigh ||
+                (spotRef.priority || '').toLowerCase() === 'starred'
+            );
+            revealMapItemDetailTrayHUD(spotRef, starred);
+        }
+    }, 300);
 }

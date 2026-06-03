@@ -2057,6 +2057,54 @@ async function _populateItineraryWeatherStrip(itinId, city, days) {
         </span>`;
 }
 
+// ── Public holiday banner: expanded timeline view ────────────────────────────
+/**
+ * Prepends a public-holiday banner to the timeline container for the given day.
+ * The banner is inserted synchronously as a hidden placeholder, then revealed
+ * asynchronously once the Nager.Date lookup resolves. If the day has no holiday
+ * (or the city is not in the lookup map) the placeholder is silently removed.
+ *
+ * @param {HTMLElement} container – the #itineraryTimelineScrollContainer element
+ * @param {Object}      itin      – the active itinerary object
+ * @param {string}      dateYMD   – "YYYY-MM-DD" date of the active day
+ */
+function _injectItinHolidayBanner(container, itin, dateYMD) {
+    if (!dateYMD || !itin?.city) return;
+    if (typeof getPublicHolidayForDate !== 'function') return;
+
+    // Create placeholder and append at current tail of container.
+    // Called at spotIndex === 0, so this lands directly above the first card block.
+    const banner = document.createElement('div');
+    banner.id = 'itinHolidayBanner';
+    banner.className = 'hidden';
+    container.appendChild(banner);
+
+    getPublicHolidayForDate(itin.city, dateYMD).then(holiday => {
+        // Guard: if the user navigated away before this resolved, drop it
+        if (!banner.isConnected) return;
+        if (!holiday) { banner.remove(); return; }
+
+        // Prefer English name; append local name in brackets when it differs
+        const _esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const _name = _esc(holiday.name || '');
+        const _local = holiday.localName && holiday.localName !== holiday.name
+            ? ` <span class="opacity-50 font-medium">(${_esc(holiday.localName)})</span>`
+            : '';
+
+        banner.innerHTML = `
+            <div class="mx-1 mb-3 rounded-2xl bg-amber-500/8 border border-amber-500/15 px-4 py-3 flex items-center gap-3">
+                <div class="w-8 h-8 bg-amber-500/12 border border-amber-500/20 rounded-xl flex items-center justify-center shrink-0">
+                    <i class="fa-solid fa-landmark text-amber-400 text-[13px]"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="text-[9px] font-black uppercase tracking-widest text-amber-500/60 mb-0.5">Public Holiday · ${_esc(itin.city)}</p>
+                    <p class="text-[12px] font-bold text-amber-200 truncate">${_name}${_local}</p>
+                </div>
+            </div>`;
+        banner.classList.remove('hidden');
+    });
+}
+
 // ── Weather: expanded view day badge ─────────────────────────────────────────
 /**
  * Updates the #detailDayWeatherBadge for the currently displayed day.
@@ -2966,6 +3014,13 @@ function renderDetailViewTimeline() {
         // explanation banner) and only when itin._suggestedBanner.active is true.
         if (spotIndex === 0 && _hasSuggestedBanner) {
             container.appendChild(_createSuggestedTimelineBanner(itin));
+        }
+
+        // ── Public holiday banner: injected once, directly above the first card ──
+        // Async — appends a hidden placeholder now, reveals it when the
+        // Nager.Date lookup resolves (or removes it silently if no holiday).
+        if (spotIndex === 0) {
+            _injectItinHolidayBanner(container, itin, activeDay.date);
         }
 
         // ── Gap spacer before this block (skipped for the first entry) ────────

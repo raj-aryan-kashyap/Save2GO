@@ -10,7 +10,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
     
-    <link rel="icon" type="image/png" sizes="192x192" href="save2go_app_icon_192x192.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="favicon.png">
     <link rel="apple-touch-icon" href="save2go_app_icon_192x192.png">
     
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -133,6 +133,13 @@
 
                 <button id="manualSyncCloudBtn" onclick="syncData(true)" class="p-2 rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs transition-transform duration-200 active:scale-95 relative z-[60]">
                     <div id="syncButtonIconFrame" class="inline-block"><i class="fa-solid fa-arrows-rotate"></i></div>
+                </button>
+                <!-- Tasks button -->
+                <button onclick="toggleTasksDrawer(true)"
+                        class="relative p-2 w-8 h-8 flex items-center justify-center rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs z-[60] active:scale-95 transition-transform duration-200">
+                    <i class="fa-solid fa-clipboard-check"></i>
+                    <span id="tasksHudBadge"
+                          class="hidden absolute -top-1 -right-1 min-w-[14px] h-[14px] flex items-center justify-center text-[7px] font-black rounded-full bg-pink-500 text-white px-0.5 leading-none">0</span>
                 </button>
                 <button onclick="toggleSettingsMenu(true)" class="p-2 w-8 h-8 flex items-center justify-center rounded-xl bg-slate-800/60 border border-slate-700/50 text-slate-300 text-xs relative z-[60]">
                     <i class="fa-solid fa-gear"></i>
@@ -1096,6 +1103,212 @@
                 <select id="settingsSwitchUserDropdown" class="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-300 focus:outline-none block appearance-none h-11 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239cbdca%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5%201.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E')] bg-[length:10px_auto] bg-[right_12px_center] bg-no-repeat pr-8"></select>
                 <button id="settingsSwitchUserBtn" onclick="switchUserSessionViaSettings()" class="w-full py-2 bg-gradient-to-r from-violet-600 to-pink-600 rounded-lg text-[11px] font-bold text-white">Swap Active User</button>
             </div>
+        </div>
+    </div>
+
+    <!-- ════════════════════════════════════════════════════════════════════════
+         TASKS DRAWER
+         Right-aligned sheet, same stacking / backdrop pattern as settingsDrawer.
+         Shows booking/reservation action items derived from saved spots and
+         itinerary entries. State (done, muted) stored in localStorage.
+    ════════════════════════════════════════════════════════════════════════ -->
+    <div id="tasksDrawer" class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-[999] hidden flex justify-end">
+        <div id="tasksDrawerBody" class="w-80 bg-slate-900 h-full border-l border-slate-800 flex flex-col shadow-2xl overflow-hidden" style="touch-action:pan-y;">
+
+            <!-- Header -->
+            <div class="px-5 pt-5 pb-3 border-b border-slate-800 shrink-0">
+                <div class="flex justify-between items-center mb-3">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-clipboard-check text-pink-400 text-sm"></i>
+                        <h3 class="text-sm font-black text-slate-200 uppercase tracking-wider">Tasks</h3>
+                        <span id="tasksHeaderBadge"
+                              class="hidden text-[9px] font-black px-1.5 py-0.5 rounded-full bg-pink-500/20 border border-pink-500/30 text-pink-400 leading-none">0</span>
+                    </div>
+                    <button onclick="toggleTasksDrawer(false)"
+                            class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <!-- Tab bar: Saved Spots | Itinerary -->
+                <div class="flex gap-1 mb-3">
+                    <button id="tasksTabBtnSaved" onclick="switchTasksTab('saved')"
+                            class="flex-1 text-[10px] font-bold py-1.5 rounded-xl transition-colors bg-pink-600 text-white">
+                        Saved Spots
+                    </button>
+                    <button id="tasksTabBtnItin" onclick="switchTasksTab('itin')"
+                            class="flex-1 text-[10px] font-bold py-1.5 rounded-xl transition-colors bg-slate-800 text-slate-400">
+                        Itinerary
+                    </button>
+                </div>
+                <!-- All / Don't remind toggle -->
+                <div class="flex items-center justify-between">
+                    <span class="text-[9px] text-slate-500 font-medium uppercase tracking-wider">Filter</span>
+                    <div class="flex gap-0.5 bg-slate-800/60 border border-slate-700/40 rounded-xl p-0.5">
+                        <button id="tasksToggleBtnAll" onclick="setTasksFilter('all')"
+                                class="text-[9px] font-bold px-2.5 py-1 rounded-lg transition-colors bg-slate-700 text-slate-200">
+                            All
+                        </button>
+                        <button id="tasksToggleBtnMuted" onclick="setTasksFilter('muted')"
+                                class="text-[9px] font-bold px-2.5 py-1 rounded-lg transition-colors text-slate-500">
+                            Don't remind
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pending notch -->
+            <div class="px-3 pt-2.5 pb-0 shrink-0">
+                <div class="flex items-center justify-center gap-1.5 bg-slate-800/50 border border-slate-700/30 rounded-xl py-1.5">
+                    <i class="fa-solid fa-circle-dot text-pink-500/50 text-[7px]"></i>
+                    <span class="text-[9px] font-black uppercase tracking-widest text-slate-400">
+                        <span id="tasksPendingCount">0</span>/<span id="tasksTotalCount">0</span> Pending
+                    </span>
+                </div>
+            </div>
+
+            <!-- Scrollable task list with top/bottom fade masks -->
+            <div class="flex-1 relative overflow-hidden">
+                <div id="tasksListContent"
+                     class="absolute inset-0 overflow-y-auto overflow-x-hidden no-scrollbar px-3 py-3 flex flex-col gap-2 pb-8 tasks-scroll-fade">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- ══ Spot detail panel — EXACT replica of #mapDetailTrayHUD ══
+                 Same flip-perspective-container / flip-card-* structure,
+                 same CSS classes → 3-D flip animation works identically.
+                 tsp* IDs are unique; JS in aap.js mirrors revealMapItemDetailTrayHUD. -->
+            <div id="tasksSpotPanel"
+                 class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm z-10 hidden flex items-center justify-center px-4"
+                 onclick="if(event.target===this)tasksCloseSpotPanel()">
+
+                <!-- Flip container — same geometry as #mapDetailTrayHUD -->
+                <div id="tspFlipContainer"
+                     class="flip-perspective-container bg-transparent w-full h-[480px] pointer-events-auto">
+                    <div class="flip-card-inner-rotator w-full h-full">
+
+                        <!-- ── FRONT FACE ── (mirrors map tray front) -->
+                        <div class="flip-card-front-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+
+                            <!-- Top row: badges + name + X -->
+                            <div class="flex justify-between items-start gap-2 shrink-0">
+                                <div>
+                                    <div class="flex items-center gap-1.5 flex-wrap">
+                                        <span id="tspCityBadge"
+                                              class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
+                                        <span id="tspBookedBadge"
+                                              class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
+                                    </div>
+                                    <h3 id="tspSpotTitle"
+                                        class="text-base font-black text-slate-200 mt-2 truncate max-w-[185px]">Spot Name</h3>
+                                </div>
+                                <div class="flex items-center gap-1.5 shrink-0">
+                                    <span id="tspWeatherBadge"
+                                          class="inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-sky-500/10 text-sky-300">
+                                        <i class="fa-solid fa-cloud text-[10px] opacity-40"></i>
+                                    </span>
+                                    <span id="tspDistanceBadge"
+                                          class="text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-pink-500/10 text-pink-400">—</span>
+                                    <button onclick="tasksCloseSpotPanel()"
+                                            class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold">
+                                        <i class="fa-solid fa-xmark"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Notes (scrollable middle) -->
+                            <div class="flex-1 my-3 bg-slate-950/40 border border-slate-900/60 p-3 rounded-xl overflow-hidden">
+                                <p id="tspSpotNotes"
+                                   class="text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none"></p>
+                            </div>
+
+                            <!-- Bottom actions -->
+                            <div class="flex flex-col gap-2 shrink-0">
+                                <div class="flex gap-2">
+                                    <a id="tspOpenReferenceBtn" href="about:blank" target="_blank" rel="noopener noreferrer"
+                                       class="flex-1 bg-gradient-to-r from-pink-600 to-purple-600 text-center text-xs font-bold py-3.5 rounded-xl text-white flex items-center justify-center shadow-lg">
+                                        Open Reference
+                                    </a>
+                                    <button id="tspActionBtn" onclick="tasksSpotPanelViewOnMap()"
+                                            class="px-4 bg-slate-950 border border-slate-800 text-slate-300 flex items-center justify-center rounded-xl text-xs font-bold h-12 whitespace-nowrap">
+                                        <i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions
+                                    </button>
+                                </div>
+                                <div id="tspTicketRow" class="hidden">
+                                    <a id="tspTicketBtn" href="about:blank" target="_blank" rel="noopener noreferrer"
+                                       class="w-full bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">
+                                        📄 View Ticket Details
+                                    </a>
+                                </div>
+                                <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center">
+                                    <button id="tspFlipToBackBtn"
+                                            onclick="document.getElementById('tspFlipContainer').classList.add('flipped')"
+                                            class="text-sky-400 bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-sky-500/20">
+                                        <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
+                                    </button>
+                                    <button id="tspDoneToggleBtn" onclick="tasksSpotPanelToggleDone()"
+                                            class="text-xs px-3 py-2 font-bold rounded-lg bg-slate-950 border border-slate-800 text-slate-300 active:bg-slate-800">
+                                        <i class="fa-solid fa-check mr-1"></i> Mark Done
+                                    </button>
+                                    <button id="tspStarToggleBtn" onclick="tasksSpotPanelToggleStar()"
+                                            class="text-xs px-3 py-2 font-black rounded-lg bg-slate-950 border border-slate-800 text-amber-400 active:bg-slate-800">
+                                        <i class="fa-solid fa-star mr-1"></i> Star
+                                    </button>
+                                </div>
+                            </div>
+
+                        </div><!-- end front face -->
+
+                        <!-- ── BACK FACE ── (mirrors map tray back / Extra Info) -->
+                        <div class="flip-card-back-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
+
+                            <!-- Header -->
+                            <div class="flex border-b border-slate-800/60 pb-2 shrink-0 items-center justify-between">
+                                <h4 class="text-xs font-black uppercase tracking-wider text-slate-300">Extra Info</h4>
+                                <button onclick="tasksCloseSpotPanel()"
+                                        class="w-7 h-7 bg-red-950/40 border border-red-500/30 rounded-full flex items-center justify-center text-red-400 text-xs font-bold">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                            </div>
+
+                            <!-- Scrollable content -->
+                            <div class="flex-1 overflow-y-auto subtle-scrollbar space-y-4 pt-3 pr-0.5">
+                                <p id="tspBackLongDescription"
+                                   class="text-xs text-slate-300 bg-slate-950/50 p-3 rounded-xl border border-slate-100/10 leading-relaxed font-medium">
+                                    Loading descriptive logs...
+                                </p>
+                                <div class="space-y-1.5">
+                                    <span class="text-[9px] font-black tracking-widest text-slate-500 block">Schedule</span>
+                                    <div id="tspBackHoursGrid"
+                                         class="bg-slate-955/50 border border-slate-100/10 p-2.5 rounded-xl grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-400"></div>
+                                </div>
+                                <div id="tspBackBookingWarningCard"
+                                     class="p-3 bg-amber-500/5 border border-amber-500/20 rounded-xl flex items-start gap-2.5 hidden">
+                                    <span class="text-base mt-0.5">
+                                        <i class="fa-solid fa-calendar-exclamation text-amber-500"></i>
+                                    </span>
+                                    <div class="space-y-0.5">
+                                        <h5 class="text-[10px] font-black text-amber-400 tracking-wide">Alert</h5>
+                                        <p id="tspBackBookingValueText"
+                                           class="text-xs text-slate-300 whitespace-pre-wrap font-medium"></p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Footer -->
+                            <div class="flex gap-2 justify-end pt-3 border-t border-slate-800/60 mt-1 items-center shrink-0">
+                                <button onclick="document.getElementById('tspFlipContainer').classList.remove('flipped')"
+                                        class="text-slate-400 bg-slate-950 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto active:bg-slate-900">
+                                    <i class="fa-solid fa-arrow-left mr-1.5"></i> Back
+                                </button>
+                            </div>
+
+                        </div><!-- end back face -->
+
+                    </div><!-- end flip-card-inner-rotator -->
+                </div><!-- end tspFlipContainer -->
+            </div><!-- end #tasksSpotPanel -->
+
         </div>
     </div>
 

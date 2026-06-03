@@ -1761,6 +1761,15 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
 
     tray.classList.remove('hidden');
 
+    // ── Opening spring animation ──────────────────────────────────────────────
+    // Remove then re-add so the animation re-fires on every open.
+    // Cleaned up on animationend so transform-style:preserve-3d is unaffected.
+    tray.classList.remove('tray-spring-in');
+    void tray.offsetWidth;  // force reflow
+    tray.classList.add('tray-spring-in');
+    tray.addEventListener('animationend',
+        () => tray.classList.remove('tray-spring-in'), { once: true });
+
     // ── Closed-today bubble ───────────────────────────────────────────────────
     // Only fires when: the spot has opening hours, today's entry says Closed,
     // and the spot is not already marked Done (done = user has been there).

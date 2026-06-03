@@ -1439,3 +1439,43 @@ body {
     0%,  100% { opacity: 1;    transform: scale(1);    }
     50%        { opacity: 0.35; transform: scale(0.65); }
 }
+
+/* ── Tasks drawer — scroll fade masks ───────────────────────────────────────
+   Applied to #tasksListContent — fades top 28px and bottom 32px so items
+   gracefully appear/disappear as the user scrolls.
+   bg-slate-900 = rgb(15, 23, 42)
+   ───────────────────────────────────────────────────────────────────────── */
+.tasks-scroll-fade {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        transparent    0px,
+        black         28px,
+        black   calc(100% - 32px),
+        transparent   100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        transparent    0px,
+        black         28px,
+        black   calc(100% - 32px),
+        transparent   100%
+    );
+}
+
+/* ── Info tray opening animation — spring bounce ─────────────────────────────
+   Uses the individual `scale` CSS property (not transform: scale()) so it
+   composes with any existing `transform` on the element (e.g. the map tray's
+   -translate-y-1/2 centering) without overriding it.
+   cubic-bezier(0.34, 1.56, 0.64, 1) is a spring curve that naturally
+   overshoots ~1% past scale:1 before settling — restrained but perceptible.
+   The class is removed on animationend so transform-style:preserve-3d (needed
+   for the flip card) is fully unaffected once the entrance completes.
+   ─────────────────────────────────────────────────────────────────────────── */
+@keyframes tray-spring-in {
+    0%   { opacity: 0; scale: 0.91; }
+    100% { opacity: 1; scale: 1;    }
+}
+
+.tray-spring-in {
+    animation: tray-spring-in 0.40s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
