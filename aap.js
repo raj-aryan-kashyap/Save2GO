@@ -6589,10 +6589,24 @@ function tasksOpenTray(rowid) {
 }
 
 function tasksCloseSpotPanel() {
-    const panel = document.getElementById('tasksSpotPanel');
-    if (panel) panel.classList.add('hidden');
+    // Clear state immediately — no interaction possible during the 240 ms animation
     _tspCurrentRow     = null;
     _tspCurrentTaskKey = null;
+
+    const panel         = document.getElementById('tasksSpotPanel');
+    const flipContainer = document.getElementById('tspFlipContainer');
+
+    // ── Closing spring-out animation ──────────────────────────────────────
+    if (flipContainer) {
+        flipContainer.classList.remove('tray-spring-in');
+        flipContainer.classList.add('tray-spring-out');
+        flipContainer.addEventListener('animationend', () => {
+            flipContainer.classList.remove('tray-spring-out');
+            if (panel) panel.classList.add('hidden');
+        }, { once: true });
+    } else {
+        if (panel) panel.classList.add('hidden');
+    }
 }
 
 /** Done toggle from the spot panel — mirrors map tray done handler. */

@@ -1786,10 +1786,10 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
 }
 
 function dismissMapDetailTrayHUDCard() {
-    _mapDetailTrayVisible = false;  // unfreeze programmatic viewport changes
+    _mapDetailTrayVisible = false;  // unfreeze programmatic viewport changes immediately
+
     // Restore the exact viewport the user had when they opened the tray.
-    // This cancels any zoom/pan that snuck through (geocode callbacks, autoFit)
-    // and ensures dismiss never changes the user's position or zoom level.
+    // Done immediately (non-visual) so map interactions resume at once.
     if (_savedMapViewForTray && leafletMapInstance) {
         leafletMapInstance.setView(
             [_savedMapViewForTray.center.lat, _savedMapViewForTray.center.lng],
@@ -1798,19 +1798,31 @@ function dismissMapDetailTrayHUDCard() {
         );
         _savedMapViewForTray = null;
     }
+
     const mapDetailTray = document.getElementById('mapDetailTrayHUD');
+    const trayBg        = document.getElementById('trayBlurBackdrop');
+    const sharedBg      = document.getElementById('dropdownBlurBackdrop');
+    const plusBtn       = document.getElementById('globalFloatingActionPlusButton');
+
+    // ── Closing spring-out animation ──────────────────────────────────────
+    // Visual teardown runs after the 240 ms animation; everything else
+    // (viewport, _mapDetailTrayVisible) is already cleaned up above.
     if (mapDetailTray) {
-        mapDetailTray.classList.add('hidden');
-        mapDetailTray.classList.remove('flipped');
+        mapDetailTray.classList.remove('tray-spring-in');
+        mapDetailTray.classList.add('tray-spring-out');
+        mapDetailTray.addEventListener('animationend', () => {
+            mapDetailTray.classList.add('hidden');
+            mapDetailTray.classList.remove('flipped', 'tray-spring-out');
+            if (trayBg)   trayBg.classList.add('hidden');
+            if (sharedBg) sharedBg.classList.add('hidden');
+            if (plusBtn)  plusBtn.classList.remove('hidden');
+        }, { once: true });
+    } else {
+        // Fallback if element is missing — clean up immediately
+        if (trayBg)   trayBg.classList.add('hidden');
+        if (sharedBg) sharedBg.classList.add('hidden');
+        if (plusBtn)  plusBtn.classList.remove('hidden');
     }
-    // Hide the dedicated tray backdrop
-    const trayBg = document.getElementById('trayBlurBackdrop');
-    if (trayBg) trayBg.classList.add('hidden');
-    // Safety net: also clear the shared backdrop in case it was shown by an older call path
-    const sharedBg = document.getElementById('dropdownBlurBackdrop');
-    if (sharedBg) sharedBg.classList.add('hidden');
-    const plusBtn = document.getElementById('globalFloatingActionPlusButton');
-    if (plusBtn) plusBtn.classList.remove('hidden');
 }
 
 // ── Closed-today detection + speech bubble ────────────────────────────────────
