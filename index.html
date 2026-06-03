@@ -522,7 +522,7 @@
                 </div>
             </div>
 
-            <div id="mapNavigationShortcutsStack" class="absolute bottom-5 right-4 z-[400] flex flex-col gap-2.5 pointer-events-auto">
+            <div id="mapNavigationShortcutsStack" class="fixed bottom-24 right-4 z-[400] flex flex-col gap-2.5 pointer-events-auto">
                 <button id="shortcutMagnifyingButton" onclick="snapMapViewportToSelectedCityBounds(event)" class="w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 text-[17px]">
                     <i class="fa-solid fa-magnifying-glass"></i>
                 </button>
@@ -535,7 +535,7 @@
             <!-- Shown only when the single selected city has a public holiday today.   -->
             <!-- Vertically aligned with the recenter button (bottom-24, same as FAB).  -->
             <div id="holidayNotifierWrapper"
-                 class="hidden absolute left-4 bottom-24 z-[400] pointer-events-auto">
+                 class="hidden fixed left-4 bottom-24 z-[400] pointer-events-auto">
                 <button id="holidayNotifierBtn"
                         onclick="handleHolidayNotifierTap(event)"
                         class="w-12 h-12 bg-red-600 border border-red-400/30 rounded-full shadow-2xl flex items-center justify-center text-white active:bg-red-700 holiday-notifier-shake"
