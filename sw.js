@@ -10,21 +10,25 @@
 //  • Static assets from CDNs       → Cache-first (Leaflet, FA, Tailwind)
 // ================================================================
 
-const CACHE_VERSION  = 'save2go-v5-r6';
+const CACHE_VERSION  = 'save2go-v5-r7';
 const SHELL_CACHE    = CACHE_VERSION + '-shell';
 const CDN_CACHE      = CACHE_VERSION + '-cdn';
 
-// App-shell assets to pre-cache on install
+// App-shell assets to pre-cache on install.
+// Relative paths resolve against the SW's own URL
+// (https://raj-aryan-kashyap.github.io/Save2GO---V5/sw.js),
+// so they correctly target the /Save2GO---V5/ subdirectory
+// rather than the bare GitHub Pages root domain.
 const SHELL_ASSETS = [
-    '/',
-    '/index.html',
-    '/aap.js',
-    '/map.js',
-    '/itinerary.js',
-    '/smart_search.js',
-    '/notification.js',
-    '/ai_assist.js',
-    '/manifest.json',
+    './',
+    './index.html',
+    './aap.js',
+    './map.js',
+    './itinerary.js',
+    './smart_search.js',
+    './notification.js',
+    './ai_assist.js',
+    './manifest.json',
 ];
 
 // Hostname patterns that must ALWAYS go to the network (never cached)

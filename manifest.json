@@ -1,8 +1,8 @@
 {
   "name": "Save2Go",
   "short_name": "Save2Go",
-  "start_url": ".",
-  "scope": ".",
+  "start_url": "/Save2GO---V5/",
+  "scope": "/Save2GO---V5/",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
