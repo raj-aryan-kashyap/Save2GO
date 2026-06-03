@@ -1572,10 +1572,12 @@ function closeUnifiedFilterSheet() {
     const sheet   = document.getElementById('unifiedFilterSheet');
     const overlay = document.getElementById('unifiedFilterSheetOverlay');
     if (!sheet || !overlay) return;
+    // Hide overlay immediately — removes dim/blur at the moment of close
+    overlay.classList.add('hidden');
     sheet.style.transform = 'translateY(100%)';
+    // Post-animation cleanup only (FAB restore)
     setTimeout(() => {
-        overlay.classList.add('hidden');
-        _updateFabVisibility(); // restore FAB if no other drawer is open
+        _updateFabVisibility();
     }, 310);
 }
 
@@ -2635,16 +2637,17 @@ function closeWeatherDrawer() {
         _syncSettingsWeatherToggle(false);
     }
 
+    // Hide overlay immediately — removes blur/dim at the moment of close
+    overlay.classList.add('hidden');
     sheet.style.transform = 'translateY(100%)';
-    setTimeout(() => {
-        overlay.classList.add('hidden');
-        // Restore bottom nav only after the slide-out animation finishes
-        const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
-        if (_wdNav) _wdNav.style.display = '';
-        _updateFabVisibility(); // restore FAB if no other drawer is open
-    }, 340);
     // Stop the live-refresh timer — no point polling while drawer is hidden
     clearInterval(_wdRefreshInterval);
+    // Post-animation cleanup only (nav + FAB restore)
+    setTimeout(() => {
+        const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
+        if (_wdNav) _wdNav.style.display = '';
+        _updateFabVisibility();
+    }, 340);
     _wdRefreshInterval = null;
 }
 
@@ -3171,14 +3174,15 @@ function closeCurrencyDrawer() {
     // Close the converter currency picker panel if open
     closeConverterCurrencyPicker();
 
+    // Hide overlay immediately — removes blur/dim at the moment of close
+    if (overlay) overlay.classList.add('hidden');
     sheet.style.transition = 'transform 0.28s cubic-bezier(0.32,0.72,0,1)';
     sheet.style.transform  = 'translateY(100%)';
+    // Post-animation cleanup only (nav + FAB restore)
     setTimeout(() => {
-        if (overlay) overlay.classList.add('hidden');
-        // Restore bottom nav only after the slide-out animation finishes
         const _cdNav = document.getElementById('masterGlobalNavigationBarDeck');
         if (_cdNav) _cdNav.style.display = '';
-        _updateFabVisibility(); // restore FAB if no other drawer is open
+        _updateFabVisibility();
     }, 300);
 }
 
