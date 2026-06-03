@@ -745,12 +745,12 @@
             <!-- ── FRONT FACE ── -->
             <div class="flip-card-front-face w-full h-full bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-2xl flex flex-col justify-between overflow-hidden">
                 <div class="flex justify-between items-start gap-2 shrink-0">
-                    <div>
+                    <div class="min-w-0 overflow-hidden">
                         <div class="flex items-center gap-1.5 flex-wrap">
                             <span id="trayCityBadge" class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
                             <span id="trayBookedBadge" class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
                         </div>
-                        <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate max-w-[220px]">Spot Name</h3>
+                        <h3 id="traySpotTitle" class="text-base font-black text-slate-200 mt-2 truncate">Spot Name</h3>
                     </div>
                     <div class="flex items-center gap-1.5 shrink-0">
                         <span id="trayWeatherBadge" class="inline-flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg shrink-0 h-fit bg-sky-500/10 text-sky-300"><i class="fa-solid fa-cloud opacity-40"></i></span>
@@ -1192,7 +1192,7 @@
 
                             <!-- Top row: badges + name + X -->
                             <div class="flex justify-between items-start gap-2 shrink-0">
-                                <div>
+                                <div class="min-w-0 overflow-hidden">
                                     <div class="flex items-center gap-1.5 flex-wrap">
                                         <span id="tspCityBadge"
                                               class="inline-flex items-center gap-1.5 text-[9px] px-2 py-1 rounded-lg bg-slate-950 text-slate-400 font-bold border border-slate-800">Global</span>
@@ -1200,7 +1200,7 @@
                                               class="hidden text-[9px] uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">Booked</span>
                                     </div>
                                     <h3 id="tspSpotTitle"
-                                        class="text-base font-black text-slate-200 mt-2 truncate max-w-[185px]">Spot Name</h3>
+                                        class="text-base font-black text-slate-200 mt-2 truncate">Spot Name</h3>
                                 </div>
                                 <div class="flex items-center gap-1.5 shrink-0">
                                     <span id="tspWeatherBadge"
@@ -2075,7 +2075,7 @@
     <!-- Sheet -->
     <div id="weatherDrawerSheet"
          class="fixed bottom-0 left-0 right-0 z-[63] bg-slate-900 rounded-t-2xl shadow-2xl weather-drawer-sheet"
-         style="transform:translateY(100%); max-height:90dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
+         style="transform:translateY(100%); max-height:95dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
 
         <!-- Drag handle -->
         <div class="flex justify-center pt-3 pb-1 sticky top-0 bg-slate-900 z-10">
@@ -2297,7 +2297,7 @@
     <!-- Sheet -->
     <div id="currencyDrawerSheet"
          class="fixed bottom-0 left-0 right-0 z-[63] bg-slate-900 rounded-t-2xl shadow-2xl weather-drawer-sheet"
-         style="transform:translateY(100%); max-height:90dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
+         style="transform:translateY(100%); max-height:95dvh; overflow-y:auto; -webkit-overflow-scrolling:touch;">
 
         <!-- Drag handle -->
         <div class="flex justify-center pt-3 pb-1 sticky top-0 bg-slate-900 z-10">

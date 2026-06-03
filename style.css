@@ -185,7 +185,10 @@ body {
 }
 
 .leaflet-map-pane {
-    transition: transform 0.08s ease-out;
+    /* No CSS transition — Leaflet manages this transform directly.
+       Adding a transition here delays tile placement relative to pane movement,
+       causing newly loaded tiles to paint at wrong grid positions (black gaps). */
+    transition: none;
     will-change: transform;
 }
 

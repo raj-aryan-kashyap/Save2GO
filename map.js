@@ -469,6 +469,19 @@ function setMapBaseLayerProviderSource(styleKey) {
     currentMapStyleKey = styleKey;
     localStorage.setItem('compass_map_style', styleKey);
 
+    // Match the map container background to the incoming tile palette so that
+    // any tiles still loading (including after recenter) show a colour-matched
+    // placeholder rather than the default dark background — eliminating the
+    // stark black-patch artefact that is most visible on the Light style.
+    const mapEl = document.getElementById('map-render-element');
+    if (mapEl) {
+        const bgColour = styleKey === 'light'   ? '#f2f2f0'  // CartoCDN light_all land colour
+                       : styleKey === 'terrain' ? '#e0d7c7'  // CartoCDN Voyager land colour
+                       : styleKey === 'satellite' ? '#000000' // satellite imagery is black
+                       :                           '#1a1a2e'; // dark_all
+        mapEl.style.backgroundColor = bgColour;
+    }
+
     const displayLabelNode = document.getElementById('activeLayerDisplayLabel');
     if(displayLabelNode) displayLabelNode.innerText = visibleLabel;
 
@@ -1524,10 +1537,10 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
         `<span class="uppercase tracking-wider text-slate-500">${trayBadgeCity}</span>`;
 
     if (isDone) {
-        titleWidget.className = "text-base font-black text-slate-500 line-through mt-2 truncate max-w-[220px]";
+        titleWidget.className = "text-base font-black text-slate-500 line-through mt-2 truncate";
         notesWidget.className = "text-xs text-slate-500 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] line-through pr-1 select-none";
     } else {
-        titleWidget.className = "text-base font-black text-slate-200 mt-2 truncate max-w-[220px]";
+        titleWidget.className = "text-base font-black text-slate-200 mt-2 truncate";
         notesWidget.className = "text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none";
     }
     

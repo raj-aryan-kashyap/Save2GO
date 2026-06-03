@@ -2572,6 +2572,10 @@ function openWeatherDrawer() {
 
     _setFabsVisible(false); // hide FAB while drawer is open
 
+    // Hide bottom nav so the drawer gets the full bottom screen space
+    const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
+    if (_wdNav) _wdNav.style.display = 'none';
+
     // Reveal overlay
     overlay.classList.remove('hidden');
 
@@ -2634,6 +2638,9 @@ function closeWeatherDrawer() {
     sheet.style.transform = 'translateY(100%)';
     setTimeout(() => {
         overlay.classList.add('hidden');
+        // Restore bottom nav only after the slide-out animation finishes
+        const _wdNav = document.getElementById('masterGlobalNavigationBarDeck');
+        if (_wdNav) _wdNav.style.display = '';
         _updateFabVisibility(); // restore FAB if no other drawer is open
     }, 340);
     // Stop the live-refresh timer — no point polling while drawer is hidden
@@ -2840,7 +2847,11 @@ function _renderWeatherDrawer(data) {
     if (strip) {
         if (data.hourly && data.hourly.length > 0) {
             strip.innerHTML = data.hourly.map(slot => {
-                const timePart = (slot.time || '').slice(11, 16); // "HH:MM"
+                const _raw24  = (slot.time || '').slice(11, 13); // "HH"
+                const _h24    = parseInt(_raw24, 10);
+                const _ampm   = _h24 < 12 ? 'AM' : 'PM';
+                const _h12    = _h24 % 12 || 12;              // 0→12, 13→1, etc.
+                const timePart = `${_h12}${_ampm}`;           // "12AM", "3PM", "11PM"
                 const ic = _wmoIconClass(slot.code, slot.isDay);
                 return (
                     `<div class="shrink-0 flex flex-col items-center gap-1 ` +
@@ -3109,6 +3120,10 @@ function openCurrencyDrawer() {
 
     _setFabsVisible(false);
 
+    // Hide bottom nav so the drawer gets the full bottom screen space
+    const _cdNav = document.getElementById('masterGlobalNavigationBarDeck');
+    if (_cdNav) _cdNav.style.display = 'none';
+
     // Reset the "don't show" toggle to OFF each time the drawer opens
     _setCurrencyHideToggle(false);
 
@@ -3160,6 +3175,9 @@ function closeCurrencyDrawer() {
     sheet.style.transform  = 'translateY(100%)';
     setTimeout(() => {
         if (overlay) overlay.classList.add('hidden');
+        // Restore bottom nav only after the slide-out animation finishes
+        const _cdNav = document.getElementById('masterGlobalNavigationBarDeck');
+        if (_cdNav) _cdNav.style.display = '';
         _updateFabVisibility(); // restore FAB if no other drawer is open
     }, 300);
 }
@@ -3870,11 +3888,15 @@ function _calcBlueHour(sunsetUnix) {
     };
 }
 
-// Format a UNIX timestamp (seconds) to HH:MM using the device's local time zone.
+// Format a UNIX timestamp (seconds) to 12-hour h:MMam/pm using the device's local time zone.
 function _wdFormatTime(unixSec) {
-    return new Date(unixSec * 1000).toLocaleTimeString([], {
-        hour: '2-digit', minute: '2-digit', hour12: false,
-    });
+    const d    = new Date(unixSec * 1000);
+    const h24  = d.getHours();
+    const min  = d.getMinutes();
+    const ampm = h24 < 12 ? 'AM' : 'PM';
+    const h12  = h24 % 12 || 12;
+    const mm   = String(min).padStart(2, '0');
+    return `${h12}:${mm}${ampm}`;
 }
 
 // ── Label helpers ─────────────────────────────────────────────────────────────
@@ -5996,22 +6018,52 @@ function _tasksComputeAction(spot) {
     const cat        = lc(spot.category);
     const allText    = [spot.spot_name, spot.notes, spot.long_description, spot.opening_hours].join(' ').toLowerCase();
 
+    // ── Phrases that explicitly signal NO user action is needed ───────────
+    // If any of these appear in booking_requirement or the full text, the
+    // spot is not actionable and must be excluded from the task menu.
+    const NON_ACTIONABLE = [
+        'no booking', 'no reservation', 'no reserv', 'no advance',
+        'not required', 'not needed', 'none required', 'not applicable',
+        'walk-in', 'walk in', 'free entry', 'free admission',
+        'open to all', 'open to public', 'always open',
+        'no need to book', 'without reservation', 'just turn up',
+        'drop in', 'drop-in',
+    ];
+
     // ── Tier 1: explicit booking_requirement field ─────────────────────────
     if (bookingReq && bookingReq !== 'n/a' && bookingReq !== 'none'
-        && bookingReq !== '-' && bookingReq.length > 2) {
+        && bookingReq !== '-' && bookingReq !== 'no' && bookingReq.length > 2) {
+
+        // If the value explicitly says no action → exclude
+        for (const phrase of NON_ACTIONABLE) {
+            if (bookingReq.includes(phrase)) return null;
+        }
+
+        // Non-empty, not excluded → actionable; derive urgency from wording
         const raw = (spot.booking_requirement || '').trim();
-        return { label: raw.length <= 48 ? raw : 'Booking required', urgency: 3 };
+        const urgency = /required|mandatory|must|essential/.test(bookingReq) ? 3
+                      : /recommend|advised|suggested|preferred/.test(bookingReq) ? 2
+                      : 2; // default to recommended if wording is ambiguous
+        return { label: raw.length <= 48 ? raw : 'Booking required', urgency };
+    }
+
+    // ── Before Tiers 2+3: bail out if any non-actionable phrase appears
+    // anywhere in the spot's text (notes, description, opening hours, name)
+    for (const phrase of NON_ACTIONABLE) {
+        if (allText.includes(phrase)) return null;
     }
 
     let score = 0;
     let label = null;
     let urgency = 1;
 
-    // ── Tier 2: category signals ───────────────────────────────────────────
+    // ── Tier 2: category signals (boost only — not sufficient alone) ───────
+    // Category contributes +1 toward the threshold; it cannot trigger an
+    // entry on its own — at least one concrete keyword (Tier 3) is required.
     if (/food|restaurant|dining|cafe|café|eatery|bistro|brasserie/.test(cat)) {
-        score += 2; label = 'Reservation recommended';
+        score += 1; label = 'Reservation recommended';
     } else if (/activity|tour|excursion|experience|adventure|sport/.test(cat)) {
-        score += 2; label = 'Pre-booking recommended';
+        score += 1; label = 'Pre-booking recommended';
     } else if (/nightlife|bar|drink|club|cocktail|lounge/.test(cat)) {
         score += 1; label = 'Reservation recommended';
     } else if (/culture|museum|gallery|exhibit|theatre|theater/.test(cat)) {
@@ -6020,29 +6072,30 @@ function _tasksComputeAction(spot) {
     // Photo, Viewpoint, Nature, Shopping, Landmark → no inherent booking need
 
     // ── Tier 3: keyword scan across all text fields ────────────────────────
+    // Intentionally excludes vague signals like 'popular', 'queue', 'famous',
+    // 'iconic' — these do not indicate a real booking obligation.
     const BOOK_KW = [
-        'book', 'reserv', 'ticket', 'advance', 'popular', 'queue',
-        'limited seat', 'capacity', 'sell out', 'sold out',
+        'book', 'reserv', 'ticket', 'advance booking', 'advance purchase',
+        'limited seat', 'limited space', 'capacity', 'sell out', 'sold out',
         'waiting list', 'pre-book', 'must book', 'booking required',
+        'reservation required', 'pre-register',
     ];
-    const BOOST_KW = ['michelin', 'award', 'famous', 'iconic', 'exclusive', 'world-class'];
-    const NEG_KW   = ['free entry', 'free admission', 'walk-in', 'walk in',
-                      'no booking', 'no reserv', 'always open', 'open to public'];
+    const BOOST_KW = ['michelin', 'exclusive', 'world-class'];
 
     let kwHits = 0;
     for (const kw of BOOK_KW)  { if (allText.includes(kw) && ++kwHits >= 3) break; }
     for (const kw of BOOST_KW) { if (allText.includes(kw)) { urgency = Math.min(urgency + 1, 3); break; } }
-    let negHit = false;
-    for (const kw of NEG_KW)   { if (allText.includes(kw)) { negHit = true; break; } }
 
     score += kwHits;
-    if (negHit) score -= 2;
 
     if (score >= 4) urgency = 3;
     else if (score >= 2) urgency = Math.max(urgency, 2);
 
-    if (score < 2) return null;   // below threshold — not actionable
-    if (!label)    label = 'Check availability';
+    // Gate: category alone (score = 1, kwHits = 0) is not enough.
+    // A spot must have at least one concrete booking keyword to appear.
+    if (kwHits === 0) return null;
+    if (score < 2)    return null;
+    if (!label)       label = 'Check availability';
 
     return { label, urgency };
 }
@@ -6427,8 +6480,8 @@ function tasksOpenTray(rowid) {
     if (titleEl) {
         titleEl.innerText = row.spot_name || 'Unnamed Destination';
         titleEl.className = isDone
-            ? 'text-base font-black text-slate-500 line-through mt-2 truncate max-w-[185px]'
-            : 'text-base font-black text-slate-200 mt-2 truncate max-w-[185px]';
+            ? 'text-base font-black text-slate-500 line-through mt-2 truncate'
+            : 'text-base font-black text-slate-200 mt-2 truncate';
     }
 
     // ── Notes ─────────────────────────────────────────────────────────────

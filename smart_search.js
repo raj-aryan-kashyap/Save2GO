@@ -1016,12 +1016,33 @@ function _ssUpgradeChips(p2Tags) {
  */
 function _ssRemoveChip(tagName) {
     if (!_ssChipState) return;
+
+    // ── Instant visual feedback: remove chip from DOM before any computation
+    // so the browser can repaint on the very next frame regardless of how
+    // long the list re-render takes.
+    const strip = document.getElementById('ssChipStrip');
+    if (strip) {
+        const chipEl = strip.querySelector('[data-tag="' + CSS.escape(tagName) + '"]');
+        if (chipEl) chipEl.remove();
+    }
+
     _ssChipState.activeTags.delete(tagName);
     _ssChipState.phase = 'user';
 
-    // If no active tags remain, treat as reset
+    // ── If no active tags remain, close the filter entirely.
+    // Do NOT call _ssResetChips() — the user explicitly removed every chip
+    // and should end up with a clean slate, not the full tag set restored.
     if (_ssChipState.activeTags.size === 0) {
-        _ssResetChips();
+        const filterId = _ssChipState.filterId;
+        _ssChipState = null;
+        _ssActiveIds.delete(filterId);
+        _ssPersist();
+        const area = document.getElementById('ssResultArea');
+        if (area) area.classList.add('hidden');
+        renderCustomFilterButtons();
+        if (typeof renderList                    === 'function') renderList();
+        if (typeof updateHeaderBadgeHUDCounters  === 'function') updateHeaderBadgeHUDCounters();
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
         return;
     }
 
@@ -1032,13 +1053,6 @@ function _ssRemoveChip(tagName) {
     if (filterIdx >= 0) {
         _ssFilters[filterIdx].matchedRowIds = _ssChipState.refinedRowIds;
         _ssPersist();
-    }
-
-    // Hide the removed chip in the DOM
-    const strip = document.getElementById('ssChipStrip');
-    if (strip) {
-        const chipEl = strip.querySelector('[data-tag="' + CSS.escape(tagName) + '"]');
-        if (chipEl) chipEl.style.display = 'none';
     }
 
     _ssUpdateResetLink();
