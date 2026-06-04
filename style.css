@@ -342,21 +342,21 @@ body {
 
 /* Thematic Pink Gradient Pulse Glow Effect */
 .thematic-pink-glow {
-    animation: pinkGlowPulse 0.8s ease-in-out;
+    animation: pinkGlowPulse 0.7s ease-in-out 2;
 }
 
 @keyframes pinkGlowPulse {
     0% {
-        border-color: rgba(236, 72, 153, 0.2);
-        box-shadow: 0 0 0 0px rgba(236, 72, 153, 0.6), 0 0 0 0px rgba(139, 92, 246, 0.4);
+        border-color: rgba(236, 72, 153, 0.5);
+        box-shadow: 0 0 0 0px rgba(236, 72, 153, 0.9), 0 0 6px 2px rgba(236, 72, 153, 0.4);
     }
     50% {
-        border-color: rgba(236, 72, 153, 0.9);
-        box-shadow: 0 0 0 6px rgba(236, 72, 153, 0.3), 0 0 0 12px rgba(139, 92, 246, 0.1);
+        border-color: rgba(236, 72, 153, 1);
+        box-shadow: 0 0 0 8px rgba(236, 72, 153, 0.55), 0 0 0 16px rgba(139, 92, 246, 0.3), 0 0 18px 4px rgba(236, 72, 153, 0.55);
     }
     100% {
-        border-color: rgba(236, 72, 153, 0.2);
-        box-shadow: 0 0 0 0px rgba(236, 72, 153, 0.), 0 0 0 0px rgba(139, 92, 246, 0.);
+        border-color: rgba(236, 72, 153, 0.5);
+        box-shadow: 0 0 0 0px rgba(236, 72, 153, 0), 0 0 0 0px rgba(139, 92, 246, 0), 0 0 0 0px rgba(236, 72, 153, 0);
     }
 }
 

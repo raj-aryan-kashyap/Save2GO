@@ -1,4 +1,4 @@
-const APP_VERSION = "v5.0.10";
+const APP_VERSION = "v6.0.0";
 const API_URL = "https://script.google.com/macros/s/AKfycbyYTU_I0zel50EKpB767LmQ2NjeKudS93yv8-DYSYnBxaFS5_I1TWily79rOkMdGTu5IA/exec";
 const BACKEND_URL = API_URL;
 

@@ -10,7 +10,7 @@
 //  • Static assets from CDNs       → Cache-first (Leaflet, FA, Tailwind)
 // ================================================================
 
-const CACHE_VERSION  = 'save2go-v5-r7';
+const CACHE_VERSION  = 'save2go-v5-r8';
 const SHELL_CACHE    = CACHE_VERSION + '-shell';
 const CDN_CACHE      = CACHE_VERSION + '-cdn';
 

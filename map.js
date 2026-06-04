@@ -1164,13 +1164,54 @@ function snapMapViewportToSelectedCityBounds(event) {
         if (_c) targetBounds.extend([_c.lat, _c.lon]);
     });
 
-    // Always snap to the filtered pins — never silently no-op.
-    // The previous "pinsAreAlreadyWhollyVisible" guard caused a stuck-view bug:
-    // when the user narrowed the city filter from multiple cities to one, the map
-    // was still zoomed out to the old multi-city extent, so the remaining city's
-    // pins were technically inside currentMapBounds and the function returned
-    // without re-centering.  The magnifying glass is an explicit "take me there"
-    // action and should always fit/zoom regardless of the current viewport.
+    // ── Already-fitted check ──────────────────────────────────────────────────
+    // Detect "user tapped again while already at the city view" so we can pulse
+    // pink instead of silently re-running fitBounds with no visible change.
+    //
+    // Strategy: compare current zoom to the zoom fitBounds would choose for the
+    // same target.  An area-ratio check fails for tightly-clustered pins because
+    // padding dominates and the viewport can be 8–10× wider than the cluster —
+    // the ratio is always "too big" and wasAlreadyFitted is never set.
+    //
+    // A ±1.5 zoom tolerance handles Leaflet's integer snap, device-pixel-ratio
+    // rounding, and slight user pan/zoom without re-triggering after a city-
+    // filter change (which would leave the map at a much lower zoom).
+    let wasAlreadyFitted = false;
+    const _tbIsPoint = (targetBounds.getNorth() === targetBounds.getSouth() &&
+                        targetBounds.getEast()  === targetBounds.getWest());
+
+    if (leafletMapInstance.getBounds().contains(targetBounds)) {
+        if (activeCityPins.length === 1 || _tbIsPoint) {
+            // Single location: fitted = zoomed in ≥ 16 and centre within ~250 m
+            const _c0 = _resolveSpotCoords(activeCityPins[0]);
+            if (_c0) {
+                const _dist = leafletMapInstance.distance(
+                    leafletMapInstance.getCenter(), L.latLng(_c0.lat, _c0.lon)
+                );
+                wasAlreadyFitted = leafletMapInstance.getZoom() >= 16 && _dist < 250;
+            }
+        } else {
+            // Multiple locations: compare current zoom to the zoom fitBounds
+            // would use.  fitBounds passes paddingTL+paddingBR = [100,100] to
+            // getBoundsZoom internally, so we mirror that here.
+            const _expectedZoom = leafletMapInstance.getBoundsZoom(
+                targetBounds, false, L.point(100, 100)
+            );
+            wasAlreadyFitted = Math.abs(leafletMapInstance.getZoom() - _expectedZoom) <= 1.5;
+        }
+    }
+
+    if (wasAlreadyFitted) {
+        // Already at the city view — pulse pink to signal "you're already here"
+        if (magnifyingButton) {
+            magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
+            void magnifyingButton.offsetWidth;
+            magnifyingButton.classList.add('thematic-pink-glow');
+        }
+        return;
+    }
+
+    // Not yet fitted — zoom/fit to the pins
     if (magnifyingButton) {
         magnifyingButton.classList.remove('thematic-pink-glow', 'lens-zoom-animation');
         void magnifyingButton.offsetWidth;
