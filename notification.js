@@ -127,9 +127,9 @@ let _badgeDataUrl = 'data:image/svg+xml,' + encodeURIComponent(_BADGE_SVG);
 
 // ── Theme palette  ──────────────────────────────────────────────────────────
 const _THEME = {
-    proximity: { from: '#ec4899', to: '#db2777', label: '📍  SPOTS NEARBY',        desc: 'Saved spots are near your location'   },
-    schedule:  { from: '#8b5cf6', to: '#7c3aed', label: '📅  SCHEDULE REMINDER',   desc: 'Upcoming activity on your itinerary'  },
-    tardiness: { from: '#ef4444', to: '#dc2626', label: '🚨  LATE ALERT',           desc: 'You may be running late for a booking' },
+    proximity: { from: '#ec4899', to: '#db2777', label: 'Spots Nearby',        desc: 'Saved spots nearby'   },
+    schedule:  { from: '#8b5cf6', to: '#7c3aed', label: 'Schedule Reminder',   desc: 'Upcoming activity on your itinerary'  },
+    tardiness: { from: '#ef4444', to: '#dc2626', label: 'Late Alert',           desc: 'You may be late for a booking' },
 };
 
 // ── Canvas helpers ──────────────────────────────────────────────────────────
@@ -283,7 +283,7 @@ async function _generateBannerImage(type, iconDataUrl) {
         // ── Text — SAVE2GO micro-label
         ctx.fillStyle = '#475569'; // slate-600
         ctx.font = `bold 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif`;
-        ctx.fillText('SAVE2GO', 160, 40);
+        ctx.fillText('Save2Go', 160, 40);
 
         // ── Text — type label (coloured)
         ctx.fillStyle = from;
@@ -806,7 +806,7 @@ async function _checkTardiness() {
             key,
             ttl:   _NOTIF_CONFIG.dedupTtl.tardiness,
             title: `🚨 Running Late — ${name}`,
-            body:  `Your reservation at ${timeStr} was ${lateStr} ago. Time to get moving!`,
+            body: `Your reservation at ${timeStr} was ${lateStr} ago. Time to move!`,
             options: {
                 tag:              `tardiness-${entry.rowid}`,
                 renotify:         true,      // override previous — you're STILL late

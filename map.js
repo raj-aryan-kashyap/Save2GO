@@ -379,6 +379,16 @@ function initLeafletMapEngineCanvas() {
         document.getElementById('mapLayerStyleDropdownDeck')?.classList.add('hidden');
     });
 
+    // Break camera-follow lock the moment the user starts a manual drag.
+    // Uses dragstart (not movestart) so programmatic setView/panTo calls — which
+    // also fire movestart — never accidentally unlock the camera.
+    leafletMapInstance.on('dragstart', () => {
+        if (isCameraLocked) {
+            isCameraLocked = false;
+            syncCameraLockVisualUIState();
+        }
+    });
+
     leafletMapInstance.on('moveend zoomend viewreset animationend', () => {
         if (!leafletMapInstance) return;
         const zoom   = leafletMapInstance.getZoom();
@@ -566,14 +576,14 @@ function _showGpsErrorModal(errorType) {
         iconEl.className      = 'text-3xl text-red-500';
         iconEl.innerHTML      = '<i class="fa-solid fa-ban"></i>';
         titleEl.textContent   = 'Location Access Blocked';
-        msgEl.textContent     = 'Location permission has been denied. Please enable it in your device or browser Settings, then tap the GPS button to try again.';
+        msgEl.textContent     = 'Location permission denied. Please enable it in your device settings and try again.';
         btnEl.textContent     = 'Got It';
         btnEl.onclick         = () => modal.classList.add('hidden');
     } else if (errorType === 'signal_timeout') {
         iconEl.className      = 'text-3xl text-amber-400';
         iconEl.innerHTML      = '<i class="fa-solid fa-satellite-dish"></i>';
         titleEl.textContent   = 'GPS Signal Timeout';
-        msgEl.textContent     = 'Could not get a GPS fix in time. Try moving to an open area with a clear view of the sky, then tap Retry.';
+        msgEl.textContent     = 'Could not get a GPS signal. Tap Retry.';
         btnEl.textContent     = 'Retry';
         btnEl.onclick         = () => { modal.classList.add('hidden'); startLiveHardwareGPSTracking(); };
     } else {
@@ -581,7 +591,7 @@ function _showGpsErrorModal(errorType) {
         iconEl.className      = 'text-3xl text-red-500';
         iconEl.innerHTML      = '<i class="fa-solid fa-location-crosshairs"></i>';
         titleEl.textContent   = 'Location Unavailable';
-        msgEl.textContent     = 'Your device could not determine its location. Check that Location Services are enabled, then tap Retry.';
+        msgEl.textContent     = 'Could not determine your location. Check that location services are enabled, then tap Retry.';
         btnEl.textContent     = 'Retry';
         btnEl.onclick         = () => { modal.classList.add('hidden'); startLiveHardwareGPSTracking(); };
     }
@@ -1044,9 +1054,18 @@ function syncCameraLockVisualUIState() {
     const liveAnimClasses = ['thematic-pink-glow', 'recenter-button-press']
         .filter(cls => compassBtn.classList.contains(cls));
 
+    // GPS is considered "live" whenever the watch stream is running
+    const gpsLive = liveGpsWatchId !== null;
+
     if (isCameraLocked) {
-        compassBtn.className = "w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
+        // ── State: Following — original grey/black, no extra indicator ────────
+        compassBtn.className = "w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
+    } else if (gpsLive) {
+        // ── State: Free explore — default look + pink border breathe ─────────
+        compassBtn.className = "w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
+        compassBtn.classList.add('compass-explore-glow');
     } else {
+        // ── State: GPS off — original default styling, no indicator ──────────
         compassBtn.className = "w-12 h-12 bg-slate-900/95 border border-slate-800 rounded-full shadow-2xl flex items-center justify-center text-slate-300 active:bg-slate-800 transition-all duration-300 select-none overflow-hidden relative text-[19px]";
     }
 
@@ -1705,7 +1724,7 @@ function revealMapItemDetailTrayHUD(spotObj, isStarredBool) {
     };
 
     const backDesc = document.getElementById('trayBackLongDescription');
-    backDesc.innerText = (spotObj.long_description && spotObj.long_description !== "N/A") ? spotObj.long_description : "Disclaimer: Deep background details unpopulated.";
+    backDesc.innerText = (spotObj.long_description && spotObj.long_description !== "N/A") ? spotObj.long_description : "Disclaimer: Detailed background information unavailable.";
 
     const hoursGrid = document.getElementById('trayBackHoursGrid');
     hoursGrid.innerHTML = '';
@@ -2149,3 +2168,1164 @@ function refreshMapWeatherWidget() {
     });
 }
 
+
+
+// ================================================================
+//  STARGAZING HEATMAP OVERLAY
+//  ─────────────────────────
+//  • Light-pollution tile layer  (djlorenz.github.io, z-index 350)
+//  • Cloud/seeing canvas overlay (z-index 400, mix-blend-mode:screen)
+//  • Fibonacci spiral sampling   (adaptive point count by radius)
+//  • Open-Meteo current weather  (1 fetch per grid point)
+// ================================================================
+
+// ── Globals ──────────────────────────────────────────────────────
+let _sgOverlayEnabled   = false;
+let _sgLpTileLayer      = null;   // Leaflet light-pollution tile layer
+let _sgHeatCanvas       = null;   // <canvas> element over the map
+let _sgHeatSamples      = [];     // [{ lat, lon, score }] last drawn set
+let _sgOverlayRadiusKm  = 150;    // current radius (km)
+let _sgFetchController  = null;   // AbortController for in-flight grid fetch
+let _sgDrawPending      = false;  // rAF guard
+let _sgShowLabels       = false;  // draw score % on each blob point
+let _sgLabelHitboxes    = [];     // [{x,y,lat,lon,score,r}] for click-to-zoom
+let _sgLpTileFetchMap    = new Map(); // session cache: tileUrl → Promise<ImageData>
+let _sgCenterAodMod      = 1.0;  // aerosol optical depth modifier (1.0 = clean air)
+let _sgCenter7TimerMod   = 1.0;  // 7Timer ASTRO cross-calibration modifier (0.7–1.0)
+let _sgCenterSolarAlt    = -90;  // current solar altitude at grid centre (degrees)
+let _sgCenterDarknessMod = 1.0;  // 0.05 (day) → 1.0 (astronomical night)
+let _sgTonightIndices    = [];   // [{index, timeStr}] — tonight's astronomical night hours in the 48-h hourly forecast
+let _sgSpotDetailData    = null; // last hitbox tapped for bottom HUD
+
+// ── Public: activate overlay ─────────────────────────────────────
+function sgActivateOverlay(radiusKm) {
+    if (!leafletMapInstance) return;
+    radiusKm = radiusKm || _sgOverlayRadiusKm;
+    _sgOverlayRadiusKm = radiusKm;
+    _sgOverlayEnabled  = true;
+
+    // 1. Light-pollution tile layer
+    if (!_sgLpTileLayer) {
+        _sgLpTileLayer = L.tileLayer(
+            'https://djlorenz.github.io/astronomy/lp2022/overlay/tiles/{z}/{x}/{y}.png',
+            {
+                attribution: '© <a href="https://djlorenz.github.io/astronomy/lp2022/" target="_blank">Falchi LP 2022</a>',
+                opacity:  0.55,
+                maxZoom:  12,
+                minZoom:  3,
+                zIndex:   350
+            }
+        );
+    }
+    if (!leafletMapInstance.hasLayer(_sgLpTileLayer)) {
+        _sgLpTileLayer.addTo(leafletMapInstance);
+    }
+
+    // 2. Canvas overlay
+    _sgEnsureCanvas();
+
+    // 3. Map event listeners for redraw
+    leafletMapInstance.off('moveend zoomend', _sgOnMapMove);
+    leafletMapInstance.on ('moveend zoomend', _sgOnMapMove);
+
+    // 4. Initial fetch + draw
+    _sgRefresh();
+}
+
+// ── Public: deactivate overlay ───────────────────────────────────
+function sgDeactivateOverlay() {
+    _sgOverlayEnabled = false;
+
+    // Abort any pending fetch
+    if (_sgFetchController) {
+        _sgFetchController.abort();
+        _sgFetchController = null;
+    }
+
+    // Remove tile layer
+    if (_sgLpTileLayer && leafletMapInstance && leafletMapInstance.hasLayer(_sgLpTileLayer)) {
+        leafletMapInstance.removeLayer(_sgLpTileLayer);
+    }
+
+    // Remove event listener
+    if (leafletMapInstance) {
+        leafletMapInstance.off('moveend zoomend', _sgOnMapMove);
+    }
+
+    // Clear canvas
+    if (_sgHeatCanvas) {
+        const ctx = _sgHeatCanvas.getContext('2d');
+        ctx.clearRect(0, 0, _sgHeatCanvas.width, _sgHeatCanvas.height);
+        _sgHeatCanvas.style.display = 'none';
+    }
+
+    _sgHeatSamples = [];
+    sgHideSpotDetail();
+}
+
+// ── Public: update radius and refresh ────────────────────────────
+function sgUpdateOverlayRadius(km) {
+    _sgOverlayRadiusKm = km;
+    if (_sgOverlayEnabled) _sgRefresh();
+}
+
+// ── Internal: ensure canvas exists as a direct child of .leaflet-container
+//
+//  WHY NOT createPane():
+//    createPane() adds the element inside .leaflet-map-pane which (a) has
+//    no explicit CSS width/height so width:100% resolves to 0, and (b)
+//    receives Leaflet's pan transform so the canvas scrolls with the tiles.
+//
+//  CORRECT APPROACH:
+//    Append the canvas directly to .leaflet-container (position:relative,
+//    overflow:hidden).  The canvas is position:absolute top/left 0 and its
+//    drawing-surface size equals the container's pixel dimensions.
+//    latLngToContainerPoint() already returns coords relative to this same
+//    container so the mapping is exact, no transforms needed.
+// ────────────────────────────────────────────────────────────────────────
+function _sgEnsureCanvas() {
+    if (!leafletMapInstance) return;
+    const lc = leafletMapInstance.getContainer();  // .leaflet-container
+    if (!lc) return;
+
+    if (!_sgHeatCanvas) {
+        _sgHeatCanvas = document.createElement('canvas');
+        _sgHeatCanvas.id = 'sg-heat-canvas';
+        // Positioned over the map; NO CSS width/height — the drawing
+        // surface (set by .width/.height attrs) controls display size.
+        _sgHeatCanvas.style.cssText =
+            'position:absolute;top:0;left:0;z-index:450;' +
+            'pointer-events:none;display:block;opacity:0.82;';
+        lc.appendChild(_sgHeatCanvas);
+
+        // Click handler: tap a score label → zoom to that point at z15
+        _sgHeatCanvas.addEventListener('click', (e) => {
+            if (!_sgShowLabels || _sgLabelHitboxes.length === 0) return;
+            const rect = _sgHeatCanvas.getBoundingClientRect();
+            const cx = e.clientX - rect.left;
+            const cy = e.clientY - rect.top;
+            let closest = null, minDist = Infinity;
+            _sgLabelHitboxes.forEach(h => {
+                const d = Math.hypot(cx - h.x, cy - h.y);
+                if (d < minDist && d <= h.r) { minDist = d; closest = h; }
+            });
+            if (closest && leafletMapInstance) {
+                leafletMapInstance.setView(
+                    L.latLng(closest.lat, closest.lon), 15, { animate: true }
+                );
+                // Show bottom HUD with tonight's detail for this spot
+                sgShowSpotDetail(closest);
+            }
+        });
+    }
+    _sgHeatCanvas.style.display = 'block';
+    _sgSyncCanvasSize();
+}
+
+// Set canvas drawing-surface dimensions to match the map container.
+// Because there is no CSS width/height override, the canvas will
+// visually display at exactly canvas.width × canvas.height pixels.
+function _sgSyncCanvasSize() {
+    if (!_sgHeatCanvas || !leafletMapInstance) return;
+    const lc = leafletMapInstance.getContainer();
+    if (!lc) return;
+    const w = lc.offsetWidth  || lc.clientWidth  || 375;
+    const h = lc.offsetHeight || lc.clientHeight || 600;
+    // Only reset when size changed — resetting clears the drawing surface
+    if (_sgHeatCanvas.width  !== w) _sgHeatCanvas.width  = w;
+    if (_sgHeatCanvas.height !== h) _sgHeatCanvas.height = h;
+}
+
+// ── Internal: map move/zoom handler ──────────────────────────────
+function _sgOnMapMove() {
+    if (!_sgOverlayEnabled) return;
+    // Redraw existing samples instantly on pan/zoom (screen coords change)
+    if (_sgHeatSamples.length > 0) {
+        _sgDrawHeatCanvas();
+    } else {
+        // Still fetching — redraw the loading ring at new screen position
+        const { lat, lon } = _sgGetGpsCenter();
+        _sgDrawLoadingRing(lat, lon);
+    }
+    // Debounced refresh only if user actually changes view significantly
+    clearTimeout(_sgOnMapMove._t);
+    _sgOnMapMove._t = setTimeout(_sgRefresh, 800);
+}
+
+// ── Internal: resolve best-available coords (GPS > cache > map centre)
+function _sgGetGpsCenter() {
+    // userLat/userLon and cachedUserCoords are globals from aap.js
+    if (typeof userLat !== 'undefined' && userLat && typeof userLon !== 'undefined' && userLon) {
+        return { lat: userLat, lon: userLon };
+    }
+    if (typeof cachedUserCoords !== 'undefined' && cachedUserCoords &&
+        cachedUserCoords.lat && cachedUserCoords.lon) {
+        return { lat: cachedUserCoords.lat, lon: cachedUserCoords.lon };
+    }
+    const c = leafletMapInstance.getCenter();
+    return { lat: c.lat, lon: c.lng };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  LIGHT POLLUTION TILE SAMPLING (Falchi 2022 via djlorenz.github.io)
+//  ─────────────────────────────────────────────────────────────────
+//  Reads the pixel colour at a lat/lon from the LP overlay tiles and
+//  maps it to a Bortle-scale value (1–9).  Uses a session-scoped
+//  ImageData cache (_sgLpTileFetchMap) so nearby points that fall on
+//  the same tile share a single fetch.
+//
+//  CORS: GitHub Pages sends Access-Control-Allow-Origin:* for public
+//  repos.  We use img.crossOrigin='anonymous' so the canvas stays
+//  uncontaminated and getImageData() succeeds.
+// ═══════════════════════════════════════════════════════════════════
+
+// Slippy-map tile coordinates for a lat/lon at a given zoom
+function _sgLatLonToTileXY(lat, lon, zoom) {
+    const n  = Math.pow(2, zoom);
+    const x  = Math.floor((lon + 180) / 360 * n);
+    const lr = lat * Math.PI / 180;
+    const y  = Math.floor((1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n);
+    return { x, y };
+}
+
+// Pixel offset (0–255) within the 256×256 tile for a given lat/lon
+function _sgLatLonToTilePixel(lat, lon, zoom) {
+    const n              = Math.pow(2, zoom);
+    const { x: tx, y: ty } = _sgLatLonToTileXY(lat, lon, zoom);
+    const pixX  = Math.floor((lon + 180) / 360 * n * 256) - tx * 256;
+    const lr    = lat * Math.PI / 180;
+    const pixY  = Math.floor((1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n * 256) - ty * 256;
+    return {
+        tileX: tx, tileY: ty,
+        pixX:  Math.max(0, Math.min(255, pixX)),
+        pixY:  Math.max(0, Math.min(255, pixY))
+    };
+}
+
+// Fetch a tile and cache the full ImageData for the session.
+// Returns null on error (treat as Bortle 1 = pristine dark sky).
+function _sgFetchLpTileImageData(tileX, tileY, zoom, signal) {
+    const url = `https://djlorenz.github.io/astronomy/lp2022/overlay/tiles/${zoom}/${tileX}/${tileY}.png`;
+    if (_sgLpTileFetchMap.has(url)) return _sgLpTileFetchMap.get(url);
+
+    const promise = fetch(url, { signal })
+        .then(r => r.ok ? r.blob() : null)
+        .then(blob => {
+            if (!blob) return null;
+            // Use createImageBitmap so we never need a blob URL or crossOrigin attribute.
+            // Blob URLs are same-origin by definition — setting crossOrigin on them
+            // confuses the browser and can silently prevent getImageData from working.
+            return createImageBitmap(blob).then(bitmap => {
+                const c   = document.createElement('canvas');
+                c.width   = c.height = 256;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(bitmap, 0, 0);
+                try { return ctx.getImageData(0, 0, 256, 256); }
+                catch (_) { return null; }
+            }).catch(() => null);
+        })
+        .catch(err => { if (err.name === 'AbortError') throw err; return null; });
+
+    _sgLpTileFetchMap.set(url, promise);
+    return promise;
+}
+
+// Sample one point → Bortle 1–9 (null on any failure)
+// Tries zoom 11 (~78 m/px) first for best accuracy, falls back to 9 then 7
+// in case the high-zoom tile doesn't exist for the requested location.
+async function _sgSampleBortle(lat, lon, signal) {
+    try {
+        for (const zoom of [11, 9, 7]) {
+            const { tileX, tileY, pixX, pixY } = _sgLatLonToTilePixel(lat, lon, zoom);
+            const imageData = await _sgFetchLpTileImageData(tileX, tileY, zoom, signal);
+            if (!imageData) continue;  // 404 or decode failure — try next zoom
+            const i = (pixY * 256 + pixX) * 4;
+            return _sgRgbToBortle(
+                imageData.data[i], imageData.data[i+1],
+                imageData.data[i+2], imageData.data[i+3]
+            );
+        }
+        return null;  // all zoom levels failed — fall back to atmospheric score
+    } catch (err) {
+        if (err.name === 'AbortError') throw err;
+        return null;
+    }
+}
+
+// Map djlorenz Falchi 2022 tile pixel colour → Bortle scale 1–9.
+// The overlay uses a hue-progression palette (empirically matched to
+// the colorbar at djlorenz.github.io/astronomy/lp/colors.html):
+//   near-transparent / black → 1 (pristine)
+//   indigo / violet (260–300°) → 2
+//   blue   (200–260°)          → 2–3
+//   cyan   (160–200°)          → 3
+//   green  (110–160°)          → 3–4
+//   yellow-green (75–110°)     → 4
+//   yellow (55–75°)            → 5
+//   orange (40–55°)            → 6
+//   orange-red (20–40°)        → 7
+//   red    (0–20° / 340–360°)  → 8
+//   bright white               → 9
+function _sgRgbToBortle(r, g, b, a) {
+    if (a < 20 || (r < 20 && g < 20 && b < 20)) return 1;   // transparent / black
+
+    const rf = r / 255, gf = g / 255, bf = b / 255;
+    const max = Math.max(rf, gf, bf);
+    const min = Math.min(rf, gf, bf);
+    const lum = rf * 0.299 + gf * 0.587 + bf * 0.114;       // perceived brightness
+
+    if (lum > 0.80 && (max - min) < 0.25) return 9;         // near-white = city centre
+
+    let hue = 0;
+    if (max !== min) {
+        const d = max - min;
+        if      (max === rf) hue = 60 * (((gf - bf) / d) % 6);
+        else if (max === gf) hue = 60 *  ((bf - rf) / d + 2);
+        else                 hue = 60 *  ((rf - gf) / d + 4);
+        if (hue < 0) hue += 360;
+    }
+
+    if (hue <  20 || hue >= 340) return 8;   // red
+    if (hue <  40)               return 7;   // orange-red
+    if (hue <  55)               return 6;   // orange
+    if (hue <  75)               return 5;   // yellow
+    if (hue < 110)               return 4;   // yellow-green
+    if (hue < 160)               return 3;   // green → cyan
+    if (hue < 260)               return 2;   // blue
+    return 2;                                // indigo / violet
+}
+
+// Bortle 1–9 → quality score 0–100 (linear: 1=100, 9=0)
+function _sgBortleToScore(bortle) {
+    return Math.max(0, Math.min(100, (9 - bortle) / 8 * 100));
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  MOON ILLUMINATION  (simple synodic approximation, no deps)
+//  Returns 0 (new moon) → 1 (full moon)
+// ─────────────────────────────────────────────────────────────────
+function _sgMoonIllumination() {
+    // Known new moon: 2000-01-06T18:14:00Z
+    const epoch   = 946_727_640_000;   // ms
+    const synodic =  29.53058867 * 86_400_000;
+    const phase   = ((Date.now() - epoch) % synodic + synodic) % synodic / synodic;
+    return (1 - Math.cos(phase * 2 * Math.PI)) / 2;
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  AEROSOL OPTICAL DEPTH  (fetched once at grid centre)
+//  air-quality-api.open-meteo.com — free, no key needed.
+//  Updates _sgCenterAodMod (global multiplier 0.65–1.0).
+// ─────────────────────────────────────────────────────────────────
+async function _sgFetchCenterAod(lat, lon, signal) {
+    try {
+        const url  = `https://air-quality-api.open-meteo.com/v1/air-quality` +
+                     `?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
+                     `&current=aerosol_optical_depth,dust&timezone=auto`;
+        const resp = await fetch(url, { signal });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const aod  = json?.current?.aerosol_optical_depth ?? 0.1;
+        const dust = json?.current?.dust                  ?? 0;   // µg/m³
+
+        // AOD penalty: 0.1=clean, 0.3=slight haze, 0.6=moderate, 1.0+=heavy smoke
+        const aodMod = aod <= 0.10 ? 1.00
+                     : aod <= 0.30 ? 1.00 - (aod - 0.10) * 0.50   // → 0.90
+                     : aod <= 0.60 ? 0.90 - (aod - 0.30) * 0.33   // → 0.80
+                     : aod <= 1.00 ? 0.80 - (aod - 0.60) * 0.375  // → 0.65
+                     : 0.65;
+        // Surface dust (Saharan events etc.)
+        const dustMod = dust > 100 ? 0.80 : dust > 50 ? 0.90 : dust > 20 ? 0.95 : 1.00;
+        _sgCenterAodMod = aodMod * dustMod;
+        console.log(`[SG-Heatmap] AOD=${aod.toFixed(3)} dust=${dust} → aodMod=${_sgCenterAodMod.toFixed(3)}`);
+    } catch (e) {
+        if (e.name !== 'AbortError') _sgCenterAodMod = 1.0;   // assume clean on error
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  SOLAR ALTITUDE  (determines astronomical darkness, no API needed)
+//  ─────────────────────────────────────────────────────────────────
+//  Accurate to ±0.5° — sufficient for twilight classification.
+//  Based on: Astronomical Algorithms, Jean Meeus (simplified).
+// ═══════════════════════════════════════════════════════════════════
+function _sgComputeSolarAltitude(lat, lon, dateObj) {
+    const now  = (dateObj instanceof Date) ? dateObj : new Date();
+    // Julian date
+    const JD   = now.getTime() / 86400000 + 2440587.5;
+    const n    = JD - 2451545.0;
+    // Mean longitude and mean anomaly (degrees)
+    const L    = ((280.460 + 0.9856474 * n) % 360 + 360) % 360;
+    const g    = ((357.528 + 0.9856003 * n) % 360 + 360) % 360;
+    const gr   = g * Math.PI / 180;
+    // Ecliptic longitude (degrees → radians)
+    const lam  = (L + 1.915 * Math.sin(gr) + 0.020 * Math.sin(2 * gr)) * Math.PI / 180;
+    // Obliquity of ecliptic (radians)
+    const eps  = (23.439 - 0.0000004 * n) * Math.PI / 180;
+    // Declination
+    const sinDec = Math.sin(eps) * Math.sin(lam);
+    const dec    = Math.asin(sinDec);
+    // Greenwich Mean Sidereal Time (degrees) then Local Hour Angle
+    const GMST = ((6.697375 + 0.0657098242 * n) % 24 + 24) % 24;
+    const LST  = ((GMST + now.getUTCHours() + now.getUTCMinutes() / 60 +
+                   now.getUTCSeconds() / 3600) % 24 * 15 + lon + 360) % 360;
+    const RA   = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam)) * 180 / Math.PI;
+    const HA   = ((LST - ((RA % 360) + 360) % 360 + 360) % 360) * Math.PI / 180;
+    const latr = lat * Math.PI / 180;
+    const sinAlt = Math.sin(dec) * Math.sin(latr) +
+                   Math.cos(dec) * Math.cos(latr) * Math.cos(HA);
+    return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
+}
+
+// Darkness fraction: 0.05 (midday) → 1.0 (true astronomical night)
+function _sgDarknessModifier(altDeg) {
+    if (altDeg >   0) return 0.05;   // daytime — sky completely washed out
+    if (altDeg > - 6) return 0.25;   // civil twilight
+    if (altDeg > -12) return 0.60;   // nautical twilight
+    if (altDeg > -18) return 0.85;   // astronomical twilight
+    return 1.0;                       // full astronomical night
+}
+
+// Human-readable darkness label + colour class — used to update the legend pill.
+// lat/lon are optional; when provided the sun's direction (rising vs setting)
+// is used to distinguish Sunrise from Sunset and Dawn from Dusk.
+function _sgDarknessLabel(altDeg, lat, lon) {
+    // Determine if sun is moving up (rising) or down (setting)
+    let rising = false;
+    if (lat !== undefined && lon !== undefined && altDeg > -18 && altDeg <= 0) {
+        const prevAlt = _sgComputeSolarAltitude(lat, lon,
+            new Date(Date.now() - 30 * 60000));   // 30 min ago
+        rising = altDeg > prevAlt;
+    }
+
+    if (altDeg >   0) return { text: 'Daytime', cls: 'text-amber-400' };
+
+    // Civil twilight  (0° → -6°)
+    if (altDeg > -6) return rising
+        ? { text: 'Sunrise', cls: 'text-orange-300' }
+        : { text: 'Sunset',  cls: 'text-orange-400' };
+
+    // Nautical + astronomical twilight  (-6° → -18°)
+    if (altDeg > -18) return rising
+        ? { text: 'Dawn', cls: 'text-violet-300' }
+        : { text: 'Dusk', cls: 'text-violet-300' };
+
+    // True astronomical night
+    const hr = new Date().getHours();   // device local hour
+    if (hr >= 23 || hr < 3) return { text: 'Midnight', cls: 'text-violet-200' };
+    return                           { text: 'Night',    cls: 'text-violet-200' };
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  TONIGHT'S ASTRONOMICAL NIGHT WINDOW  (pure math, no API)
+//  Finds which hourly-forecast indices (0-47, UTC midnight base)
+//  correspond to solar altitude < -18° and are still in the future.
+//  Returns [{index, timeStr}] used by _sgFetchGridScores.
+// ─────────────────────────────────────────────────────────────────
+function _sgComputeTonightHourIndices(lat, lon) {
+    const now    = new Date();
+    const base   = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()
+    ));
+    const result = [];
+    for (let i = 0; i < 48; i++) {
+        const t = new Date(base.getTime() + i * 3600000);
+        if (t.getTime() <= now.getTime()) continue;   // skip past hours
+        if (result.length >= 14) break;                // cap at 14 dark hours
+        const alt = _sgComputeSolarAltitude(lat, lon, t);
+        if (alt < -18) {
+            const y  = t.getUTCFullYear();
+            const mo = String(t.getUTCMonth() + 1).padStart(2, '0');
+            const d  = String(t.getUTCDate()).padStart(2, '0');
+            const h  = String(t.getUTCHours()).padStart(2, '0');
+            result.push({ index: i, timeStr: `${y}-${mo}-${d}T${h}:00` });
+        }
+    }
+    return result;
+}
+
+// "2026-06-25T23:00" → "23:00"
+function _sgFormatHourStr(timeStr) {
+    if (!timeStr) return '--';
+    return timeStr.slice(11, 16);
+}
+
+// Returns the best consecutive 2-hour window from an hourlyScores array
+function _sgComputeTonightBestWindow(hourlyScores) {
+    if (!hourlyScores || hourlyScores.length === 0) return null;
+    if (hourlyScores.length === 1) {
+        return { start: hourlyScores[0].timeStr, end: hourlyScores[0].timeStr, startIdx: 0,
+                 label: _sgFormatHourStr(hourlyScores[0].timeStr) };
+    }
+    let bestSum = -1, bestIdx = 0;
+    for (let i = 0; i < hourlyScores.length - 1; i++) {
+        const sum = (hourlyScores[i].score || 0) + (hourlyScores[i + 1]?.score || 0);
+        if (sum > bestSum) { bestSum = sum; bestIdx = i; }
+    }
+    const endIdx = Math.min(bestIdx + 2, hourlyScores.length - 1);
+    return {
+        start:    hourlyScores[bestIdx].timeStr,
+        end:      hourlyScores[endIdx].timeStr,
+        startIdx: bestIdx,
+        label:    `${_sgFormatHourStr(hourlyScores[bestIdx].timeStr)}–${_sgFormatHourStr(hourlyScores[endIdx].timeStr)}`
+    };
+}
+
+// Moon phase name + FA icon class + illumination %
+function _sgMoonPhaseName() {
+    const epoch   = 946_727_640_000;
+    const synodic = 29.53058867 * 86_400_000;
+    const phase   = ((Date.now() - epoch) % synodic + synodic) % synodic / synodic;
+    const pct     = Math.round(_sgMoonIllumination() * 100);
+    let name, faIcon;
+    if      (phase < 0.03 || phase >= 0.97) { name = 'New Moon';      faIcon = 'fa-circle text-slate-600'; }
+    else if (phase < 0.22)                   { name = 'Wax Crescent';  faIcon = 'fa-moon text-slate-300'; }
+    else if (phase < 0.28)                   { name = '1st Quarter';   faIcon = 'fa-moon text-slate-200'; }
+    else if (phase < 0.47)                   { name = 'Wax Gibbous';   faIcon = 'fa-moon text-yellow-200'; }
+    else if (phase < 0.53)                   { name = 'Full Moon';     faIcon = 'fa-circle text-yellow-300'; }
+    else if (phase < 0.72)                   { name = 'Wan Gibbous';   faIcon = 'fa-moon text-yellow-200'; }
+    else if (phase < 0.78)                   { name = 'Last Quarter';  faIcon = 'fa-moon text-slate-200'; }
+    else                                      { name = 'Wan Crescent'; faIcon = 'fa-moon text-slate-300'; }
+    return { name, faIcon, pct };
+}
+
+// Update legend pill with moon phase + best window (called after grid fetch)
+function _sgUpdateLegendPillInfo(centerHourlyScores) {
+    const { faIcon, pct, name } = _sgMoonPhaseName();
+    const moonEl = document.getElementById('sgMoonPhaseInfo');
+    if (moonEl) {
+        moonEl.innerHTML = `<i class="fa-solid ${faIcon.replace('text-','text-').split(' ').join(' ')} text-[8px]"></i>` +
+                           `<span class="text-[8px] font-bold text-yellow-200">${pct}%</span>`;
+        moonEl.title = name;
+    }
+    const win   = _sgComputeTonightBestWindow(centerHourlyScores);
+    const winEl = document.getElementById('sgBestWindowInfo');
+    if (winEl) winEl.textContent = win ? win.label : '--';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  7Timer! ASTRO CENTRE CALIBRATION
+//  ─────────────────────────────────────────────────────────────────
+//  Fetches 7Timer ASTRO for the grid centre (one request per refresh).
+//  The seeing + transparency values cross-calibrate the Open-Meteo
+//  atmospheric model against a purpose-built astronomical seeing model.
+//  Result stored in _sgCenter7TimerMod (0.70–1.00).
+// ═══════════════════════════════════════════════════════════════════
+async function _sgFetch7TimerCalibration(lat, lon, signal) {
+    try {
+        const url  = `https://www.7timer.info/bin/astro.php` +
+                     `?lon=${lon.toFixed(4)}&lat=${lat.toFixed(4)}` +
+                     `&ac=0&lang=en&unit=metric&output=json&tzshift=0`;
+        const resp = await fetch(url, { signal });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        if (!json?.dataseries?.length || !json.init) return;
+
+        // Parse model init time and find the dataseries entry closest to now
+        const init = String(json.init);
+        const initDate = new Date(Date.UTC(
+            parseInt(init.slice(0, 4)), parseInt(init.slice(4, 6)) - 1,
+            parseInt(init.slice(6, 8)), parseInt(init.slice(8, 10))
+        ));
+        const hoursFromInit = (Date.now() - initDate.getTime()) / 3600000;
+        const entry = json.dataseries.reduce((best, ds) =>
+            Math.abs(ds.timepoint - hoursFromInit) < Math.abs(best.timepoint - hoursFromInit)
+                ? ds : best
+        );
+
+        // seeing 1–7: 1=<0.5" (excellent) → 7=>2.5" (terrible) — lower is better
+        const seeMods  = [1.0, 1.00, 0.95, 0.88, 0.78, 0.65, 0.50, 0.35];
+        // transparency 1–7: 1=best → 7=worst
+        const transMods = [1.0, 1.00, 0.95, 0.88, 0.78, 0.65, 0.50, 0.35];
+        const seeM  = seeMods[ Math.max(1, Math.min(7, entry.seeing  ?? 4))] ?? 0.78;
+        const traM  = transMods[Math.max(1, Math.min(7, entry.transparency ?? 4))] ?? 0.78;
+        const calibMod = 0.5 * seeM + 0.5 * traM;
+
+        // Blend: 7Timer contributes 30% of the calibration weight
+        // (0.70 + 0.30 × calibMod) → range 0.805–1.00 for worst–best 7Timer conditions
+        _sgCenter7TimerMod = 0.70 + 0.30 * calibMod;
+        console.log(`[SG-Heatmap] 7Timer seeing=${entry.seeing} trans=${entry.transparency} → 7TimerMod=${_sgCenter7TimerMod.toFixed(3)}`);
+    } catch (e) {
+        if (e.name !== 'AbortError') _sgCenter7TimerMod = 1.0;  // neutral on error
+    }
+}
+
+// ── Internal: full refresh (fetch + draw) ────────────────────────
+function _sgRefresh() {
+    if (!_sgOverlayEnabled || !leafletMapInstance) return;
+
+    const { lat, lon } = _sgGetGpsCenter();
+
+    if (_sgFetchController) _sgFetchController.abort();
+    _sgFetchController = new AbortController();
+    const signal = _sgFetchController.signal;
+
+    // ① Compute solar altitude synchronously (no network, no latency)
+    _sgCenterSolarAlt    = _sgComputeSolarAltitude(lat, lon);
+    _sgCenterDarknessMod = _sgDarknessModifier(_sgCenterSolarAlt);
+    // Update the darkness status chip in the legend pill immediately
+    const darknessEl = document.getElementById('sgDarknessStatus');
+    if (darknessEl) {
+        const { text, cls } = _sgDarknessLabel(_sgCenterSolarAlt, lat, lon);
+        darknessEl.textContent = text;
+        darknessEl.className   = `text-[8px] font-bold uppercase tracking-widest text-center mt-0.5 ${cls}`;
+    }
+
+    // ② Compute tonight's astronomical night window (pure math, no API needed)
+    _sgTonightIndices = _sgComputeTonightHourIndices(lat, lon);
+
+    // ③ Clear session-scoped LP tile cache for fresh results
+    _sgLpTileFetchMap.clear();
+
+    const points = _sgSampleGrid(lat, lon, _sgOverlayRadiusKm);
+    _sgSyncCanvasSize();
+    _sgDrawLoadingRing(lat, lon);
+
+    // ④ Run all three centre-calibration fetches in parallel with the grid:
+    //    • AOD (aerosol optical depth)
+    //    • 7Timer ASTRO seeing/transparency
+    //    • Grid weather + LP tile scores
+    // AOD and 7Timer write globals consumed by _sgPointScore.
+    Promise.all([
+        _sgFetchCenterAod(lat, lon, signal),
+        _sgFetch7TimerCalibration(lat, lon, signal),
+        _sgFetchGridScores(points, signal)
+    ]).then(([,, samples]) => {
+        if (!_sgOverlayEnabled) return;
+        _sgHeatSamples = samples;
+        // Update legend pill: moon phase + best window (centre point is always index 0)
+        if (samples.length > 0 && samples[0].hourlyScores?.length > 0) {
+            _sgUpdateLegendPillInfo(samples[0].hourlyScores);
+        } else {
+            _sgUpdateLegendPillInfo([]);
+        }
+        _sgDrawHeatCanvas();
+    }).catch(err => {
+        if (err.name !== 'AbortError') console.warn('[SG-Heatmap] fetch error:', err);
+    });
+}
+
+// ── Internal: instant loading ring before fetch completes ────────
+function _sgDrawLoadingRing(lat, lon) {
+    if (!_sgHeatCanvas || !leafletMapInstance) return;
+    const ctx = _sgHeatCanvas.getContext('2d');
+    ctx.clearRect(0, 0, _sgHeatCanvas.width, _sgHeatCanvas.height);
+    const pt = leafletMapInstance.latLngToContainerPoint(L.latLng(lat, lon));
+    const rPx = _sgKmToPixels(leafletMapInstance, lat, lon, _sgOverlayRadiusKm);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, rPx, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(167,139,250,0.45)';
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([8, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+// ── Internal: Fibonacci spiral sampling ──────────────────────────
+// Returns array of { lat, lon } covering a circle of radiusKm
+function _sgSampleGrid(centerLat, centerLon, radiusKm) {
+    // Adaptive point count
+    let n;
+    if      (radiusKm <= 50)  n = 13;
+    else if (radiusKm <= 100) n = 19;
+    else if (radiusKm <= 200) n = 27;
+    else if (radiusKm <= 400) n = 37;
+    else                      n = 49;
+
+    const golden = Math.PI * (3 - Math.sqrt(5)); // golden angle
+    const R_EARTH = 6371;
+    const points  = [];
+
+    // Always include centre
+    points.push({ lat: centerLat, lon: centerLon });
+
+    for (let i = 1; i < n; i++) {
+        const r     = radiusKm * Math.sqrt(i / (n - 1));
+        const theta = i * golden;
+
+        // Convert polar (r, theta) on the sphere to lat/lon offset
+        const dLat = (r / R_EARTH) * (180 / Math.PI) * Math.cos(theta);
+        const dLon = (r / R_EARTH) * (180 / Math.PI) * Math.sin(theta)
+                     / Math.cos(centerLat * Math.PI / 180);
+
+        points.push({
+            lat: Math.max(-85, Math.min(85, centerLat + dLat)),
+            lon: ((centerLon + dLon + 540) % 360) - 180
+        });
+    }
+    return points;
+}
+
+// ── Internal: extract one hour's weather object from hourly arrays ───────────
+function _sgExtractHourlySlot(hourly, index) {
+    if (!hourly) return null;
+    const idx = Math.max(0, Math.min(index, (hourly.time?.length ?? 1) - 1));
+    return {
+        cloud_cover:          hourly.cloud_cover?.[idx]          ?? 50,
+        precipitation:        hourly.precipitation?.[idx]        ?? 0,
+        relative_humidity_2m: hourly.relative_humidity_2m?.[idx] ?? 70,
+        temperature_2m:       hourly.temperature_2m?.[idx]       ?? 15,
+        dew_point_2m:         hourly.dew_point_2m?.[idx]         ?? 10,
+        wind_speed_10m:       hourly.wind_speed_10m?.[idx]       ?? 5,
+        wind_speed_80m:       hourly.wind_speed_80m?.[idx]       ?? 10,
+        wind_speed_180m:      hourly.wind_speed_180m?.[idx]      ?? 12,
+        weather_code:         hourly.weather_code?.[idx]         ?? 0,
+    };
+}
+
+// ── Internal: fetch tonight's hourly forecast for each grid point ─────────────
+// Replaces current-conditions mode with a 48-h hourly forecast.
+// If no tonight hours are available (polar summer / early morning), falls back
+// to the current UTC hour in the hourly data.
+async function _sgFetchGridScores(points, signal) {
+    const FIELDS = 'cloud_cover,precipitation,relative_humidity_2m,' +
+                   'temperature_2m,dew_point_2m,' +
+                   'wind_speed_10m,wind_speed_80m,wind_speed_180m,weather_code';
+
+    const nightIndices = _sgTonightIndices;   // [{index, timeStr}] set in _sgRefresh
+    const hasNight     = nightIndices.length > 0;
+
+    // Fallback index when no astronomical night is found (polar summer / daytime)
+    const now          = new Date();
+    const base         = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const fallbackIdx  = Math.min(47, Math.floor((now.getTime() - base.getTime()) / 3600000));
+
+    // Kick off ALL LP tile fetches immediately — they run in parallel
+    const bortleJobs = points.map(pt =>
+        _sgSampleBortle(pt.lat, pt.lon, signal).catch(() => null)
+    );
+
+    const results = [];
+    const CHUNK   = 5;
+
+    for (let i = 0; i < points.length; i += CHUNK) {
+        const slice = points.slice(i, i + CHUNK);
+
+        const [weatherBatch, bortleSlice] = await Promise.all([
+            Promise.allSettled(
+                slice.map(pt =>
+                    fetch(
+                        `https://api.open-meteo.com/v1/forecast` +
+                        `?latitude=${pt.lat.toFixed(4)}&longitude=${pt.lon.toFixed(4)}` +
+                        `&hourly=${FIELDS}&forecast_days=2&wind_speed_unit=ms&timezone=UTC`,
+                        { signal }
+                    )
+                    .then(r => r.ok ? r.json() : null)
+                    .catch(() => null)
+                )
+            ),
+            Promise.all(bortleJobs.slice(i, i + CHUNK))
+        ]);
+
+        slice.forEach((pt, j) => {
+            const json   = weatherBatch[j].status === 'fulfilled' ? weatherBatch[j].value : null;
+            const bortle = bortleSlice[j] ?? null;
+            const elev   = json?.elevation ?? 0;
+            const hourly = json?.hourly   || null;
+
+            const hourlyScores = [];
+            let score;
+
+            if (hasNight && hourly) {
+                // Score every tonight hour — darkness mod forced to 1.0 (it IS night)
+                nightIndices.forEach(({ index: idx, timeStr }) => {
+                    const h = _sgExtractHourlySlot(hourly, idx);
+                    hourlyScores.push({
+                        timeStr,
+                        score:    _sgPointScore(h, bortle, elev, 1.0),
+                        cloud:    h?.cloud_cover          ?? null,
+                        humidity: h?.relative_humidity_2m ?? null,
+                    });
+                });
+                score = hourlyScores.reduce((a, b) => a + b.score, 0) / hourlyScores.length;
+            } else {
+                // Fallback: use current hour (daytime or polar summer)
+                const h = hourly ? _sgExtractHourlySlot(hourly, fallbackIdx) : null;
+                score = _sgPointScore(h, bortle, elev);
+            }
+
+            results.push({
+                lat:   pt.lat,
+                lon:   pt.lon,
+                score: Math.max(0, Math.min(100, score)),
+                bortle,
+                hourlyScores
+            });
+        });
+
+        if (i + CHUNK < points.length) await new Promise(res => setTimeout(res, 80));
+    }
+    return results;
+}
+
+// ── Internal: full multi-modal point score ───────────────────────
+//
+//  DATA SOURCES (7 signals per point + 4 centre-calibration globals):
+//    Per-point (Open-Meteo):  cloud, precip, humidity, dew point,
+//                             wind @10m/80m/180m, weather code, elevation
+//    Per-point (LP tile):     Bortle 1–9 from djlorenz Falchi 2022
+//    Centre globals (shared): _sgCenterAodMod     – aerosol/smoke (Open-Meteo AQ)
+//                             _sgCenter7TimerMod  – ASTRO seeing/transparency (7Timer)
+//                             _sgCenterDarknessMod – solar altitude twilight gate
+//                             _sgMoonIllumination() – synodic moon phase
+//
+//  SCORE FORMULA:
+//    atmosphericScore = cloud(50%) + precip(20%) + hum(15%) + dewDep(15%) + elevBonus
+//    atmosphericScore ×= (0.70 + 0.30 × _sgCenter7TimerMod)   ← 7Timer calibration
+//    lpScore          = Bortle → 0–100
+//    baseScore        = atmosphericScore × 0.60 + lpScore × 0.40
+//    finalScore       = baseScore × seeingMod × wcPenalty × moonMod × aodMod × darknessMod
+//
+// forceDarkMod: optional — pass 1.0 when scoring tonight's hours (sun is below -18°)
+function _sgPointScore(current, bortle, elev, forceDarkMod) {
+    const cloud   = current?.cloud_cover          ?? 50;   // 0–100 %
+    const precip  = current?.precipitation        ?? 0;    // mm/h
+    const hum     = current?.relative_humidity_2m ?? 70;   // %
+    const wind10  = current?.wind_speed_10m       ?? 5;    // m/s  surface
+    const wind80  = current?.wind_speed_80m       ?? 10;   // m/s  upper boundary layer
+    const wind180 = current?.wind_speed_180m      ?? 12;   // m/s  near jet-stream
+    const wcode   = current?.weather_code         ?? 0;
+    const temp    = current?.temperature_2m       ?? 15;   // °C
+    const dew     = current?.dew_point_2m         ?? 10;   // °C
+    const elevM   = elev                          ?? 0;    // metres ASL
+
+    // ── Atmospheric transparency (per-point weather) ──────────────
+    const cloudScore  = Math.max(0, 100 - cloud);
+
+    const humScore    = hum <= 50 ? 100
+                      : hum <= 70 ? 100 - (hum - 50) * 2.5
+                      : hum <= 90 ? 50  - (hum - 70) * 2.0
+                      : 10;
+
+    const precipScore = precip === 0 ? 100
+                      : precip < 0.1  ? 75
+                      : precip < 0.5  ? 40
+                      : 5;
+
+    // Dew point depression: temp − dew < 3°C = fog / dew on optics imminent
+    const dewDep   = temp - dew;
+    const dewScore = dewDep >= 10 ? 100
+                   : dewDep >=  5 ? 60 + (dewDep - 5)  * 8
+                   : dewDep >=  3 ? 30 + (dewDep - 3) * 15
+                   : 10;
+
+    // Elevation: less atmosphere, drier air (max +6 pts at ≥1000 m)
+    const elevBonus = Math.min(6, elevM / 167);
+
+    let atmosphericScore = Math.min(100,
+        cloudScore * 0.50 + precipScore * 0.20 + humScore * 0.15 + dewScore * 0.15 + elevBonus
+    );
+
+    // ── 7Timer ASTRO cross-calibration ───────────────────────────
+    // Blends 30% of 7Timer's independent seeing/transparency model
+    // into the atmospheric score.  Range: 0.70–1.00.
+    atmosphericScore = atmosphericScore * (0.70 + 0.30 * _sgCenter7TimerMod);
+
+    // ── Light pollution (per-point LP tile) ───────────────────────
+    const lpScore   = (bortle !== null) ? _sgBortleToScore(bortle) : atmosphericScore;
+    const baseScore = (bortle !== null)
+        ? atmosphericScore * 0.60 + lpScore * 0.40
+        : atmosphericScore;
+
+    // ── Multipliers ───────────────────────────────────────────────
+    // Seeing: worst of three wind levels wins.
+    // 10m = surface shear, 80m = boundary layer, 180m = jet-stream proximity.
+    const s10  = wind10  <=  3 ? 1.0 : wind10  <=  7 ? 1.0 - (wind10  -  3) * 0.040 : 0.84;
+    const s80  = wind80  <= 10 ? 1.0 : wind80  <= 25 ? 1.0 - (wind80  - 10) * 0.012 : 0.82;
+    const s180 = wind180 <= 20 ? 1.0 : wind180 <= 40 ? 1.0 - (wind180 - 20) * 0.010 : 0.80;
+    const seeingMod = Math.min(s10, s80, s180);
+
+    // Weather code hard penalties
+    const wcPenalty = wcode >= 95 ? 0.30
+                    : wcode >= 80 ? 0.60
+                    : wcode >= 61 ? 0.75
+                    : wcode >= 51 ? 0.88
+                    : 1.0;
+
+    // Moon: full moon reduces effective sky darkness by up to 30%
+    const moonMod = 1 - _sgMoonIllumination() * 0.30;
+
+    // Aerosol modifier (wildfire smoke, Saharan dust — regional, set at centre)
+    const aodMod = _sgCenterAodMod;
+
+    // Darkness gate: use forced value when scoring known-night hours, otherwise current state
+    const darkMod = (forceDarkMod !== undefined) ? forceDarkMod : _sgCenterDarknessMod;
+
+    return Math.max(0, Math.min(100,
+        baseScore * seeingMod * wcPenalty * moonMod * aodMod * darkMod
+    ));
+}
+
+// ── Internal: draw gradient blobs on canvas ───────────────────────
+function _sgDrawHeatCanvas() {
+    if (!_sgHeatCanvas || !leafletMapInstance) return;
+    if (_sgDrawPending) return;
+    _sgDrawPending = true;
+    requestAnimationFrame(() => {
+        _sgDrawPending = false;
+        _sgSyncCanvasSize();
+
+        const ctx = _sgHeatCanvas.getContext('2d');
+        const W   = _sgHeatCanvas.width;
+        const H   = _sgHeatCanvas.height;
+        ctx.clearRect(0, 0, W, H);
+
+        if (_sgHeatSamples.length === 0) return;
+
+        // Use GPS center for blob radius so scale is anchored to the user's location
+        const { lat: gLat, lon: gLon } = _sgGetGpsCenter();
+        const blobKm = _sgOverlayRadiusKm / Math.sqrt(_sgHeatSamples.length) * 2.2;
+        const blobRadiusPx = Math.max(40, _sgKmToPixels(leafletMapInstance, gLat, gLon, blobKm));
+
+        _sgHeatSamples.forEach(sample => {
+            const pt = leafletMapInstance.latLngToContainerPoint(
+                L.latLng(sample.lat, sample.lon)
+            );
+            const { r, g, b } = _sgScoreToRgb(sample.score);
+            const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, blobRadiusPx);
+            // Solid core fading out — no mix-blend-mode, pure alpha transparency
+            grad.addColorStop(0,    `rgba(${r},${g},${b},0.82)`);
+            grad.addColorStop(0.45, `rgba(${r},${g},${b},0.45)`);
+            grad.addColorStop(1,    `rgba(${r},${g},${b},0.00)`);
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, blobRadiusPx, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+        });
+
+        // ── Score labels (only when _sgShowLabels is on) ─────────────────────
+        _sgLabelHitboxes = [];
+        if (_sgShowLabels) {
+            const fontSize = Math.max(10, Math.min(14, blobRadiusPx / 4));
+            const hitR     = Math.max(fontSize * 2.5, 22);  // tap target radius (px)
+            ctx.font = `bold ${fontSize}px system-ui,sans-serif`;
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'middle';
+
+            _sgHeatSamples.forEach(sample => {
+                const pt = leafletMapInstance.latLngToContainerPoint(
+                    L.latLng(sample.lat, sample.lon)
+                );
+                const { r, g, b } = _sgScoreToRgb(sample.score);
+                const label = Math.round(sample.score) + '%';
+                // Dark halo for legibility
+                ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+                ctx.lineWidth   = fontSize * 0.35;
+                ctx.lineJoin    = 'round';
+                ctx.strokeText(label, pt.x, pt.y);
+                // Coloured fill matching the blob
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                ctx.fillText(label, pt.x, pt.y);
+                // Store hitbox for click detection (also carries data for bottom HUD)
+                _sgLabelHitboxes.push({
+                    x: pt.x, y: pt.y,
+                    lat: sample.lat, lon: sample.lon,
+                    score:        sample.score,
+                    bortle:       sample.bortle       ?? null,
+                    hourlyScores: sample.hourlyScores ?? [],
+                    r: hitR
+                });
+            });
+            // Enable pointer events so clicks are received
+            _sgHeatCanvas.style.pointerEvents = 'auto';
+        } else {
+            // No labels → pass all touch/click events through to the map
+            _sgHeatCanvas.style.pointerEvents = 'none';
+        }
+    });
+}
+
+// ── Public: show/hide canvas (called from aap.js layer toggle) ───────────────
+function sgSetCanvasVisible(visible) {
+    if (_sgHeatCanvas) {
+        _sgHeatCanvas.style.display = visible ? 'block' : 'none';
+    }
+    if (_sgLpTileLayer && leafletMapInstance) {
+        if (visible) {
+            if (!leafletMapInstance.hasLayer(_sgLpTileLayer)) {
+                leafletMapInstance.addLayer(_sgLpTileLayer);
+            }
+        } else {
+            leafletMapInstance.removeLayer(_sgLpTileLayer);
+        }
+    }
+}
+
+// ── Public: toggle score labels (called from aap.js labels toggle) ──────────
+function sgSetShowLabels(on) {
+    _sgShowLabels = !!on;
+    if (_sgHeatSamples.length > 0) _sgDrawHeatCanvas();
+}
+
+// ── Internal: score → RGB (screen-blend palette) ─────────────────
+// score 0 = deep red, 30 = orange, 50 = amber, 70 = emerald, 90+ = violet
+function _sgScoreToRgb(score) {
+    const stops = [
+        { t: 0,   r: 220, g: 38,  b: 38  },   // red
+        { t: 30,  r: 234, g: 88,  b: 12  },   // orange
+        { t: 50,  r: 217, g: 119, b: 6   },   // amber
+        { t: 70,  r: 16,  g: 185, b: 129 },   // emerald
+        { t: 90,  r: 124, g: 58,  b: 237 },   // violet
+        { t: 100, r: 167, g: 139, b: 250 },   // light violet
+    ];
+    const s = Math.max(0, Math.min(100, score));
+    let lo = stops[0], hi = stops[stops.length - 1];
+    for (let i = 0; i < stops.length - 1; i++) {
+        if (s >= stops[i].t && s <= stops[i + 1].t) {
+            lo = stops[i]; hi = stops[i + 1]; break;
+        }
+    }
+    const t = lo.t === hi.t ? 0 : (s - lo.t) / (hi.t - lo.t);
+    return {
+        r: Math.round(lo.r + (hi.r - lo.r) * t),
+        g: Math.round(lo.g + (hi.g - lo.g) * t),
+        b: Math.round(lo.b + (hi.b - lo.b) * t),
+    };
+}
+
+// ── Internal: Bortle class → plain-English label for the spot HUD ─
+function _sgBortleLabel(bortle) {
+    if (bortle === null || bortle === undefined)
+        return { short: 'Unknown', icon: 'fa-question', color: '#64748b' };
+    if (bortle <= 2) return { short: 'Dark Sky',  icon: 'fa-moon',     color: '#a78bfa' };
+    if (bortle <= 4) return { short: 'Rural',     icon: 'fa-tree',     color: '#34d399' };
+    if (bortle <= 5) return { short: 'Suburban',  icon: 'fa-house',    color: '#fbbf24' };
+    if (bortle <= 7) return { short: 'Town',      icon: 'fa-building', color: '#f97316' };
+                     return { short: 'City',      icon: 'fa-city',     color: '#f87171' };
+}
+
+// ── Public: show bottom HUD compact pill for a tapped score label ─
+//  Only the compact bar is shown initially. Details expand on "More".
+function sgShowSpotDetail(hitbox) {
+    const hud = document.getElementById('sgSpotHUD');
+    if (!hud) return;
+    _sgSpotDetailData = hitbox;
+
+    const sc = Math.round(hitbox.score || 0);
+    const { r, g, b } = _sgScoreToRgb(sc);
+
+    // Score chip in compact bar
+    const scoreNumEl = document.getElementById('sgSpotScoreNum');
+    if (scoreNumEl) { scoreNumEl.textContent = sc + '%'; scoreNumEl.style.color = `rgb(${r},${g},${b})`; }
+    const scoreBadgeEl = document.getElementById('sgSpotScoreBadge');
+    if (scoreBadgeEl) {
+        scoreBadgeEl.style.background  = `rgba(${r},${g},${b},0.15)`;
+        scoreBadgeEl.style.borderColor = `rgba(${r},${g},${b},0.4)`;
+    }
+
+    // Best window label (compact bar)
+    const hrs   = hitbox.hourlyScores || [];
+    const win   = _sgComputeTonightBestWindow(hrs);
+    const winEl = document.getElementById('sgSpotBestWindowLabel');
+    if (winEl) winEl.textContent = win ? win.label : '--';
+
+    // Pre-populate hidden details so they're ready when expanded
+    const moonPct  = Math.round(_sgMoonIllumination() * 100);
+    const moonEl   = document.getElementById('sgSpotMoon');
+    if (moonEl) moonEl.textContent = moonPct + '%';
+
+    const bortleEl   = document.getElementById('sgSpotBortle');
+    const bortleIcon = document.getElementById('sgSpotBortleIcon');
+    const bl = _sgBortleLabel(hitbox.bortle);
+    if (bortleEl)   { bortleEl.textContent = bl.short; bortleEl.style.color = bl.color; }
+    if (bortleIcon) { bortleIcon.className = `fa-solid ${bl.icon} text-[11px] block mb-1`; bortleIcon.style.color = bl.color; }
+
+    const bestHour = win ? hrs[win.startIdx] : (hrs[0] || null);
+    const cloudEl  = document.getElementById('sgSpotCloud');
+    if (cloudEl) cloudEl.textContent = (bestHour?.cloud !== null && bestHour?.cloud !== undefined)
+        ? Math.round(bestHour.cloud) + '%' : '--%';
+    const humEl = document.getElementById('sgSpotHumidity');
+    if (humEl) humEl.textContent = (bestHour?.humidity !== null && bestHour?.humidity !== undefined)
+        ? Math.round(bestHour.humidity) + '%' : '--%';
+
+    // Hourly strip
+    const strip = document.getElementById('sgSpotHourlyStrip');
+    if (strip) {
+        if (hrs.length > 0) {
+            const bestStartIdx = win ? win.startIdx : 0;
+            strip.innerHTML = hrs.map((h, i) => {
+                const { r: hr, g: hg, b: hb } = _sgScoreToRgb(h.score);
+                const label  = h.timeStr ? h.timeStr.slice(11, 16) : ('H' + i);
+                const isBest = (i === bestStartIdx || i === bestStartIdx + 1);
+                const bg     = isBest ? 'rgba(124,58,237,0.28)' : 'rgba(30,27,46,0.9)';
+                const border = isBest ? '1px solid rgba(139,92,246,0.55)' : '1px solid transparent';
+                return `<div style="display:flex;flex-direction:column;align-items:center;` +
+                       `min-width:46px;border-radius:10px;padding:6px 4px;background:${bg};border:${border};">` +
+                       `<span style="font-size:9px;color:#64748b;line-height:1.2">${label}</span>` +
+                       `<span style="font-size:13px;font-weight:900;color:rgb(${hr},${hg},${hb});line-height:1.3">${Math.round(h.score)}%</span>` +
+                       `</div>`;
+            }).join('');
+        } else {
+            strip.innerHTML = '<span style="font-size:11px;color:#64748b;padding:6px 0">No night hours in range</span>';
+        }
+    }
+
+    // Ensure details panel is collapsed and chevron points up (ready for expand)
+    const detailsPanel = document.getElementById('sgSpotDetailsPanel');
+    const chevron      = document.getElementById('sgSpotMoreChevron');
+    if (detailsPanel) detailsPanel.classList.add('hidden');
+    if (chevron)      chevron.style.transform = 'rotate(0deg)';
+
+    // Slide up (compact pill only)
+    hud.classList.remove('hidden');
+    hud.style.transform  = 'translateY(100%)';
+    hud.style.transition = 'transform 0.22s cubic-bezier(0.4,0,0.2,1)';
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => { hud.style.transform = 'translateY(0)'; });
+    });
+}
+
+// ── Public: toggle the expanded details panel ─────────────────────
+//  Called by the "More / Less" button inside the compact pill bar.
+function sgToggleSpotDetail() {
+    const panel   = document.getElementById('sgSpotDetailsPanel');
+    const chevron = document.getElementById('sgSpotMoreChevron');
+    const btn     = document.getElementById('sgSpotMoreBtn');
+    if (!panel) return;
+
+    const isExpanded = !panel.classList.contains('hidden');
+
+    if (isExpanded) {
+        // Collapse
+        panel.classList.add('hidden');
+        if (chevron) chevron.style.transform = 'rotate(0deg)';
+        if (btn)     btn.querySelector('span').textContent = 'More';
+    } else {
+        // Expand
+        panel.classList.remove('hidden');
+        if (chevron) chevron.style.transform = 'rotate(180deg)';
+        if (btn)     btn.querySelector('span').textContent = 'Less';
+    }
+}
+
+// ── Public: dismiss spot detail HUD completely ────────────────────
+function sgHideSpotDetail() {
+    const hud = document.getElementById('sgSpotHUD');
+    if (!hud || hud.classList.contains('hidden')) return;
+    hud.style.transition = 'transform 0.18s cubic-bezier(0.4,0,0.2,1)';
+    hud.style.transform  = 'translateY(100%)';
+    setTimeout(() => {
+        hud.classList.add('hidden');
+        hud.style.transform = '';
+        // Reset expanded state for next open
+        const panel   = document.getElementById('sgSpotDetailsPanel');
+        const chevron = document.getElementById('sgSpotMoreChevron');
+        const btn     = document.getElementById('sgSpotMoreBtn');
+        if (panel)   panel.classList.add('hidden');
+        if (chevron) chevron.style.transform = 'rotate(0deg)';
+        if (btn)     { const sp = btn.querySelector('span'); if (sp) sp.textContent = 'More'; }
+        _sgSpotDetailData = null;
+    }, 200);
+}
+
+// ── Internal: convert km to pixels at given lat/lon ───────────────
+function _sgKmToPixels(map, lat, lon, km) {
+    if (!map || km <= 0) return 80;
+    try {
+        const p1 = map.latLngToContainerPoint(L.latLng(lat, lon));
+        const p2 = map.latLngToContainerPoint(
+            L.latLng(lat + (km / 111.32), lon)
+        );
+        return Math.max(20, Math.abs(p2.y - p1.y));
+    } catch (_) { return 80; }
+}

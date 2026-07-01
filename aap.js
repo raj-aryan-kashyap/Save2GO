@@ -31,15 +31,21 @@ async function _reverseGeocode(lat, lon) {
         );
         const data = await res.json();
         const addr = data.address || {};
+        // Preserve settlement tier for Bortle scale estimation
+        const tier = addr.city    ? 'city'
+                   : addr.town    ? 'town'
+                   : addr.village ? 'village'
+                   : 'unknown';
         const result = {
             city:      addr.city || addr.town || addr.village || addr.county || '',
             country:   (addr.country_code || '').toUpperCase(),
+            tier,
             fetchedAt: Date.now(),
         };
         _nominatimCache.set(key, result);
         return result;
     } catch (_) {
-        return { city: '', country: '', fetchedAt: Date.now() };
+        return { city: '', country: '', tier: 'unknown', fetchedAt: Date.now() };
     }
 }
 
@@ -310,7 +316,7 @@ async function populateUserDropdown() {
         // If we had nothing from cache either, show the error state
         if (cachedUsers.length === 0) {
             const select = document.getElementById('user-dropdown-select');
-            if (select) select.innerHTML = '<option value="">Error: Server Unreachable</option>';
+            if (select) select.innerHTML = '<option value="">Server Error</option>';
         }
         // Settings dropdown keeps whatever cache populated — still usable
     }
@@ -573,10 +579,10 @@ async function submitNewSpotToCloud() {
     const notes = document.getElementById('new-notes').value;
     const submitBtn = document.getElementById('form-submit-btn');
 
-    if(!keyword) { alert("Provide a keyword title for the spot asset."); return; }
-    if(!url && !mapsUrl) { alert("Please provide at least a Reference Link or a Google Maps Link."); return; }
+    if(!keyword) { alert("Enter a name for the spot."); return; }
+    if(!url && !mapsUrl) { alert("Please provide a reference link or a Google Maps link."); return; }
     
-    submitBtn.innerHTML = "<i class='fa-solid fa-arrows-rotate animate-spin mr-2'></i> Injecting into Sheet Database..."; 
+    submitBtn.innerHTML = "<i class='fa-solid fa-arrows-rotate animate-spin mr-2'></i> Saving to database..."; 
     submitBtn.disabled = true;
 
     try {
@@ -601,7 +607,7 @@ async function submitNewSpotToCloud() {
         document.getElementById('new-keyword').value = ''; 
         document.getElementById('new-notes').value = '';
         toggleQuickAddModal(false); setTimeout(() => syncData(true), 1000);
-    } catch(err) { alert("Submission timed out."); } 
+    } catch(err) { alert("Submission timed out"); } 
     finally { submitBtn.innerHTML = "<i class='fa-solid fa-floppy-disk mr-2'></i> Save"; submitBtn.disabled = false; }
 }
 
@@ -814,9 +820,9 @@ let _aiAssistRetryFn      = null;   // set to the right retry closure on failure
 const _AI_ASSIST_DRAFT_KEY = 'ai_assist_notepad_draft';
 
 const _AI_ASSIST_STEPS = {
-    1: { title: 'Sending to AI…',      sub: 'Gemini is analyzing your travel data'    },
-    2: { title: 'Response received',        sub: 'Verifying extracted data structure…' },
-    3: { title: 'Saving to database…', sub: 'Writing your spot to Mastervalue'         },
+    1: { title: 'Sending to AI...',      sub: 'Gemini is analysing your travel data'    },
+    2: { title: 'Response received',        sub: 'Checking data structure...' },
+    3: { title: 'Saving to database...', sub: 'Saving your spot...'         },
 };
 
 /* ── Public ─────────────────────────────────────────────────────────────── */
@@ -854,7 +860,7 @@ function submitAIAssistNotepad() {
     const input = document.getElementById('aiAssistNotepadInput');
     const text  = input ? input.value.trim() : '';
     if (!text) {
-        _aiAssistShowStatus('error', '⚠', 'Please paste or type some travel data before submitting.');
+        _aiAssistShowStatus('error', '⚠', 'Please paste or type some travel data before submitting');
         return;
     }
     _aiAssistParsedData = null;
@@ -905,7 +911,7 @@ async function _aiAssistStep1(text) {
         _aiAssistShowError(
             isNet ? 'No Response from Server' : 'Connection Error',
             isNet
-                ? 'Could not reach the server. Check your internet connection and try again.'
+                ? 'No server connection. Check your internet and try again.'
                 : 'A server error occurred: ' + msg,
             true
         );
@@ -930,9 +936,9 @@ async function _aiAssistStep3(text) {
             _aiAssistRetryFn = function() { _aiAssistStep3(text); };
             _aiAssistShowPanel('error');
             _aiAssistShowError(
-                'Database Write Failed',
+                'Save Error',
                 (json && json.error)
-                    || 'AI processed your data but saving to the sheet failed. Your AI result is preserved — tap Retry to try again.',
+                    || 'AI processed your data but saving failed. Your result is saved. Tap Retry to try again.',
                 true
             );
             return;
@@ -1042,10 +1048,10 @@ function _aiAssistShowSuccess(count, newIds) {
     }
     if (subEl) {
         if (isMulti) {
-            subEl.textContent = count + ' locations saved to MasterVault'
+            subEl.textContent = count + ' locations saved to Database'
                 + (newIds && newIds.length ? ' (IDs #' + newIds[0] + '–#' + newIds[newIds.length - 1] + ')' : '');
         } else {
-            subEl.textContent = 'Saved to MasterVault'
+            subEl.textContent = 'Saved to Database'
                 + (newIds && newIds.length ? ' (Row #' + newIds[0] + ')' : '');
         }
     }
@@ -2321,7 +2327,7 @@ function showHiddenPinsBannerHUD(count) {
     if (subtitle) {
         const word = count === 1 ? 'spot' : 'spots';
         const verb = count === 1 ? "it's" : "they're";
-        subtitle.textContent = `You're near ${count} saved ${word}, but ${verb} hidden by the active type filter.`;
+        subtitle.textContent = `Saved spots are nearby but hidden by your filter.`;
     }
 
     // Make sure the bubble is gone before showing the banner
@@ -2565,7 +2571,8 @@ async function refreshAllWeatherBadges() {
 const _wdDataCache         = new Map();            // "lat,lon" → { data, fetchedAt } — in-session mem cache
 const _WD_CACHE_TTL        = 5  * 60 * 1000;      // 5 min  — how long mem cache is considered fresh
 const _WD_BG_INTERVAL      = 30 * 60 * 1000;      // 30 min — background refresh cadence (drawer closed)
-const _WD_LS_KEY           = 'compass_wd_cache_v2'; // localStorage key for persisted weather cache
+const _WD_LS_KEY           = 'compass_wd_cache_v5'; // localStorage key for persisted weather cache
+let   _wdActiveTab         = 'weather';             // 'weather' | 'stargazing'
 let   _wdRefreshInterval   = null;                 // in-drawer live-refresh (5 min)
 let   _wdStatusTickId      = null;                 // 1-min tick to keep "Updated X mins ago" current
 let   _wdBgRefreshInterval = null;                 // background refresh while drawer is closed
@@ -2610,13 +2617,13 @@ function _wdSetSyncStatus(state) {
     if (state === 'syncing') {
         el.innerHTML =
             `<i class="fa-solid fa-rotate fa-spin text-[8px] text-sky-500/70"></i>` +
-            `<span>Syncing…</span>`;
+            `<span>Syncing...</span>`;
         el.className = 'flex items-center gap-1 mt-1 text-[9px] font-bold text-slate-500';
     } else {
         if (!_wdLastFetchedAt) { el.innerHTML = ''; return; }
         const mins  = Math.round((Date.now() - _wdLastFetchedAt) / 60000);
         const label = mins < 1
-            ? 'Updated just now'
+            ? 'Updated Just Now'
             : `Updated ${mins} min${mins !== 1 ? 's' : ''} ago`;
         el.innerHTML =
             `<i class="fa-solid fa-circle-check text-[8px] text-emerald-500/80"></i>` +
@@ -2657,6 +2664,9 @@ function openWeatherDrawer() {
 
     // Reset "Don't show on map" toggle — it's a per-session pending action, not persistent state
     _setWeatherHideToggle(false);
+
+    // Restore last-visited tab (weather or stargazing)
+    _wdSwitchTabUI(_wdActiveTab || 'weather');
 
     // Resolve best-available coordinates (live GPS → last-known → globals)
     let lat = userLat, lon = userLon;
@@ -2776,7 +2786,10 @@ async function _fetchWeatherDrawerData(lat, lon) {
                 `?latitude=${latStr}&longitude=${lonStr}` +
                 `&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation` +
                 `,weather_code,wind_speed_10m,uv_index,is_day` +
-                `&hourly=temperature_2m,weather_code,precipitation_probability,wind_speed_10m,is_day` +
+                `&hourly=temperature_2m,weather_code,precipitation_probability,precipitation,wind_speed_10m,is_day` +
+                `,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high` +
+                `,relative_humidity_2m,dew_point_2m,visibility` +
+                `,cape,lifted_index,wind_speed_250hPa` +
                 `&daily=sunrise,sunset` +
                 `&timezone=auto&forecast_days=2`
             ),
@@ -2822,28 +2835,43 @@ async function _fetchWeatherDrawerData(lat, lon) {
         const hourly = [];
         for (let i = startIdx; i < Math.min(startIdx + 24, htimes.length); i++) {
             hourly.push({
-                time:   htimes[i],                                   // "2024-01-15T15:00"
-                temp:   Math.round(wx.hourly.temperature_2m[i] ?? 0),
-                code:   wx.hourly.weather_code[i] ?? 0,
-                isDay:  wx.hourly.is_day[i] === 1,
-                precip: wx.hourly.precipitation_probability[i] ?? 0,
+                time:           htimes[i],
+                temp:           Math.round(wx.hourly.temperature_2m[i] ?? 0),
+                code:           wx.hourly.weather_code[i] ?? 0,
+                isDay:          wx.hourly.is_day[i] === 1,
+                precip:         wx.hourly.precipitation_probability[i] ?? 0,
+                // Stargazing fields
+                cloudCover:     wx.hourly.cloud_cover?.[i]      ?? null,
+                cloudCoverLow:  wx.hourly.cloud_cover_low?.[i]  ?? null,
+                cloudCoverMid:  wx.hourly.cloud_cover_mid?.[i]  ?? null,
+                cloudCoverHigh: wx.hourly.cloud_cover_high?.[i] ?? null,
+                humidity:       wx.hourly.relative_humidity_2m?.[i] ?? null,
+                dewPoint:       wx.hourly.dew_point_2m?.[i]     ?? null,
+                visibility:     wx.hourly.visibility?.[i]       ?? null, // meters
+                windSpeed:      wx.hourly.wind_speed_10m[i]     ?? 0,
+                // Atmospheric stability / seeing fields
+                precipMm:       wx.hourly.precipitation?.[i]           ?? 0,
+                cape:           wx.hourly.cape?.[i]              ?? null, // J/kg convective instability
+                liftedIndex:    wx.hourly.lifted_index?.[i]      ?? null, // atmospheric stability index
+                wind250:        wx.hourly.wind_speed_250hPa?.[i] ?? null, // km/h jet-stream layer
             });
         }
 
         const data = {
-            city:        geo.city    || '',
-            country:     geo.country || '',
-            description: _wmoDescription(cur.weather_code),
-            wmoCode:     cur.weather_code,
-            isDay:       cur.is_day === 1,
-            temp:        Math.round(cur.temperature_2m      ?? 0),
-            feelsLike:   Math.round(cur.apparent_temperature ?? cur.temperature_2m ?? 0),
-            humidity:    cur.relative_humidity_2m ?? null,
-            windSpeed:   cur.wind_speed_10m       ?? null,
-            sunrise:     sunriseUnix,
-            sunset:      sunsetUnix,
-            aqi:         aqiValue,
-            uvi:         cur.uv_index ?? 0,
+            city:          geo.city    || '',
+            country:       geo.country || '',
+            tier:          geo.tier    || 'unknown',
+            description:   _wmoDescription(cur.weather_code),
+            wmoCode:       cur.weather_code,
+            isDay:         cur.is_day === 1,
+            temp:          Math.round(cur.temperature_2m      ?? 0),
+            feelsLike:     Math.round(cur.apparent_temperature ?? cur.temperature_2m ?? 0),
+            humidity:      cur.relative_humidity_2m ?? null,
+            windSpeed:     cur.wind_speed_10m       ?? null,
+            sunrise:       sunriseUnix,
+            sunset:        sunsetUnix,
+            aqi:           aqiValue,
+            uvi:           cur.uv_index ?? 0,
             hourly,
         };
 
@@ -2923,7 +2951,7 @@ function _renderWeatherDrawer(data) {
         uvValEl.style.color = uvInfo.color;
     }
     if (uvLblEl) { uvLblEl.textContent = uvInfo.label;  uvLblEl.style.color = uvInfo.color; }
-    if (uvAdvEl) { uvAdvEl.textContent = _isNight ? 'UV exposure is zero at night' : uvInfo.advice; }
+    if (uvAdvEl) { uvAdvEl.textContent = _isNight ? 'No UV at night' : uvInfo.advice; }
     if (uvPulseEl) {
         if (effectiveUvi >= 6) {
             uvPulseEl.classList.remove('hidden');
@@ -2983,6 +3011,1862 @@ function _renderWeatherDrawer(data) {
                 `<span class="text-[10px] text-slate-500 italic pl-1">Forecast unavailable</span>`;
         }
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STARGAZING ENGINE
+// Astronomical seeing score based on:
+//   Cloud cover (50%) · Humidity/dew-point/fog (25%) · Wind (15%) · Moon (10%)
+// All data from Open-Meteo hourly fields; moon phase from Meeus algorithm.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Moon phase via simplified Meeus algorithm.
+ * Returns { illumination: 0–1, phase: 0–1, phaseName, phaseEmoji }
+ * phase 0/1 = New Moon, 0.5 = Full Moon
+ */
+function _sgMoonPhase(date) {
+    const JD = (date.getTime() / 86400000) + 2440587.5;
+    const T  = (JD - 2451545.0) / 36525.0;
+    // Moon's mean longitude (deg)
+    const Lm = ((218.3165 + 481267.8813 * T) % 360 + 360) % 360;
+    // Sun's mean longitude (deg)
+    const Ls = ((280.4665 + 36000.7698 * T) % 360 + 360) % 360;
+    // Elongation (0°= new, 180°= full)
+    const elong = ((Lm - Ls) % 360 + 360) % 360;
+    const phase = elong / 360;
+    // Illuminated fraction (0=new, 1=full)
+    const illumination = (1 - Math.cos(elong * Math.PI / 180)) / 2;
+
+    let phaseName, phaseEmoji;
+    if (phase < 0.025 || phase >= 0.975) { phaseName = 'New Moon';        phaseEmoji = '🌑'; }
+    else if (phase < 0.24)               { phaseName = 'Waxing Crescent';  phaseEmoji = '🌒'; }
+    else if (phase < 0.26)               { phaseName = 'First Quarter';    phaseEmoji = '🌓'; }
+    else if (phase < 0.49)               { phaseName = 'Waxing Gibbous';   phaseEmoji = '🌔'; }
+    else if (phase < 0.51)               { phaseName = 'Full Moon';        phaseEmoji = '🌕'; }
+    else if (phase < 0.74)               { phaseName = 'Waning Gibbous';   phaseEmoji = '🌖'; }
+    else if (phase < 0.76)               { phaseName = 'Third Quarter';    phaseEmoji = '🌗'; }
+    else                                 { phaseName = 'Waning Crescent';  phaseEmoji = '🌘'; }
+
+    return { illumination, phase, phaseName, phaseEmoji };
+}
+
+/**
+ * Bortle scale estimate from geocoder tier + well-known mega-city list.
+ * Returns { bortle: 2–9, label, desc }
+ */
+function _sgBortleEstimate(cityName, tier) {
+    const MEGA = [
+        'london','paris','tokyo','osaka','beijing','shanghai','new york','los angeles',
+        'chicago','houston','dubai','seoul','jakarta','mumbai','delhi','mexico city',
+        'cairo','karachi','dhaka','manila','istanbul','moscow','sao paulo','kinshasa',
+        'lagos','rio de janeiro','bangalore','singapore','hong kong','bangkok','toronto',
+        'sydney','melbourne','kuala lumpur','bogota','lima','chicago','philadelphia',
+        'phoenix','san antonio','san diego','dallas','austin','san francisco',
+        'amsterdam','berlin','madrid','rome','barcelona','vienna','zürich','brussels',
+        'warsaw','prague','budapest','bucharest','tehran','baghdad','riyadh',
+    ];
+    const lower = (cityName || '').toLowerCase();
+    const isMega = MEGA.some(c => lower.includes(c));
+
+    if (isMega)               return { bortle: 8, label: 'City Sky (Bortle 8)',    desc: 'Only Moon, planets & brightest stars visible' };
+    if (tier === 'city')      return { bortle: 7, label: 'Suburban-City (Bortle 7)', desc: 'Few stars; Milky Way invisible' };
+    if (tier === 'town')      return { bortle: 5, label: 'Suburban Sky (Bortle 5)', desc: 'Milky Way glimpsed on best nights' };
+    if (tier === 'village')   return { bortle: 3, label: 'Rural Sky (Bortle 3)',    desc: 'Milky Way plainly visible' };
+    /* unknown */             return { bortle: 4, label: 'Rural-Suburban (Bortle 4)', desc: 'Milky Way faintly visible' };
+}
+
+/**
+ * Per-hour atmospheric quality score (0–100, higher = better).
+ *
+ * Returns BOTH a combined score and two orthogonal sub-scores:
+ *   transparencyScore — how clear/dry the sky is (DSO faintness)
+ *   seeingScore       — how stable the air column is (planetary detail)
+ *
+ * Transparency weights: cloud 55% | humidity/fog 25% | precip/code 20%
+ * Seeing weights:       jet-stream 40% | CAPE+LI stability 35% | surface wind 25%
+ * Combined:             transparency 50% + seeing 50%, then moon blended at 12%
+ *
+ * Optional stHour: { seeing:1-8, transparency:1-8 } from 7Timer! ASTRO.
+ * When present it is blended at 25% weight into the final combined score.
+ */
+function _sgHourScore(slot, moonIllum, moonriseUnix, moonsetUnix, stHour) {
+
+    // ══════════════════════════════════════════════════════════════
+    //  TRANSPARENCY — how clear / dry the sky is
+    // ══════════════════════════════════════════════════════════════
+
+    // ── T1. Cloud cover (55%) ──
+    const ccl = slot.cloudCoverLow  ?? 0;
+    const ccm = slot.cloudCoverMid  ?? 0;
+    const cch = slot.cloudCoverHigh ?? 0;
+    // Low clouds are fully opaque; cirrus is ~25% as bad for DSOs
+    const effectiveCloud = Math.min(100, ccl * 1.0 + ccm * 0.65 + cch * 0.25);
+    const cloudScore = Math.max(0, 100 - effectiveCloud);
+
+    // ── T2. Humidity / dew-point / fog (25%) ──
+    const rh   = slot.humidity  ?? 50;
+    const temp = slot.temp      ?? 15;
+    const dew  = slot.dewPoint  ?? (temp - (100 - rh) / 5);
+    const ddelta = temp - dew;   // dew-point spread — lower = more fog risk
+
+    let humScore = 100;
+    if      (ddelta < 1)  humScore = 10;  // fog imminent
+    else if (ddelta < 3)  humScore = 30;  // mist risk
+    else if (ddelta < 6)  humScore = 55;  // high humidity
+    else if (rh > 90)     humScore = 55;
+    else if (rh > 80)     humScore = 72;
+    else if (rh > 70)     humScore = 86;
+
+    // Visibility override (Open-Meteo in metres)
+    const vis = slot.visibility ?? 20000;
+    if      (vis < 1000)  humScore = Math.min(humScore, 15);
+    else if (vis < 3000)  humScore = Math.min(humScore, 40);
+    else if (vis < 6000)  humScore = Math.min(humScore, 65);
+
+    // ── T3. Precipitation / weather code (20%) ──
+    const precipMm = slot.precipMm ?? 0;
+    const wcode    = slot.code     ?? 0;
+    let precipScore = 100;
+    if      (precipMm >= 5)   precipScore = 0;   // heavy rain
+    else if (precipMm >= 1)   precipScore = 15;  // rain
+    else if (precipMm >= 0.3) precipScore = 45;  // drizzle
+    else if (precipMm > 0)    precipScore = 70;  // trace
+    // Weather code penalties for fog / storm / snow regardless of precipMm
+    if (wcode >= 95)          precipScore = Math.min(precipScore, 5);  // thunderstorm
+    else if (wcode >= 80)     precipScore = Math.min(precipScore, 20); // showers
+    else if (wcode >= 71 && wcode <= 77) precipScore = Math.min(precipScore, 30); // snow
+    else if (wcode >= 51 && wcode <= 67) precipScore = Math.min(precipScore, 50); // drizzle/rain
+    else if (wcode === 45 || wcode === 48) precipScore = Math.min(precipScore, 20); // fog
+
+    const transparencyScore = Math.round(
+        cloudScore  * 0.55 +
+        humScore    * 0.25 +
+        precipScore * 0.20
+    );
+
+    // ══════════════════════════════════════════════════════════════
+    //  SEEING — how stable the atmospheric column is
+    // ══════════════════════════════════════════════════════════════
+
+    // ── S1. Jet stream — wind_speed_250hPa at ~10 km altitude (40%) ──
+    const w250 = slot.wind250 ?? 40; // km/h — assume moderate if unknown
+    const jetScore = w250 < 20  ? 100
+                   : w250 < 40  ? 85
+                   : w250 < 60  ? 65
+                   : w250 < 80  ? 40
+                   : w250 < 100 ? 20 : 5;
+
+    // ── S2. CAPE + Lifted Index — convective stability (35%) ──
+    const cape = slot.cape        ?? 0;    // J/kg
+    const li   = slot.liftedIndex ?? 2;   // positive = stable
+
+    // CAPE component (lower is better)
+    const capeScore = cape <= 0   ? 100
+                    : cape < 100  ? 90
+                    : cape < 300  ? 75
+                    : cape < 500  ? 55
+                    : cape < 1000 ? 30
+                    : cape < 2000 ? 12 : 2;
+
+    // Lifted Index component (positive = stable = good)
+    const liScore = li >= 3    ? 100
+                  : li >= 0    ? 85
+                  : li >= -2   ? 65
+                  : li >= -5   ? 35
+                  : li >= -10  ? 15 : 2;
+
+    const stabilityScore = Math.round((capeScore + liScore) / 2);
+
+    // ── S3. Surface wind (25%) ──
+    const wind = slot.windSpeed ?? 0; // km/h
+    const surfWindScore = wind < 5  ? 100
+                        : wind < 10 ? 90
+                        : wind < 20 ? 75
+                        : wind < 30 ? 55
+                        : wind < 45 ? 30 : 10;
+
+    const seeingScore = Math.round(
+        jetScore       * 0.40 +
+        stabilityScore * 0.35 +
+        surfWindScore  * 0.25
+    );
+
+    // ══════════════════════════════════════════════════════════════
+    //  COMBINED — transparency + seeing, then moon + 7Timer blend
+    // ══════════════════════════════════════════════════════════════
+
+    let combined = transparencyScore * 0.50 + seeingScore * 0.50;
+
+    // ── Optional 7Timer! ASTRO calibration anchor (25% blend) ──
+    let calibrated = false;
+    if (stHour && stHour.seeing >= 1 && stHour.transparency >= 1) {
+        // 7Timer seeing & transparency are 1-8 scales (8 = best)
+        const st7Transparency = Math.round(((stHour.transparency - 1) / 7) * 100);
+        const st7Seeing       = Math.round(((stHour.seeing       - 1) / 7) * 100);
+        const st7Combined     = (st7Transparency + st7Seeing) / 2;
+        combined   = combined * 0.75 + st7Combined * 0.25;
+        calibrated = true;
+    }
+
+    // ── Moon impact — 12% of combined score ──
+    const slotUnix = slot.time
+        ? Math.round(new Date(slot.time).getTime() / 1000)
+        : 0;
+    let moonAbove = false;
+    if (moonriseUnix && moonsetUnix && slotUnix) {
+        if (moonriseUnix < moonsetUnix) {
+            moonAbove = slotUnix >= moonriseUnix && slotUnix <= moonsetUnix;
+        } else {
+            moonAbove = slotUnix >= moonriseUnix || slotUnix <= moonsetUnix;
+        }
+    }
+    const moonPenalty = moonAbove ? moonIllum * 72 : moonIllum * 28;
+    const moonScore   = Math.max(0, 100 - moonPenalty);
+
+    const score = Math.round(combined * 0.88 + moonScore * 0.12);
+
+    return {
+        score:             Math.max(0, Math.min(100, score)),
+        transparencyScore: Math.max(0, Math.min(100, Math.round(transparencyScore))),
+        seeingScore:       Math.max(0, Math.min(100, Math.round(seeingScore))),
+        moonAbove,
+        cloudScore:    Math.round(cloudScore),
+        humScore:      Math.round(humScore),
+        precipScore:   Math.round(precipScore),
+        jetScore:      Math.round(jetScore),
+        stabilityScore:Math.round(stabilityScore),
+        surfWindScore: Math.round(surfWindScore),
+        moonScore:     Math.round(moonScore),
+        calibrated,
+    };
+}
+
+/** Seeing quality label from score 0–100 */
+function _sgSeeingLabel(score) {
+    if (score >= 80) return { label: 'Excellent', color: '#a78bfa' };
+    if (score >= 60) return { label: 'Good',      color: '#34d399' };
+    if (score >= 40) return { label: 'Fair',       color: '#fbbf24' };
+    if (score >= 20) return { label: 'Poor',       color: '#f87171' };
+    return                  { label: 'Very Poor',  color: '#ef4444' };
+}
+
+/**
+ * Format a Unix timestamp (seconds) as "9PM", "12AM" etc.
+ * Re-uses _wdFormatTime() which already exists.
+ */
+function _sgFormatHour(unixSec) {
+    if (!unixSec) return '—';
+    return _wdFormatTime(unixSec); // "9:30 PM" format
+}
+
+/**
+ * Find the best consecutive viewing window from night-hour seeing scores.
+ * Returns a string like "10 PM – 2 AM" or "No clear window tonight".
+ */
+function _sgBestWindow(nightScores) {
+    if (!nightScores.length) return 'No night hours in forecast';
+    const threshold = 55;
+    let bestStart = -1, bestEnd = -1, bestAvg = 0;
+    let i = 0;
+    while (i < nightScores.length) {
+        if (nightScores[i].score >= threshold) {
+            let j = i;
+            let sum = 0;
+            while (j < nightScores.length && nightScores[j].score >= threshold) {
+                sum += nightScores[j].score;
+                j++;
+            }
+            const avg = sum / (j - i);
+            if (avg > bestAvg) {
+                bestAvg  = avg;
+                bestStart = i;
+                bestEnd   = j - 1;
+            }
+            i = j;
+        } else {
+            i++;
+        }
+    }
+    if (bestStart < 0) return 'No clear window tonight';
+    const startTime = nightScores[bestStart].time;
+    const endTime   = nightScores[bestEnd].time;
+    const fmt = iso => {
+        const h24 = parseInt((iso || '').slice(11, 13), 10);
+        const ampm = h24 < 12 ? 'AM' : 'PM';
+        const h12  = h24 % 12 || 12;
+        return `${h12} ${ampm}`;
+    };
+    return `Best window: ${fmt(startTime)} – ${fmt(endTime)}`;
+}
+
+/** Switch tab UI only (no data ops) */
+function _wdSwitchTabUI(tab) {
+    _wdActiveTab = tab;
+    const btnW   = document.getElementById('wdTabWeather');
+    const btnS   = document.getElementById('wdTabStargazing');
+    const wxPanel = document.getElementById('wdWeatherPanel');
+    const sgPanel = document.getElementById('sgPanel');
+
+    if (tab === 'weather') {
+        if (wxPanel) wxPanel.classList.remove('hidden');
+        if (sgPanel) sgPanel.classList.add('hidden');
+        if (btnW) { btnW.className = btnW.className.replace(/wd-tab-inactive|wd-tab-active-sg/g, '').trim() + ' wd-tab-active-wx'; }
+        if (btnS) { btnS.className = btnS.className.replace(/wd-tab-active-wx|wd-tab-active-sg/g, '').trim() + ' wd-tab-inactive'; }
+    } else {
+        if (wxPanel) wxPanel.classList.add('hidden');
+        if (sgPanel) sgPanel.classList.remove('hidden');
+        if (btnW) { btnW.className = btnW.className.replace(/wd-tab-active-wx|wd-tab-active-sg/g, '').trim() + ' wd-tab-inactive'; }
+        if (btnS) { btnS.className = btnS.className.replace(/wd-tab-inactive|wd-tab-active-wx/g, '').trim() + ' wd-tab-active-sg'; }
+    }
+}
+
+/**
+ * Public entry point called by the tab buttons.
+ * Switches UI and, for stargazing, forces a fresh data fetch.
+ */
+function switchWeatherTab(tab) {
+    _wdSwitchTabUI(tab);
+    if (tab === 'stargazing') {
+        _sgLoadAndRender();
+    }
+}
+
+/**
+ * Force-bypass the weather cache, show sgLoading, fetch fresh data, then render
+ * the stargazing panel.  Always called when the Stargazing tab is opened.
+ */
+
+/**
+ * Fetch 7Timer! ASTRO product for a location.
+ * Returns the parsed JSON object or null on any failure.
+ * 7Timer uses 3-hourly time slots starting at a UTC init time.
+ */
+async function _sgFetch7Timer(lat, lon) {
+    try {
+        const url = `https://www.7timer.info/bin/api.pl` +
+            `?lon=${parseFloat(lon).toFixed(4)}&lat=${parseFloat(lat).toFixed(4)}` +
+            `&product=astro&output=json`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const json = await res.json();
+        if (!json || !json.dataseries || !json.init) return null;
+        return json;
+    } catch (_) {
+        return null; // graceful fallback — HTTPS may not always be available
+    }
+}
+
+/**
+ * Given an ISO datetime string (e.g. "2025-08-10T22:00") and the 7Timer response,
+ * return the matching dataseries slot { seeing, transparency, ... } or null.
+ * 7Timer slots are every 3 hours starting from json.init (format "YYYYMMDDHH" UTC).
+ */
+function _sg7TimerHourFor(isoTime, stJson) {
+    if (!stJson || !stJson.dataseries || !stJson.init) return null;
+    try {
+        const initStr = stJson.init; // e.g. "2025081000"
+        const initUTC = new Date(Date.UTC(
+            parseInt(initStr.slice(0, 4), 10),
+            parseInt(initStr.slice(4, 6), 10) - 1,
+            parseInt(initStr.slice(6, 8), 10),
+            parseInt(initStr.slice(8, 10), 10)
+        ));
+        const slotTime = new Date(isoTime);
+        const diffH = (slotTime - initUTC) / 3600000; // hours offset
+        if (diffH < 0) return null;
+        // Each dataseries entry covers 3 hours; find the closest one
+        const idx = Math.round(diffH / 3);
+        if (idx < 0 || idx >= stJson.dataseries.length) return null;
+        return stJson.dataseries[idx];
+    } catch (_) {
+        return null;
+    }
+}
+
+function _sgLoadAndRender() {
+    const sgLoading = document.getElementById('sgLoading');
+    const sgContent = document.getElementById('sgContent');
+
+    // Stale-while-revalidate: if content was already rendered once, keep it visible
+    // while silently refreshing in the background — no glitch / spinner flash.
+    const alreadyRendered = sgContent && !sgContent.classList.contains('hidden');
+    if (!alreadyRendered) {
+        if (sgLoading) sgLoading.classList.remove('hidden');
+        if (sgContent) sgContent.classList.add('hidden');
+    }
+
+    let lat = userLat, lon = userLon;
+    if (cachedUserCoords) { lat = cachedUserCoords.lat; lon = cachedUserCoords.lon; }
+    if (!lat || !lon) {
+        if (!alreadyRendered && sgLoading) {
+            sgLoading.innerHTML =
+                `<i class="fa-solid fa-location-slash text-slate-600 text-[28px]"></i>` +
+                `<span class="text-slate-500 text-[11px] tracking-widest uppercase font-bold mt-2">` +
+                    `Location unavailable</span>`;
+        }
+        return;
+    }
+
+    // Bust in-session mem cache so we always get fresh data on tab open
+    const cacheKey = `${parseFloat(lat).toFixed(3)},${parseFloat(lon).toFixed(3)}`;
+    _wdDataCache.delete(cacheKey);
+
+    // Fetch Open-Meteo weather + 7Timer ASTRO in parallel; 7Timer failing is non-fatal
+    Promise.all([
+        _fetchWeatherDrawerData(lat, lon),
+        _sgFetch7Timer(lat, lon),
+    ]).then(([data, stData]) => {
+        if (!data) {
+            // Only show error state if nothing is already displayed
+            if (!alreadyRendered && sgLoading) {
+                sgLoading.innerHTML =
+                    `<i class="fa-solid fa-triangle-exclamation text-slate-600 text-[28px]"></i>` +
+                    `<span class="text-slate-500 text-[11px] tracking-widest uppercase font-bold mt-2">` +
+                        `Data unavailable</span>`;
+            }
+            return;
+        }
+        _renderStargazingPanel(data, alreadyRendered, stData || null);
+    }).catch(() => {
+        if (!alreadyRendered && sgLoading) {
+            sgLoading.innerHTML =
+                `<i class="fa-solid fa-triangle-exclamation text-slate-600 text-[28px]"></i>` +
+                `<span class="text-slate-500 text-[11px] tracking-widest uppercase font-bold mt-2">` +
+                    `Network error</span>`;
+        }
+    });
+}
+
+/**
+ * Font Awesome icon + style for a given moon phase.
+ * Returns { icon: 'fa-*', style: 'inline CSS string' }
+ * Uses: fa-circle (full/new), fa-circle-half-stroke (quarters), fa-moon (crescents)
+ */
+function _sgMoonFAIcon(moon) {
+    const p = moon.phase;
+    if (p < 0.025 || p >= 0.975)
+        // New moon — dark hollow circle
+        return { icon: 'fa-regular fa-circle', style: 'color:rgba(100,116,139,0.45); font-size:26px;' };
+    if (p < 0.24)
+        // Waxing crescent — FA moon icon rotated to face right
+        return { icon: 'fa-solid fa-moon',     style: 'color:#e2e8f0; font-size:26px; transform:rotate(120deg); display:inline-block;' };
+    if (p < 0.26)
+        // First quarter — half-circle, lit on right
+        return { icon: 'fa-solid fa-circle-half-stroke', style: 'color:#e2e8f0; font-size:26px; transform:rotate(180deg); display:inline-block;' };
+    if (p < 0.49)
+        // Waxing gibbous — mostly lit solid circle
+        return { icon: 'fa-solid fa-circle',  style: 'color:rgba(226,232,240,0.72); font-size:26px;' };
+    if (p < 0.51)
+        // Full moon — bright white glowing circle
+        return { icon: 'fa-solid fa-circle',  style: 'color:#f8fafc; font-size:26px; filter:drop-shadow(0 0 6px rgba(248,250,252,0.55));' };
+    if (p < 0.74)
+        // Waning gibbous — mostly lit, slightly dimmer
+        return { icon: 'fa-solid fa-circle',  style: 'color:rgba(226,232,240,0.65); font-size:26px;' };
+    if (p < 0.76)
+        // Third quarter — half-circle, lit on left
+        return { icon: 'fa-solid fa-circle-half-stroke', style: 'color:#e2e8f0; font-size:26px;' };
+    // Waning crescent — FA moon, mirrored to face left
+    return { icon: 'fa-solid fa-moon', style: 'color:#e2e8f0; font-size:26px; transform:rotate(-60deg) scaleX(-1); display:inline-block;' };
+}
+
+/**
+ * Render the full Stargazing panel from weather data object.
+ * @param {boolean} silentRefresh - if true, skip entry animation (content already visible)
+ * @param {object|null} stData    - parsed 7Timer! ASTRO JSON (optional calibration anchor)
+ */
+function _renderStargazingPanel(data, silentRefresh = false, stData = null) {
+    const sgLoading = document.getElementById('sgLoading');
+    const sgContent = document.getElementById('sgContent');
+    if (!sgContent) return;
+
+    // ── Moon phase ────────────────────────────────────────────────────────────
+    // Use Meeus algorithm (always authoritative; Open-Meteo moon_phase is a fallback
+    // cross-check only)
+    const moon = _sgMoonPhase(new Date());
+
+    // ── Moon rise/set — not from API (field unsupported in free tier).
+    // Seeing score uses conservative half-penalty when rise/set unknown.
+    const moonriseUnix = null;
+    const moonsetUnix  = null;
+
+    // ── Bortle scale estimate ─────────────────────────────────────────────────
+    const bortle = _sgBortleEstimate(data.city, data.tier);
+
+    // ── Night hours from hourly forecast ─────────────────────────────────────
+    const nightHours = (data.hourly || []).filter(h => !h.isDay);
+    // Fallback: if no night hours (e.g. Arctic summer), use all hours
+    const targetHours = nightHours.length > 0 ? nightHours : data.hourly || [];
+
+    // ── Per-hour seeing scores ────────────────────────────────────────────────
+    const scored = targetHours.map(slot => {
+        const stHour = stData ? _sg7TimerHourFor(slot.time, stData) : null;
+        return {
+            ...slot,
+            ..._sgHourScore(slot, moon.illumination, moonriseUnix, moonsetUnix, stHour),
+        };
+    });
+
+    // ── Overall tonight score = average of scored night hours ────────────────
+    let overallScore = 0;
+    let avgTransparency = 0;
+    let avgSeeing = 0;
+    let anyCalibrated = false;
+    if (scored.length > 0) {
+        overallScore    = Math.round(scored.reduce((a, h) => a + h.score, 0) / scored.length);
+        avgTransparency = Math.round(scored.reduce((a, h) => a + (h.transparencyScore ?? 0), 0) / scored.length);
+        avgSeeing       = Math.round(scored.reduce((a, h) => a + (h.seeingScore ?? 0), 0) / scored.length);
+        anyCalibrated   = scored.some(h => h.calibrated);
+    }
+    const qual = _sgSeeingLabel(overallScore);
+
+    // ── Best viewing window ───────────────────────────────────────────────────
+    const bestWindow = _sgBestWindow(scored);
+
+    // ── Current-hour conditions (first night hour, or first hourly slot) ──────
+    const curSlot = scored[0] || {};
+
+    // ── Render gauge ─────────────────────────────────────────────────────────
+    const gaugeArc   = document.getElementById('sgGaugeArc');
+    const gaugeScore = document.getElementById('sgGaugeScore');
+    const gaugeQual  = document.getElementById('sgGaugeQual');
+    const gaugeWrap  = document.getElementById('sgGaugeWrapper');
+
+    const CIRCUMFERENCE = 301.6; // 2π × 48
+    if (gaugeArc) {
+        const offset = CIRCUMFERENCE * (1 - overallScore / 100);
+        // Short delay so CSS transition fires after element is visible
+        setTimeout(() => {
+            gaugeArc.style.strokeDashoffset = offset.toFixed(1);
+            gaugeArc.style.stroke = qual.color;
+        }, 80);
+    }
+    if (gaugeScore) gaugeScore.textContent = overallScore;
+    if (gaugeQual)  gaugeQual.setAttribute('fill', qual.color + 'aa');
+    if (gaugeWrap && overallScore >= 80) {
+        gaugeWrap.classList.add('sg-gauge-excellent');
+    } else if (gaugeWrap) {
+        gaugeWrap.classList.remove('sg-gauge-excellent');
+    }
+
+    // ── Quality label + best window ───────────────────────────────────────────
+    const qualLabelEl  = document.getElementById('sgQualLabel');
+    const bestWindowEl = document.getElementById('sgBestWindow');
+    const bortleEl     = document.getElementById('sgBortleText');
+    if (qualLabelEl)  { qualLabelEl.textContent = qual.label; qualLabelEl.style.color = qual.color; }
+    if (bestWindowEl) bestWindowEl.textContent = bestWindow;
+    if (bortleEl)     bortleEl.textContent = `${bortle.label} — ${bortle.desc}`;
+
+    // ── Sub-score chips: Transparency + Seeing ────────────────────────────────
+    const tScoreEl  = document.getElementById('sgTransparencyScore');
+    const sScoreEl  = document.getElementById('sgSeeingScore');
+    const calibEl   = document.getElementById('sgCalibrationBadge');
+
+    const _subColor = v => v >= 75 ? '#a78bfa' : v >= 55 ? '#34d399' : v >= 35 ? '#fbbf24' : '#f87171';
+
+    if (tScoreEl) {
+        tScoreEl.textContent = `☁ Transparency ${avgTransparency}`;
+        tScoreEl.style.color = _subColor(avgTransparency);
+    }
+    if (sScoreEl) {
+        sScoreEl.textContent = `✦ Seeing ${avgSeeing}`;
+        sScoreEl.style.color = _subColor(avgSeeing);
+    }
+    if (calibEl) {
+        calibEl.classList.toggle('hidden', !anyCalibrated);
+    }
+
+    // ── Moon card ─────────────────────────────────────────────────────────────
+    const moonEmoji  = document.getElementById('sgMoonEmoji');
+    const moonName   = document.getElementById('sgMoonName');
+    const moonIllum  = document.getElementById('sgMoonIllum');
+    const moonrise   = document.getElementById('sgMoonrise');
+    const moonset    = document.getElementById('sgMoonset');
+    const moonImpact = document.getElementById('sgMoonImpact');
+
+    if (moonEmoji) {
+        const fi = _sgMoonFAIcon(moon);
+        moonEmoji.innerHTML = `<i class="${fi.icon}" style="${fi.style}"></i>`;
+    }
+    if (moonName)   moonName.textContent   = moon.phaseName;
+    if (moonIllum)  moonIllum.textContent  = `${Math.round(moon.illumination * 100)}% illuminated`;
+    // Moonrise/moonset: approximated from moon phase cycle (rises ~50 min later each day)
+    // Full moon ≈ rises at sunset; New moon ≈ rises at sunrise; interpolated for other phases
+    if (moonrise || moonset) {
+        const sunsetHour   = data.sunset  ? new Date(data.sunset  * 1000).getHours() : 19;
+        const sunriseHour  = data.sunrise ? new Date(data.sunrise * 1000).getHours() : 6;
+        // Moon rises approx: phase 0=sunrise time, phase 0.5=sunset time, phase 1=next sunrise
+        const rawRiseH = sunriseHour + (moon.phase <= 0.5
+            ? moon.phase * 2 * (sunsetHour - sunriseHour)
+            : sunsetHour - sunriseHour + (moon.phase - 0.5) * 2 * (24 + sunriseHour - sunsetHour));
+        const riseH = Math.round(rawRiseH) % 24;
+        const setH  = (riseH + 12) % 24;
+        const fmt = h => { const ap = h < 12 ? 'AM' : 'PM'; return `~${h % 12 || 12}:00 ${ap}`; };
+        if (moonrise) moonrise.textContent = fmt(riseH);
+        if (moonset)  moonset.textContent  = fmt(setH);
+    }
+
+    if (moonImpact) {
+        const illumPct = Math.round(moon.illumination * 100);
+        let impact;
+        if (illumPct <= 15) {
+            impact = `New Moon phase — minimal light pollution. Ideal for deep-sky observing.`;
+        } else if (illumPct <= 40) {
+            impact = `Crescent Moon (${illumPct}% lit) — sets early, leaving dark skies for most of the night.`;
+        } else if (illumPct <= 65) {
+            impact = `${moon.phaseName} (${illumPct}% lit) — some interference. Best observing after moonset.`;
+        } else if (illumPct <= 90) {
+            impact = `${moon.phaseName} (${illumPct}% lit) — significant glare. Stick to bright objects & planets.`;
+        } else {
+            impact = `Full Moon (${illumPct}% lit) — sky is very bright. Suitable for lunar observing only.`;
+        }
+        moonImpact.textContent = impact;
+    }
+
+    // ── Condition cards ───────────────────────────────────────────────────────
+    // Cloud cover
+    const cc = curSlot.cloudCoverLow != null ? Math.round(curSlot.cloudCoverLow) : (curSlot.cloudCover != null ? Math.round(curSlot.cloudCover) : null);
+    const cloudValEl   = document.getElementById('sgCloudVal');
+    const cloudLabelEl = document.getElementById('sgCloudLabel');
+    if (cloudValEl) cloudValEl.textContent = cc != null ? `${cc}%` : '—';
+    if (cloudLabelEl) {
+        cloudLabelEl.textContent = cc == null ? '—'
+            : cc < 20  ? 'Clear — excellent transparency'
+            : cc < 40  ? 'Mostly clear'
+            : cc < 70  ? 'Partly cloudy'
+            : cc < 90  ? 'Mostly cloudy'
+            : 'Overcast';
+    }
+
+    // Humidity
+    const rh      = curSlot.humidity != null ? Math.round(curSlot.humidity) : (data.humidity != null ? Math.round(data.humidity) : null);
+    const dewPt   = curSlot.dewPoint != null ? Math.round(curSlot.dewPoint) : null;
+    const humValEl  = document.getElementById('sgHumidVal');
+    const humLblEl  = document.getElementById('sgHumidLabel');
+    if (humValEl)  humValEl.textContent  = rh != null ? `${rh}%` : '—';
+    if (humLblEl) {
+        humLblEl.textContent = rh == null ? '—'
+            : rh < 50 ? 'Dry — great for optics'
+            : rh < 70 ? 'Moderate'
+            : rh < 85 ? 'High — dew risk'
+            : 'Very high — fog likely';
+    }
+
+    // Wind
+    const wnd      = curSlot.windSpeed != null ? Math.round(curSlot.windSpeed) : (data.windSpeed != null ? Math.round(data.windSpeed) : null);
+    const windValEl  = document.getElementById('sgWindVal');
+    const windLblEl  = document.getElementById('sgWindLabel');
+    if (windValEl) windValEl.textContent  = wnd != null ? `${wnd} km/h` : '—';
+    if (windLblEl) {
+        windLblEl.textContent = wnd == null ? '—'
+            : wnd < 5  ? 'Calm — excellent'
+            : wnd < 15 ? 'Light breeze'
+            : wnd < 30 ? 'Moderate — some turbulence'
+            : wnd < 50 ? 'Windy — atmospheric blur'
+            : 'Strong — poor seeing';
+    }
+
+    // Dew point spread
+    const curTemp  = curSlot.temp != null ? curSlot.temp : data.temp;
+    const dp       = dewPt != null ? dewPt : (curTemp != null && rh != null ? Math.round(curTemp - (100 - rh) / 5) : null);
+    const spread   = (curTemp != null && dp != null) ? Math.round(curTemp - dp) : null;
+    const dewValEl  = document.getElementById('sgDewVal');
+    const dewLblEl  = document.getElementById('sgDewLabel');
+    if (dewValEl)  dewValEl.textContent  = dp != null ? `${dp}°` : '—';
+    if (dewLblEl) {
+        dewLblEl.textContent = spread == null ? '—'
+            : spread < 1  ? 'Fog forming — stay in'
+            : spread < 3  ? 'Mist risk — optics may dew'
+            : spread < 6  ? 'Watch for dew'
+            : 'Safe — low dew risk';
+    }
+
+    // ── Hourly seeing forecast strip ──────────────────────────────────────────
+    const strip = document.getElementById('sgHourlyStrip');
+    if (strip) {
+        if (scored.length > 0) {
+            strip.innerHTML = scored.map(slot => {
+                const h24   = parseInt((slot.time || '').slice(11, 13), 10);
+                const ampm  = h24 < 12 ? 'AM' : 'PM';
+                const h12   = h24 % 12 || 12;
+                const timeLbl = `${h12}${ampm}`;
+                const q = _sgSeeingLabel(slot.score);
+                const starOpacity = slot.score >= 60 ? '1' : slot.score >= 40 ? '0.55' : '0.25';
+                return (
+                    `<div class="shrink-0 flex flex-col items-center gap-1 ` +
+                    `bg-[#0d0a1a] border border-violet-500/15 rounded-xl ` +
+                    `px-3 py-2.5 min-w-[54px]">` +
+                        `<span class="text-[9px] text-slate-500 font-black uppercase tracking-wider tabular-nums">${timeLbl}</span>` +
+                        `<i class="fa-solid fa-star text-[13px]" style="color:${q.color}; opacity:${starOpacity}"></i>` +
+                        `<span class="text-[13px] font-black tabular-nums" style="color:${q.color}">${slot.score}</span>` +
+                        `<span class="text-[8px] font-bold text-slate-600 tabular-nums">${Math.round(slot.cloudScore)}%☁</span>` +
+                    `</div>`
+                );
+            }).join('');
+        } else {
+            strip.innerHTML = `<span class="text-[10px] text-slate-500 italic pl-1">No night hours in forecast range</span>`;
+        }
+    }
+
+    // ── Show content ─────────────────────────────────────────────────────────
+    if (sgLoading) sgLoading.classList.add('hidden');
+    if (sgContent) {
+        if (!silentRefresh) {
+            // First appearance — play entry animation
+            sgContent.classList.remove('sg-panel-in');
+            void sgContent.offsetWidth; // reflow to restart animation
+            sgContent.classList.add('sg-panel-in');
+        }
+        sgContent.classList.remove('hidden');
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STARGAZING LOCATION PLANNER
+// Allows users to search any location by name, coordinates, or Google Maps URL
+// and get a 7-day seeing forecast, astronomical events, and trip recommendations.
+// Saved results persist in localStorage and auto-refresh on next open.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const _SGP_LS_KEY   = 'compass_sg_planner_v1';
+const _SGP_MAX_SAVED = 10;
+
+/** Open the planner panel with a slide-in animation. */
+function _sgpOpenPlanner() {
+    const panel = document.getElementById('sgPlannerPanel');
+    if (!panel) return;
+    panel.classList.remove('hidden', 'sgp-slide-out');
+    void panel.offsetWidth; // reflow to restart animation
+    panel.classList.add('sgp-slide-in');
+    _sgpRenderSaved();
+    _sgpSyncEmptyState();
+}
+
+/** Close the planner panel with a slide-out animation. */
+function _sgpClosePlanner() {
+    const panel = document.getElementById('sgPlannerPanel');
+    if (!panel) return;
+    panel.classList.remove('sgp-slide-in');
+    void panel.offsetWidth;
+    panel.classList.add('sgp-slide-out');
+    const onEnd = () => {
+        panel.classList.add('hidden');
+        panel.classList.remove('sgp-slide-out');
+    };
+    panel.addEventListener('animationend', onEnd, { once: true });
+    // Safety fallback in case animationend doesn't fire
+    setTimeout(() => {
+        if (!panel.classList.contains('hidden')) onEnd();
+    }, 400);
+}
+
+/**
+ * Resolve a user query to { lat, lon, name, country, tier }.
+ * Handles: decimal coords, degree-notation coords, Google Maps URLs (full),
+ * and plain text via the Open-Meteo Geocoding API (free, no key, same origin
+ * as weather data — more reliable than Nominatim search for this use-case).
+ */
+async function _sgpResolveLocation(query) {
+    const q = query.trim();
+
+    // ── 1. Decimal coordinates  e.g. "48.8566, 2.3522"  or  "-33.8688 151.2093"
+    const decCoordRe = /^(-?\d{1,3}\.?\d*)[°\s,]+([NS])?[,\s]+(-?\d{1,3}\.?\d*)[°\s]*([EW])?$/i;
+    const decMatch = q.match(decCoordRe);
+    if (decMatch) {
+        let lat = parseFloat(decMatch[1]);
+        let lon = parseFloat(decMatch[3]);
+        if (decMatch[2] && decMatch[2].toUpperCase() === 'S') lat = -lat;
+        if (decMatch[4] && decMatch[4].toUpperCase() === 'W') lon = -lon;
+        if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+            const geo = await _reverseGeocode(lat, lon);
+            return { lat, lon, name: geo.city || `${lat.toFixed(4)}, ${lon.toFixed(4)}`, country: geo.country, tier: geo.tier };
+        }
+    }
+
+    // ── 2. Google Maps full URL — extract @lat,lon from URL
+    const mapsLatLonRe = /@(-?\d+\.?\d+),(-?\d+\.?\d+)/;
+    const mapsMatch = q.match(mapsLatLonRe);
+    if (mapsMatch) {
+        const lat = parseFloat(mapsMatch[1]);
+        const lon = parseFloat(mapsMatch[2]);
+        if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+            const geo = await _reverseGeocode(lat, lon);
+            return { lat, lon, name: geo.city || `${lat.toFixed(4)}, ${lon.toFixed(4)}`, country: geo.country, tier: geo.tier };
+        }
+    }
+
+    // ── Shortened Maps URL (goo.gl/maps or maps.app.goo.gl) — CORS-blocked, guide user
+    if (/goo\.gl\/maps|maps\.app\.goo\.gl/i.test(q)) {
+        return { error: 'shortened_url', message: 'Shortened Maps links can\'t be used here. Open the link in a browser, copy the full URL (it contains @lat,lon) — or just type the place name.' };
+    }
+
+    // ── 3. Open-Meteo Geocoding API — free, no API key, CORS-safe, same provider as weather
+    //    Docs: https://open-meteo.com/en/docs/geocoding-api
+    try {
+        const res  = await fetch(
+            `https://geocoding-api.open-meteo.com/v1/search` +
+            `?name=${encodeURIComponent(q)}&count=1&language=en&format=json`
+        );
+        const json = await res.json();
+        const r    = json?.results?.[0];
+        if (!r) {
+            return {
+                error:   'not_found',
+                message: `Couldn't find "${q.length > 40 ? q.slice(0, 40) + '…' : q}". Try a more specific name (e.g. "Matera, Italy") or enter GPS coordinates.`,
+            };
+        }
+        // Derive Bortle-relevant tier from population + feature code
+        const pop  = r.population || 0;
+        const fc   = r.feature_code || '';
+        const tier = (pop > 500000 || fc === 'PPLC' || fc === 'PPLA')  ? 'city'
+                   : (pop > 50000  || fc === 'PPLA2')                  ? 'town'
+                   : (pop > 5000   || fc === 'PPLA3' || fc.startsWith('PPL')) ? 'village'
+                   : 'unknown';
+        return {
+            lat:     r.latitude,
+            lon:     r.longitude,
+            name:    r.name,
+            country: (r.country_code || '').toUpperCase(),
+            tier,
+        };
+    } catch (_) {
+        return { error: 'network', message: 'Network error. Check your connection and try again.' };
+    }
+}
+
+/**
+ * Fetch 7-day Open-Meteo forecast for a location.
+ * Primary model (GFS/best_match) is used for all 7 days.
+ * For days 4-7 (hours 72+), ECMWF is fetched as a secondary model
+ * and blended 50/50 into cloud_cover, cloud_cover_low, cape,
+ * lifted_index, and wind_speed_250hPa for improved late-week confidence.
+ * Returns null on primary fetch failure.
+ */
+async function _sgpFetch7Day(lat, lon) {
+    const BASE = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`;
+    const HOURLY_FIELDS =
+        `temperature_2m,weather_code,precipitation_probability,precipitation,wind_speed_10m,is_day` +
+        `,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high` +
+        `,relative_humidity_2m,dew_point_2m,visibility` +
+        `,cape,lifted_index,wind_speed_250hPa`;
+    const DAILY_FIELDS = `sunrise,sunset,temperature_2m_max,temperature_2m_min,precipitation_sum`;
+
+    // ── Primary fetch (GFS / best-match) ──────────────────────────────────────
+    let json;
+    try {
+        const res = await fetch(
+            `${BASE}&hourly=${HOURLY_FIELDS}&daily=${DAILY_FIELDS}&timezone=auto&forecast_days=16`
+        );
+        json = await res.json();
+    } catch (_) { return null; }
+    if (!json || !json.hourly || !json.daily) return null;
+
+    // ── Secondary fetch (ECMWF IFS 0.4°) for days 4-7 blend ─────────────────
+    // Only key stability/cloud fields; failure is non-fatal
+    let ecmwf = null;
+    try {
+        const ecmwfFields =
+            `cloud_cover,cloud_cover_low,cape,lifted_index,wind_speed_250hPa`;
+        const res2 = await fetch(
+            `${BASE}&hourly=${ecmwfFields}&timezone=auto&forecast_days=16&models=ecmwf_ifs04`
+        );
+        const j2 = await res2.json();
+        if (j2 && j2.hourly) ecmwf = j2.hourly;
+    } catch (_) { /* non-fatal */ }
+
+    // ── Build hourly slots ────────────────────────────────────────────────────
+    const h = json.hourly;
+    const hourly = (h.time || []).map((t, i) => {
+        // For hours 72+ (days 4-7), blend ECMWF if available
+        const useEcmwf = ecmwf && i >= 72;
+        const blend = (primary, secondary) => {
+            if (useEcmwf && secondary?.[i] != null && primary != null)
+                return (primary + secondary[i]) / 2;
+            return primary;
+        };
+        return {
+            time:          t,
+            temp:          h.temperature_2m?.[i]           ?? null,
+            code:          h.weather_code?.[i]              ?? null,
+            isDay:         h.is_day?.[i] === 1,
+            precip:        h.precipitation_probability?.[i] ?? null,
+            precipMm:      h.precipitation?.[i]             ?? 0,
+            cloudCover:    blend(h.cloud_cover?.[i]      ?? null, ecmwf?.cloud_cover),
+            cloudCoverLow: blend(h.cloud_cover_low?.[i]  ?? null, ecmwf?.cloud_cover_low),
+            cloudCoverMid: h.cloud_cover_mid?.[i]           ?? null,
+            cloudCoverHigh:h.cloud_cover_high?.[i]          ?? null,
+            humidity:      h.relative_humidity_2m?.[i]      ?? null,
+            dewPoint:      h.dew_point_2m?.[i]              ?? null,
+            visibility:    h.visibility?.[i]                ?? null,
+            windSpeed:     h.wind_speed_10m?.[i]            ?? null,
+            cape:          blend(h.cape?.[i]             ?? null, ecmwf?.cape),
+            liftedIndex:   blend(h.lifted_index?.[i]     ?? null, ecmwf?.lifted_index),
+            wind250:       blend(h.wind_speed_250hPa?.[i]?? null, ecmwf?.wind_speed_250hPa),
+            ecmwfBlended:  useEcmwf,
+        };
+    });
+
+    // ── Build daily summaries ─────────────────────────────────────────────────
+    const d = json.daily;
+    const daily = (d.time || []).map((t, i) => ({
+        date:      t,
+        sunrise:   d.sunrise?.[i]           ?? null,
+        sunset:    d.sunset?.[i]            ?? null,
+        tempMax:   d.temperature_2m_max?.[i]?? null,
+        tempMin:   d.temperature_2m_min?.[i]?? null,
+        precipSum: d.precipitation_sum?.[i] ?? null,
+    }));
+
+    return { hourly, daily, hasEcmwf: !!ecmwf };
+}
+
+/**
+ * Compute average seeing score for a set of night hours on a given date.
+ * Returns an object { score, transparencyScore, seeingScore }.
+ */
+function _sgpDayScore(nightHours, moonIllumination) {
+    if (!nightHours || nightHours.length === 0)
+        return { score: 0, transparencyScore: 0, seeingScore: 0 };
+    const scored = nightHours.map(h => _sgHourScore(h, moonIllumination, null, null, null));
+    const avg = key => Math.round(scored.reduce((a, s) => a + (s[key] ?? 0), 0) / scored.length);
+    return {
+        score:             avg('score'),
+        transparencyScore: avg('transparencyScore'),
+        seeingScore:       avg('seeingScore'),
+    };
+}
+
+/** Confidence level for a given day index (0=today, up to 15=day 16). */
+function _sgpConfidence(dayIndex) {
+    // Days 0-6: high-to-moderate confidence; days 7-15: low and declining
+    const TABLE = [92, 84, 74, 63, 54, 46, 39, 33, 28, 24, 20, 17, 15, 13, 11, 10];
+    return TABLE[Math.min(Math.max(dayIndex, 0), TABLE.length - 1)];
+}
+
+/** Hardcoded major annual meteor showers. */
+const _SGP_METEOR_SHOWERS = [
+    { name: 'Quadrantids',    peak: '01-03', zhr: 100, dur: 2 },
+    { name: 'Lyrids',         peak: '04-22', zhr: 20,  dur: 4 },
+    { name: 'Eta Aquariids',  peak: '05-06', zhr: 50,  dur: 7 },
+    { name: 'Perseids',       peak: '08-12', zhr: 100, dur: 5 },
+    { name: 'Draconids',      peak: '10-08', zhr: 10,  dur: 2 },
+    { name: 'Orionids',       peak: '10-21', zhr: 25,  dur: 5 },
+    { name: 'Leonids',        peak: '11-17', zhr: 15,  dur: 3 },
+    { name: 'Geminids',       peak: '12-14', zhr: 150, dur: 4 },
+    { name: 'Ursids',         peak: '12-22', zhr: 10,  dur: 3 },
+];
+
+/**
+ * Return astronomical events visible in the next 7 days starting from startDate.
+ * Includes: moon phase milestones and meteor shower windows.
+ */
+function _sgpAstroEvents(startDate) {
+    const events = [];
+    const MS = 86400000;
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(startDate.getTime() + i * MS);
+        const dateLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        const moon = _sgMoonPhase(d);
+        const moonNext = _sgMoonPhase(new Date(d.getTime() + MS));
+        // Moon phase milestone detection (crossing 0, 0.25, 0.5, 0.75)
+        const MOON_MILESTONES = [
+            { t: 0.02, name: 'New Moon',      icon: 'fa-regular fa-circle',           color: '#94a3b8', note: 'Darkest skies — ideal for deep sky' },
+            { t: 0.25, name: 'First Quarter', icon: 'fa-solid fa-circle-half-stroke', color: '#818cf8', note: 'Moon sets around midnight' },
+            { t: 0.50, name: 'Full Moon',     icon: 'fa-solid fa-circle',             color: '#fbbf24', note: 'Bright sky — lunar observing only' },
+            { t: 0.75, name: 'Last Quarter',  icon: 'fa-solid fa-circle-half-stroke', color: '#818cf8', note: 'Moon rises around midnight' },
+        ];
+        for (const m of MOON_MILESTONES) {
+            const distToday = Math.abs(moon.phase - m.t);
+            const distTomorrow = Math.abs(moonNext.phase - m.t);
+            if (distToday < 0.045 && distToday <= distTomorrow && !events.find(e => e.name === m.name)) {
+                events.push({ dayIndex: i, dateLabel, type: 'moon', name: m.name, icon: m.icon, color: m.color, note: m.note });
+                break;
+            }
+        }
+        // Meteor showers
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        for (const shower of _SGP_METEOR_SHOWERS) {
+            const [pm, pd] = shower.peak.split('-').map(Number);
+            const peakDate = new Date(d.getFullYear(), pm - 1, pd);
+            const diffDays = Math.round((d - peakDate) / MS);
+            const halfDur  = Math.floor(shower.dur / 2);
+            if (Math.abs(diffDays) <= halfDur) {
+                const atPeak = diffDays === 0;
+                // Avoid duplicating same shower on adjacent days
+                if (!events.find(e => e.name.startsWith(shower.name))) {
+                    events.push({
+                        dayIndex: i, dateLabel, type: 'meteor',
+                        name: `${shower.name}${atPeak ? ' (Peak)' : ''}`,
+                        icon: 'fa-solid fa-meteor', color: '#f43f5e',
+                        note: atPeak ? `Peak night — ~${shower.zhr} meteors/hr` : `Active window (peak ${shower.peak})`,
+                    });
+                }
+            }
+        }
+    }
+    return events;
+}
+
+/** Return clothing recommendations for a given forecast minimum temperature (°C). */
+function _sgpClothing(tempMin) {
+    if (tempMin == null) return [];
+    if (tempMin >= 20) return ['Light layers — T-shirt and long sleeves', 'Insect repellent for late-night sessions'];
+    if (tempMin >= 12) return ['Warm jacket or fleece', 'Comfortable trousers', 'Light gloves optional'];
+    if (tempMin >=  4) return ['Insulating mid-layer + windproof jacket', 'Warm hat and gloves', 'Thermal base layer recommended'];
+    if (tempMin >= -5) return ['Heavy winter jacket', 'Full thermal layers', 'Wool hat + insulated gloves', 'Hand warmers'];
+    return ['Extreme cold gear', 'Multiple thermal layers essential', 'Insulated boots + balaclava', 'Hand and foot warmers'];
+}
+
+/** Format a timestamp as a human-readable "time ago" string. */
+function _sgpTimeAgo(ts) {
+    if (!ts) return 'unknown';
+    const mins = Math.round((Date.now() - ts) / 60000);
+    if (mins < 2)  return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+    return `${Math.round(mins / 1440)}d ago`;
+}
+
+/** Sync the empty-state div visibility. */
+function _sgpSyncEmptyState() {
+    const empty   = document.getElementById('sgpEmpty');
+    const results = document.getElementById('sgpResults');
+    const saved   = document.getElementById('sgpSavedSection');
+    if (!empty) return;
+    const hasResults = results && !results.classList.contains('hidden');
+    const hasSaved   = saved   && !saved.classList.contains('hidden');
+    empty.classList.toggle('hidden', hasResults || hasSaved);
+}
+
+/** Main search entry point — called from "Go" button and Enter key. */
+async function _sgpSearch() {
+    const input = document.getElementById('sgpInput');
+    if (!input) return;
+    const query = input.value.trim();
+    if (!query) return;
+
+    // Hide previous results and show loading
+    const errEl = document.getElementById('sgpError');
+    if (errEl) errEl.classList.add('hidden');
+    _sgpShowResults(false);
+    _sgpShowLoading(true);
+    _sgpSyncEmptyState();
+
+    try {
+        // Step 1: resolve to coordinates
+        const loc = await _sgpResolveLocation(query);
+        if (loc.error) {
+            _sgpShowLoading(false);
+            _sgpShowError(loc.message);
+            _sgpSyncEmptyState();
+            return;
+        }
+
+        // Step 2: fetch 7-day Open-Meteo data
+        const weatherData = await _sgpFetch7Day(loc.lat, loc.lon);
+        if (!weatherData) {
+            _sgpShowLoading(false);
+            _sgpShowError('Weather data unavailable. Please try again in a moment.');
+            _sgpSyncEmptyState();
+            return;
+        }
+
+        // Step 3: build result object
+        const result = {
+            id:          `${loc.lat.toFixed(3)}_${loc.lon.toFixed(3)}`,
+            lat:         loc.lat,
+            lon:         loc.lon,
+            name:        loc.name,
+            country:     loc.country,
+            tier:        loc.tier,
+            fetchedAt:   Date.now(),
+            weatherData,
+        };
+
+        // Step 4: render and show (reset date picker for new searches)
+        _sgpTargetDate = null;
+        _sgpShowLoading(false);
+        _sgpRenderResults(result);
+        _sgpShowResults(true);
+        _sgpSyncEmptyState();
+
+        // Auto-refresh saved entry if this location is already saved
+        _sgpAutoRefreshSaved(result);
+
+    } catch (err) {
+        _sgpShowLoading(false);
+        _sgpShowError('Something went wrong. Check your connection and try again.');
+        _sgpSyncEmptyState();
+    }
+}
+
+function _sgpShowLoading(show) {
+    const el = document.getElementById('sgpLoading');
+    if (el) el.classList.toggle('hidden', !show);
+}
+
+function _sgpShowResults(show) {
+    const el = document.getElementById('sgpResults');
+    if (el) el.classList.toggle('hidden', !show);
+}
+
+function _sgpShowError(msg) {
+    const el = document.getElementById('sgpError');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => el.classList.add('hidden'), 7000);
+}
+
+/** Build a 2-column condition card (used in tonight's conditions grid). */
+function _sgpCondCard(icon, label, value, sublabel) {
+    return `<div class="rounded-xl px-3 py-2.5" style="background:rgba(13,10,26,0.8);border:1px solid rgba(51,65,85,0.35);">
+        <div class="flex items-center gap-1.5 mb-1.5">
+            <i class="fa-solid ${icon} text-slate-600 text-[9px]"></i>
+            <span class="text-[8px] font-black uppercase tracking-wider text-slate-600">${label}</span>
+        </div>
+        <div class="text-[20px] font-black text-slate-200 leading-none">${value}</div>
+        <div class="text-[9px] text-slate-500 mt-1 leading-snug">${sublabel || '—'}</div>
+    </div>`;
+}
+
+/**
+ * Render the full results UI for a location result object.
+ * @param {object} result       - location + weatherData object
+ * @param {string|null} targetDateStr - YYYY-MM-DD target date, or null for default (today)
+ */
+function _sgpRenderResults(result, targetDateStr = null) {
+    const container = document.getElementById('sgpResults');
+    if (!container) return;
+    const { name, country, tier, lat, lon, weatherData, fetchedAt } = result;
+    const { hourly, daily } = weatherData;
+    const bortle = _sgBortleEstimate(name, tier);
+
+    // ── Date-picker window setup ────────────────────────────────────────────
+    // today's YYYY-MM-DD string (local timezone)
+    const _localYMD = d => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
+    const todayStr  = _localYMD(new Date());
+    const targetStr = targetDateStr || todayStr;
+    const isCustomDate = !!targetDateStr && targetDateStr !== todayStr;
+
+    // Find target day index in the daily array (0 = today, etc.)
+    const targetDayIdx = daily.findIndex(d => d.date === targetStr);
+    // Default view: always show the first 7 days (today → today+6).
+    // Date-picker view: ±3-day window centred on the chosen date, clamped to available data.
+    let winStart, winEnd;
+    if (!isCustomDate) {
+        winStart = 0;
+        winEnd   = Math.min(6, daily.length - 1);
+    } else {
+        const idx = targetDayIdx >= 0 ? targetDayIdx : 0;
+        winStart  = Math.max(0, idx - 3);
+        winEnd    = Math.min(daily.length - 1, idx + 3);
+    }
+    const windowDaily  = daily.slice(winStart, winEnd + 1);
+    const windowOffset = winStart; // how many days into `daily` the window starts
+
+    // ── Per-day seeing scores ───────────────────────────────────────────────
+    const dayScores = windowDaily.map((day, wi) => {
+        const i = wi + windowOffset; // global day index from today
+        const isTarget   = day.date === targetStr;
+        const isPast     = day.date < todayStr;
+        const start      = day.date + 'T00:00';
+        const end        = day.date + 'T23:59';
+        const nightHours = hourly.filter(h => h.time >= start && h.time <= end && !h.isDay);
+        const moon       = _sgMoonPhase(new Date(day.date + 'T20:00'));
+        const dayResult  = _sgpDayScore(nightHours, moon.illumination);
+        const score      = dayResult.score;
+        const conf       = _sgpConfidence(i);
+        const qual       = _sgSeeingLabel(score);
+        const dayLabel   = new Date(day.date + 'T12:00').toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+        const border     = isTarget
+            ? 'rgba(139,92,246,0.70)'
+            : score >= 70 ? 'rgba(139,92,246,0.40)'
+            : score >= 50 ? 'rgba(34,197,94,0.30)'
+            : score >= 30 ? 'rgba(245,158,11,0.30)'
+            : 'rgba(100,116,139,0.18)';
+        return { score, conf, qual, dayLabel, border, day, moon, isTarget, isPast };
+    });
+
+    // Best night (within the visible window)
+    const bestDay   = dayScores.reduce((b, d) => d.score > b.score ? d : b, dayScores[0] || { score: 0 });
+    const bestLabel = bestDay.day ? new Date(bestDay.day.date + 'T12:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }) : '—';
+    // Target date display label (for conditions header)
+    const targetDayEntry = daily.find(d => d.date === targetStr);
+    const targetDateLabel = targetDayEntry
+        ? new Date(targetStr + 'T12:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
+        : null;
+
+    // ── Next New Moon countdown ─────────────────────────────────────────────
+    // Phase 0/1 = New Moon, increases linearly over 29.53 days.
+    // Days remaining = (1 - phase) * 29.53  (wraps correctly at any phase)
+    const todayMoon      = _sgMoonPhase(new Date());
+    // phase < 0.025 means we're IN the new moon window → 0 days remaining
+    const daysToNewMoon  = todayMoon.phase < 0.025
+        ? 0
+        : Math.max(1, Math.round((1 - todayMoon.phase) * 29.53));
+    const newMoonDate    = new Date(Date.now() + daysToNewMoon * 86400000);
+    const newMoonDateLbl = newMoonDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    // Also compute days to Full Moon (phase 0.5)
+    // Guard: if we're in the full moon window (phase 0.47–0.53), daysToFull = 0
+    const phaseToFull    = todayMoon.phase < 0.5 ? 0.5 - todayMoon.phase : 1.5 - todayMoon.phase;
+    const daysToFull     = (todayMoon.phase >= 0.47 && todayMoon.phase <= 0.53)
+        ? 0
+        : Math.round(phaseToFull * 29.53);
+
+    // Decide what to feature: if New Moon is sooner (or same), show it; otherwise show Full Moon warning
+    const showNewMoon    = daysToNewMoon <= daysToFull;
+    let moonBannerHtml;
+    if (showNewMoon && daysToNewMoon === 0) {
+        moonBannerHtml = `
+        <div class="rounded-2xl px-4 py-3 flex items-center gap-3"
+             style="background:linear-gradient(135deg,rgba(15,23,42,0.95) 0%,rgba(30,41,59,0.70) 100%);border:1px solid rgba(148,163,184,0.20);">
+            <i class="fa-regular fa-circle text-slate-300 text-[16px] flex-shrink-0"></i>
+            <div class="flex-1 min-w-0">
+                <div class="text-[8.5px] font-black uppercase tracking-widest text-slate-400/70 mb-0.5">New Moon — Tonight</div>
+                <div class="text-[12px] font-black text-white">Darkest skies of the month</div>
+                <div class="text-[9px] text-slate-400 mt-0.5">Ideal for faint DSOs &amp; Milky Way</div>
+            </div>
+        </div>`;
+    } else if (showNewMoon) {
+        const urgency = daysToNewMoon <= 3 ? 'rgba(167,139,250,0.18)' : 'rgba(51,65,85,0.35)';
+        const urgencyBorder = daysToNewMoon <= 3 ? 'rgba(167,139,250,0.35)' : 'rgba(71,85,105,0.30)';
+        const countdownText = daysToNewMoon === 1 ? 'Tomorrow' : `in ${daysToNewMoon} days`;
+        moonBannerHtml = `
+        <div class="rounded-2xl px-4 py-3 flex items-center gap-3"
+             style="background:${urgency};border:1px solid ${urgencyBorder};">
+            <i class="fa-regular fa-circle text-slate-400 text-[15px] flex-shrink-0"></i>
+            <div class="flex-1 min-w-0">
+                <div class="text-[8.5px] font-black uppercase tracking-widest text-slate-500/80 mb-0.5">Next New Moon</div>
+                <div class="text-[12px] font-black text-slate-200">${countdownText} · ${newMoonDateLbl}</div>
+                <div class="text-[9px] text-slate-500 mt-0.5">Darkest skies — best for deep-sky &amp; Milky Way</div>
+            </div>
+            ${daysToNewMoon <= 3 ? `<span class="text-[8px] font-black uppercase px-2 py-0.5 rounded-full flex-shrink-0"
+                style="background:rgba(167,139,250,0.18);color:rgb(196,181,253);border:1px solid rgba(167,139,250,0.30);">Soon</span>` : ''}
+        </div>`;
+    } else {
+        // Full Moon is nearer — warn
+        const fullCountdown = daysToFull === 0 ? 'Tonight' : daysToFull === 1 ? 'Tomorrow' : `in ${daysToFull} days`;
+        moonBannerHtml = `
+        <div class="rounded-2xl px-4 py-3 flex items-center gap-3"
+             style="background:rgba(251,191,36,0.07);border:1px solid rgba(251,191,36,0.18);">
+            <i class="fa-solid fa-circle text-amber-300 text-[15px] flex-shrink-0" style="filter:drop-shadow(0 0 5px rgba(251,191,36,0.45));"></i>
+            <div class="flex-1 min-w-0">
+                <div class="text-[8.5px] font-black uppercase tracking-widest text-amber-400/60 mb-0.5">Full Moon ${fullCountdown}</div>
+                <div class="text-[12px] font-black text-amber-100">Bright skies this week</div>
+                <div class="text-[9px] text-slate-500 mt-0.5">New Moon ${daysToNewMoon > 0 ? `in ${daysToNewMoon} days` : 'tonight'} · ${newMoonDateLbl}</div>
+            </div>
+        </div>`;
+    }
+
+    // ── Day card moon icon helper (compact FA, 11px) ─────────────────────────
+    const _moonMiniIcon = (moon) => {
+        const p = moon.phase;
+        const illumPct = Math.round(moon.illumination * 100);
+        let icon, color;
+        if (p < 0.025 || p >= 0.975) { icon = 'fa-regular fa-circle';          color = 'rgba(148,163,184,0.5)'; }
+        else if (p < 0.26)            { icon = 'fa-solid fa-moon';              color = '#cbd5e1'; }
+        else if (p < 0.49)            { icon = 'fa-solid fa-circle';            color = 'rgba(203,213,225,0.65)'; }
+        else if (p < 0.51)            { icon = 'fa-solid fa-circle';            color = '#f8fafc'; }
+        else if (p < 0.74)            { icon = 'fa-solid fa-circle';            color = 'rgba(203,213,225,0.55)'; }
+        else if (p < 0.76)            { icon = 'fa-solid fa-circle-half-stroke'; color = '#cbd5e1'; }
+        else                          { icon = 'fa-solid fa-moon';              color = '#94a3b8'; }
+        return { icon, color, illumPct };
+    };
+
+    const dayCardHtml = dayScores.map(({ score, conf, qual, dayLabel, border, moon, isTarget, isPast }) => {
+        const mi = _moonMiniIcon(moon);
+        // Target card: wider, glowing, larger score; past cards: dimmed
+        const cardWidth  = isTarget ? 'min-w-[72px]' : 'min-w-[58px]';
+        const cardBg     = isTarget
+            ? 'background:rgba(30,10,60,0.90);'
+            : 'background:rgba(13,10,26,0.7);';
+        const glowStyle  = isTarget
+            ? 'box-shadow:0 0 0 2px rgba(139,92,246,0.55),0 0 18px rgba(139,92,246,0.22);'
+            : '';
+        const opacity    = isPast ? 'opacity:0.38;' : '';
+        const scoreSize  = isTarget ? 'text-[26px]' : 'text-[22px]';
+        const targetTag  = isTarget
+            ? `<span class="text-[6.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full mb-0.5"
+                    style="background:rgba(139,92,246,0.25);color:rgb(196,181,253);border:1px solid rgba(139,92,246,0.40);">
+                ${isPast ? 'Past' : 'Target'}
+               </span>`
+            : (isPast ? `<span class="text-[6.5px] text-slate-700 uppercase tracking-wide">Past</span>` : '');
+        return (
+            `<div class="flex-shrink-0 flex flex-col items-center gap-1 rounded-xl p-2.5 ${cardWidth}"
+                  style="${cardBg}border:1px solid ${border};${glowStyle}${opacity}">
+                <span class="text-[8.5px] font-black text-slate-400 uppercase tracking-wide tabular-nums">${dayLabel}</span>
+                ${targetTag}
+                <span class="${scoreSize} font-black leading-none tabular-nums" style="color:${qual.color}">${score}</span>
+                <span class="text-[7.5px] font-bold" style="color:${qual.color}aa">${qual.label.split(' ')[0]}</span>
+                <div class="flex items-center gap-1 mt-0.5">
+                    <i class="${mi.icon} text-[8px]" style="color:${mi.color}"></i>
+                    <span class="text-[7px] font-bold tabular-nums" style="color:${mi.color}">${mi.illumPct}%</span>
+                </div>
+                <span class="text-[6.5px] text-slate-700 tabular-nums">${conf}% conf</span>
+            </div>`
+        );
+    }).join('');
+
+    // ── Target-night conditions (the selected date, or tonight by default) ───
+    const tonight       = targetDayEntry || daily[0];
+    const tonightNightHrs = hourly.filter(h =>
+        tonight && h.time >= tonight.date + 'T20:00' && h.time <= tonight.date + 'T23:59' && !h.isDay
+    );
+    const repSlot = tonightNightHrs[0] || hourly.find(h => !h.isDay) || hourly[0] || {};
+
+    // ── Astronomical events ─────────────────────────────────────────────────
+    const events    = _sgpAstroEvents(new Date());
+    const eventsHtml = events.length === 0
+        ? `<div class="text-[10px] text-slate-600 italic px-1 py-3">No major events in the next 7 days.</div>`
+        : events.map(ev => `
+            <div class="flex items-start gap-3 py-2.5 border-b border-slate-800/40 last:border-0">
+                <div class="w-7 flex-shrink-0 flex items-center justify-center pt-0.5">
+                    <i class="${ev.icon} text-[13px]" style="color:${ev.color}"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-[11px] font-black text-slate-200">${ev.name}</div>
+                    <div class="text-[9px] text-slate-500 mt-0.5 leading-snug">${ev.dateLabel} · ${ev.note}</div>
+                </div>
+            </div>`).join('');
+
+    // ── Clothing ────────────────────────────────────────────────────────────
+    const minTemps  = daily.map(d => d.tempMin).filter(t => t != null);
+    const weekLow   = minTemps.length > 0 ? Math.min(...minTemps) : null;
+    const clothes   = _sgpClothing(weekLow);
+    const clothesHtml = clothes.map(c =>
+        `<div class="flex items-start gap-2">
+            <i class="fa-solid fa-circle text-[4px] text-violet-500/60 mt-1.5 flex-shrink-0"></i>
+            <span class="text-[10px] text-slate-300 leading-relaxed">${c}</span>
+        </div>`
+    ).join('');
+
+    // ── Check if already saved ──────────────────────────────────────────────
+    const isSaved = _sgpIsLocationSaved(lat, lon);
+
+    container.innerHTML = `
+        <!-- Location header -->
+        <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+                <div class="text-[19px] font-black text-white leading-tight">
+                    ${name}${country ? `<span class="text-slate-500 font-bold">, ${country}</span>` : ''}
+                </div>
+                <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full"
+                          style="background:rgba(139,92,246,0.12);color:rgba(196,181,253,0.85);border:1px solid rgba(139,92,246,0.22);">
+                        Bortle ${bortle.class} · ${bortle.label}
+                    </span>
+                    <span class="text-[8px] text-slate-600">Updated ${_sgpTimeAgo(fetchedAt)}</span>
+                </div>
+            </div>
+            <button id="sgpSaveBtn" onclick="_sgpToggleSave()"
+                    class="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider"
+                    style="background:${isSaved ? 'rgba(139,92,246,0.22)' : 'rgba(51,65,85,0.5)'};color:${isSaved ? 'rgb(196,181,253)' : 'rgba(148,163,184,0.8)'};border:1px solid ${isSaved ? 'rgba(139,92,246,0.40)' : 'rgba(71,85,105,0.4)'};-webkit-tap-highlight-color:transparent;">
+                <i class="fa-${isSaved ? 'solid' : 'regular'} fa-bookmark text-[9px]"></i>
+                ${isSaved ? 'Saved' : 'Save'}
+            </button>
+        </div>
+
+        <!-- Best night banner -->
+        <div class="rounded-2xl px-4 py-3 flex items-center gap-3"
+             style="background:linear-gradient(135deg,rgba(139,92,246,0.10) 0%,rgba(99,102,241,0.07) 100%);border:1px solid rgba(139,92,246,0.18);">
+            <i class="fa-solid fa-star text-violet-400 text-[18px]"></i>
+            <div class="flex-1 min-w-0">
+                <div class="text-[8.5px] font-black uppercase tracking-widest text-violet-400/70 mb-0.5">Best Night This Week</div>
+                <div class="text-[13px] font-black text-violet-100">${bestLabel}</div>
+                <div class="text-[9px] text-slate-400 mt-0.5">Score <span class="font-black" style="color:${bestDay.qual?.color}">${bestDay.score}</span> · ${bestDay.qual?.label || '—'}</div>
+            </div>
+        </div>
+
+        <!-- Moon phase / new moon countdown -->
+        ${moonBannerHtml}
+
+        <!-- 7-day grid -->
+        <div>
+            <div class="flex items-center justify-between mb-2.5">
+                <div class="text-[9px] font-black uppercase tracking-widest text-slate-500">
+                    ${isCustomDate ? `Around ${targetDateLabel || targetStr}` : '7-Day Seeing Forecast'}
+                </div>
+                ${isCustomDate
+                    ? `<button onclick="_sgpResetDate()"
+                              class="flex items-center gap-1 px-2 py-1 rounded-lg text-[8px] font-black"
+                              style="background:rgba(51,65,85,0.5);color:rgba(148,163,184,0.8);border:1px solid rgba(71,85,105,0.35);-webkit-tap-highlight-color:transparent;">
+                          <i class="fa-solid fa-xmark text-[8px] pointer-events-none"></i> Reset
+                      </button>`
+                    : ''}
+            </div>
+            ${isCustomDate ? `
+            <div class="flex items-center gap-2 mb-2.5 px-3 py-2 rounded-xl"
+                 style="background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.18);">
+                <i class="fa-regular fa-calendar text-violet-400 text-[10px]"></i>
+                <span class="text-[9px] font-black text-violet-300">Viewing: ${targetDateLabel || targetStr}</span>
+                <span class="text-[8px] text-slate-600 ml-auto">±3 days shown</span>
+            </div>` : ''}
+            <div class="flex gap-2 overflow-x-auto pb-1 wd-forecast-strip">${dayCardHtml}</div>
+            <div class="text-[7.5px] text-slate-700 mt-1.5 flex items-center justify-between">
+                <span>Moon % = illumination · Conf % = forecast confidence</span>
+                <span>Bortle ${bortle.class}</span>
+            </div>
+        </div>
+
+        <!-- Pick a Date / date picker trigger -->
+        <div>
+            <button onclick="_sgpOpenCalendar()"
+                    class="w-full flex items-center justify-between px-4 py-3 rounded-2xl"
+                    style="background:rgba(30,41,59,0.40);border:1px solid rgba(71,85,105,0.28);-webkit-tap-highlight-color:transparent;">
+                <div class="flex items-center gap-2.5">
+                    <i class="fa-regular fa-calendar-days text-slate-400 text-[13px]"></i>
+                    <div class="text-left">
+                        <div class="text-[11px] font-black text-slate-300">
+                            ${isCustomDate ? 'Change Date' : 'Pick a Date'}
+                        </div>
+                        <div class="text-[8.5px] text-slate-600 mt-0.5">
+                            ${isCustomDate
+                                ? `Viewing ${targetDateLabel || targetStr}`
+                                : 'Forecast available up to 16 days ahead'}
+                        </div>
+                    </div>
+                </div>
+                <i class="fa-solid fa-chevron-right text-slate-600 text-[10px]"></i>
+            </button>
+        </div>
+
+        <!-- Target-night conditions -->
+        <div>
+            <div class="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2.5">
+                ${isCustomDate && targetDateLabel ? `${targetDateLabel} · Conditions` : "Tonight's Conditions"}
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+                ${_sgpCondCard('fa-cloud', 'Cloud Cover',
+                    repSlot.cloudCoverLow != null ? `${Math.round(repSlot.cloudCoverLow)}%` : '—',
+                    repSlot.cloudCoverLow == null ? '—' : repSlot.cloudCoverLow < 20 ? 'Clear — excellent' : repSlot.cloudCoverLow < 50 ? 'Partly cloudy' : 'Cloudy')}
+                ${_sgpCondCard('fa-droplet', 'Humidity',
+                    repSlot.humidity != null ? `${Math.round(repSlot.humidity)}%` : '—',
+                    repSlot.humidity == null ? '—' : repSlot.humidity < 50 ? 'Dry — great for optics' : repSlot.humidity < 75 ? 'Moderate' : 'High — dew risk')}
+                ${_sgpCondCard('fa-wind', 'Wind',
+                    repSlot.windSpeed != null ? `${Math.round(repSlot.windSpeed)} km/h` : '—',
+                    repSlot.windSpeed == null ? '—' : repSlot.windSpeed < 10 ? 'Calm' : repSlot.windSpeed < 25 ? 'Light breeze' : 'Windy')}
+                ${_sgpCondCard('fa-temperature-half', 'Night Low',
+                    tonight?.tempMin != null ? `${Math.round(tonight.tempMin)}°C` : '—',
+                    tonight?.tempMin == null ? '—' : tonight.tempMin < 5 ? 'Cold — dress warm' : tonight.tempMin < 15 ? 'Cool' : 'Mild')}
+            </div>
+        </div>
+
+        <!-- Astronomical events -->
+        <div>
+            <div class="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2">Astronomical Events (7 Days)</div>
+            <div class="rounded-xl border border-violet-500/10 px-3 divide-y divide-slate-800/30"
+                 style="background:rgba(13,10,26,0.6);">
+                ${eventsHtml}
+            </div>
+        </div>
+
+        ${clothes.length > 0 ? `
+        <!-- Clothing recommendations -->
+        <div>
+            <div class="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2.5">What to Wear</div>
+            <div class="rounded-xl px-3.5 py-3 space-y-2"
+                 style="background:rgba(13,10,26,0.6);border:1px solid rgba(51,65,85,0.35);">
+                <div class="text-[8px] text-slate-600 mb-1">Based on forecast low: ${weekLow != null ? Math.round(weekLow) + '°C' : '—'}</div>
+                ${clothesHtml}
+            </div>
+        </div>` : ''}
+
+        <!-- Footer attribution -->
+        <div class="text-[7.5px] text-slate-700 leading-relaxed pb-4 border-t border-slate-800/40 pt-3">
+            Score = Transparency (cloud 55% + humidity 25% + precip 20%) × 50% + Seeing (jet stream 40% + stability 35% + wind 25%) × 50%, moon blended at 12%.${weatherData.hasEcmwf ? ' Days 4–7 use ECMWF + GFS blend.' : ''} Weather: Open-Meteo. Moon: Meeus algorithm. Accuracy decreases beyond day 3.
+        </div>
+    `;
+
+    // Store current result for save/toggle
+    window._sgpCurrentResult = result;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  DATE PICKER — calendar overlay + date-centred render
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Currently selected target date string (YYYY-MM-DD), or null for "today". */
+let _sgpTargetDate = null;
+
+/**
+ * Open the date picker calendar overlay inside the planner panel.
+ * Only dates in the range [today, today+15] are selectable.
+ */
+function _sgpOpenCalendar() {
+    // Remove any existing calendar overlay
+    const existing = document.getElementById('sgpCalendarOverlay');
+    if (existing) existing.remove();
+
+    const today    = new Date();
+    today.setHours(0, 0, 0, 0);
+    const maxDate  = new Date(today.getTime() + 15 * 86400000); // today + 15 days (16-day range)
+
+    // Build an array of all calendar days to show.
+    // We show from the Sunday on or before today through the Saturday on or after maxDate,
+    // spanning at most two months.
+    const calStart = new Date(today);
+    calStart.setDate(calStart.getDate() - calStart.getDay()); // back to Sunday
+
+    const calEnd = new Date(maxDate);
+    calEnd.setDate(calEnd.getDate() + (6 - calEnd.getDay())); // forward to Saturday
+
+    // Group days by month for rendering
+    const months = [];
+    let cursor = new Date(calStart);
+    while (cursor <= calEnd) {
+        const mKey = cursor.getFullYear() + '-' + String(cursor.getMonth() + 1).padStart(2, '0');
+        let month = months.find(m => m.key === mKey);
+        if (!month) {
+            month = { key: mKey, label: cursor.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }), days: [] };
+            months.push(month);
+        }
+        month.days.push(new Date(cursor));
+        cursor.setDate(cursor.getDate() + 1);
+    }
+
+    const _fmtYMD = d => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
+
+    const todayStr   = _fmtYMD(today);
+    const maxDateStr = _fmtYMD(maxDate);
+    const selectedStr = _sgpTargetDate || todayStr;
+
+    const DAYS_SHORT = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+
+    const monthsHtml = months.map(month => {
+        const header = `<div class="text-[11px] font-black text-slate-300 mb-2 mt-1">${month.label}</div>`;
+        const dow = `<div class="grid grid-cols-7 gap-0.5 mb-1">
+            ${DAYS_SHORT.map(d => `<div class="text-[8px] font-black text-slate-600 text-center py-0.5">${d}</div>`).join('')}
+        </div>`;
+
+        // Pad beginning with empty cells so the first day lands in the correct column
+        let dayHtml = '<div class="grid grid-cols-7 gap-0.5">';
+        const firstDow = month.days[0].getDay(); // 0=Sun … 6=Sat
+        for (let e = 0; e < firstDow; e++) {
+            dayHtml += '<div></div>';
+        }
+        month.days.forEach(d => {
+            const ds = _fmtYMD(d);
+            const isPast     = ds < todayStr;
+            const isBeyond   = ds > maxDateStr;
+            const isDisabled = isPast || isBeyond;
+            const isToday    = ds === todayStr;
+            const isSelected = ds === selectedStr;
+            const dayNum     = d.getDate();
+
+            let cellStyle = '', textColor = '', ringStyle = '';
+            if (isSelected) {
+                cellStyle = 'background:rgba(139,92,246,0.30);border:1px solid rgba(139,92,246,0.60);';
+                textColor = 'color:#ddd6fe;';
+                ringStyle = 'box-shadow:0 0 0 2px rgba(139,92,246,0.45);';
+            } else if (isToday) {
+                cellStyle = 'background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.30);';
+                textColor = 'color:#a5b4fc;';
+            } else if (isDisabled) {
+                cellStyle = 'background:transparent;border:1px solid transparent;';
+                textColor = 'color:rgba(100,116,139,0.25);';
+            } else {
+                cellStyle = 'background:rgba(30,41,59,0.50);border:1px solid rgba(51,65,85,0.30);';
+                textColor = 'color:#94a3b8;';
+            }
+
+            const clickAttr = isDisabled ? '' : `onclick="_sgpSelectDate('${ds}')"`;
+            const cursor    = isDisabled ? 'cursor:default;' : 'cursor:pointer;';
+            dayHtml += `<div ${clickAttr}
+                class="flex items-center justify-center rounded-lg text-[11px] font-black tabular-nums py-1.5"
+                style="${cellStyle}${textColor}${ringStyle}${cursor}-webkit-tap-highlight-color:transparent;">
+                ${isDisabled ? `<span style="opacity:0.3">${dayNum}</span>` : dayNum}
+            </div>`;
+        });
+        dayHtml += '</div>';
+        return header + dow + dayHtml;
+    }).join('<div class="my-3 border-t border-slate-800/40"></div>');
+
+    const overlay = document.createElement('div');
+    overlay.id = 'sgpCalendarOverlay';
+    overlay.style.cssText = `
+        position:fixed; inset:0; z-index:70;
+        background:rgba(2,6,23,0.88);
+        display:flex; flex-direction:column;
+        -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    `;
+    overlay.innerHTML = `
+        <!-- Header -->
+        <div class="flex items-center justify-between px-5 py-4 border-b border-slate-800/60 flex-shrink-0">
+            <div>
+                <div class="text-[13px] font-black text-white">Pick a Date</div>
+                <div class="text-[9px] text-slate-500 mt-0.5">Forecast available for the next 16 days only</div>
+            </div>
+            <button onclick="_sgpCloseCalendar()"
+                    class="w-8 h-8 rounded-xl flex items-center justify-center"
+                    style="background:rgba(51,65,85,0.6);border:1px solid rgba(71,85,105,0.4);-webkit-tap-highlight-color:transparent;">
+                <i class="fa-solid fa-xmark text-slate-400 text-[13px] pointer-events-none"></i>
+            </button>
+        </div>
+        <!-- Calendar body -->
+        <div class="flex-1 overflow-y-auto px-4 py-3">
+            <!-- Disclaimer -->
+            <div class="flex items-start gap-2.5 rounded-xl px-3 py-2.5 mb-4"
+                 style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.18);">
+                <i class="fa-solid fa-triangle-exclamation text-amber-400 text-[11px] mt-0.5 flex-shrink-0"></i>
+                <span class="text-[9px] text-amber-200/70 leading-relaxed">
+                    Open-Meteo provides hourly forecasts up to <strong class="text-amber-300">16 days ahead</strong>.
+                    Dates beyond <strong class="text-amber-300">${maxDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</strong> are not forecastable.
+                    Confidence drops significantly after day 7.
+                </span>
+            </div>
+            ${monthsHtml}
+        </div>
+        <!-- Footer -->
+        <div class="px-5 py-4 border-t border-slate-800/60 flex-shrink-0">
+            ${_sgpTargetDate ? `
+            <button onclick="_sgpResetDate()"
+                    class="w-full py-2.5 rounded-xl text-[10px] font-black text-slate-400 mb-2"
+                    style="background:rgba(51,65,85,0.35);border:1px solid rgba(71,85,105,0.30);-webkit-tap-highlight-color:transparent;">
+                Reset to Today
+            </button>` : ''}
+            <button onclick="_sgpCloseCalendar()"
+                    class="w-full py-2.5 rounded-xl text-[10px] font-black text-slate-300"
+                    style="background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.22);-webkit-tap-highlight-color:transparent;">
+                Cancel
+            </button>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    // Entry animation
+    overlay.style.opacity = '0';
+    overlay.style.transform = 'translateY(12px)';
+    requestAnimationFrame(() => {
+        overlay.style.transition = 'opacity 0.20s ease, transform 0.20s ease';
+        overlay.style.opacity = '1';
+        overlay.style.transform = 'translateY(0)';
+    });
+}
+
+/** Close the calendar overlay without selecting a date. */
+function _sgpCloseCalendar() {
+    const overlay = document.getElementById('sgpCalendarOverlay');
+    if (!overlay) return;
+    overlay.style.transition = 'opacity 0.15s ease, transform 0.15s ease';
+    overlay.style.opacity    = '0';
+    overlay.style.transform  = 'translateY(8px)';
+    setTimeout(() => overlay.remove(), 180);
+}
+
+/**
+ * Select a date from the calendar. Closes the calendar and re-renders
+ * the results view centred on the chosen date.
+ * @param {string} dateStr YYYY-MM-DD
+ */
+function _sgpSelectDate(dateStr) {
+    _sgpCloseCalendar();
+    _sgpTargetDate = dateStr;
+    const result = window._sgpCurrentResult;
+    if (result) _sgpRenderResults(result, dateStr);
+}
+
+/** Reset the date picker back to the default (today) view. */
+function _sgpResetDate() {
+    _sgpCloseCalendar();
+    _sgpTargetDate = null;
+    const result = window._sgpCurrentResult;
+    if (result) _sgpRenderResults(result, null);
+}
+
+/** Check if a location (by lat/lon) is already saved. */
+function _sgpIsLocationSaved(lat, lon) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        return saved.some(s => Math.abs(s.lat - lat) < 0.1 && Math.abs(s.lon - lon) < 0.1);
+    } catch (_) { return false; }
+}
+
+/** Toggle save state for the currently displayed result. */
+function _sgpToggleSave() {
+    const result = window._sgpCurrentResult;
+    if (!result) return;
+    if (_sgpIsLocationSaved(result.lat, result.lon)) {
+        _sgpDeleteByLatLon(result.lat, result.lon);
+    } else {
+        _sgpSaveResult(result);
+    }
+    // Re-render just the save button
+    const btn = document.getElementById('sgpSaveBtn');
+    if (btn) {
+        const saved = _sgpIsLocationSaved(result.lat, result.lon);
+        btn.innerHTML = `<i class="fa-${saved ? 'solid' : 'regular'} fa-bookmark text-[9px]"></i> ${saved ? 'Saved' : 'Save'}`;
+        btn.style.background = saved ? 'rgba(139,92,246,0.22)' : 'rgba(51,65,85,0.5)';
+        btn.style.color      = saved ? 'rgb(196,181,253)'      : 'rgba(148,163,184,0.8)';
+        btn.style.border     = `1px solid ${saved ? 'rgba(139,92,246,0.40)' : 'rgba(71,85,105,0.4)'}`;
+    }
+    _sgpRenderSaved();
+    _sgpSyncEmptyState();
+}
+
+/** Save a result to localStorage. */
+function _sgpSaveResult(result) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        const idx   = saved.findIndex(s => Math.abs(s.lat - result.lat) < 0.1 && Math.abs(s.lon - result.lon) < 0.1);
+        if (idx !== -1) { saved[idx] = result; }
+        else {
+            if (saved.length >= _SGP_MAX_SAVED) saved.shift(); // drop oldest
+            saved.push(result);
+        }
+        localStorage.setItem(_SGP_LS_KEY, JSON.stringify(saved));
+    } catch (_) {}
+}
+
+/** Delete a saved entry by lat/lon match. */
+function _sgpDeleteByLatLon(lat, lon) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        const filtered = saved.filter(s => !(Math.abs(s.lat - lat) < 0.1 && Math.abs(s.lon - lon) < 0.1));
+        localStorage.setItem(_SGP_LS_KEY, JSON.stringify(filtered));
+    } catch (_) {}
+}
+
+/** Delete a saved entry by index in the saved array. */
+function _sgpDeleteSaved(index) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        // index is from the reversed display list — convert back to real array position
+        const realIndex = saved.length - 1 - index;
+        if (realIndex < 0 || realIndex >= saved.length) return;
+        const deletedItem = saved[realIndex]; // capture before splice
+        saved.splice(realIndex, 1);
+        localStorage.setItem(_SGP_LS_KEY, JSON.stringify(saved));
+        _sgpRenderSaved();
+        _sgpSyncEmptyState();
+        // If the deleted entry is the one currently shown, clear the results view
+        const curr = window._sgpCurrentResult;
+        if (curr && deletedItem && Math.abs(curr.lat - deletedItem.lat) < 0.1) {
+            _sgpShowResults(false);
+            _sgpSyncEmptyState();
+        }
+    } catch (_) {}
+}
+
+/** Auto-refresh a saved entry if its location already exists in saved list. */
+function _sgpAutoRefreshSaved(result) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        const idx   = saved.findIndex(s => Math.abs(s.lat - result.lat) < 0.1 && Math.abs(s.lon - result.lon) < 0.1);
+        if (idx !== -1) {
+            saved[idx] = result;
+            localStorage.setItem(_SGP_LS_KEY, JSON.stringify(saved));
+            _sgpRenderSaved();
+        }
+    } catch (_) {}
+}
+
+/** Load and display a saved location (tapping a saved card). */
+function _sgpLoadSaved(displayIndex) {
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        const realIndex = saved.length - 1 - displayIndex;
+        const loc = saved[realIndex];
+        if (!loc) return;
+
+        window._sgpCurrentResult = loc;
+        _sgpTargetDate = null; // Reset date picker when loading a new location
+
+        // Show stale data immediately (stale-while-revalidate)
+        _sgpRenderResults(loc);
+        _sgpShowResults(true);
+        _sgpSyncEmptyState();
+
+        // Scroll results into view
+        const section = document.getElementById('sgpResultsSection');
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        // Silently refresh data in background
+        _sgpFetch7Day(loc.lat, loc.lon).then(weatherData => {
+            if (!weatherData) return;
+            loc.weatherData = weatherData;
+            loc.fetchedAt   = Date.now();
+            saved[realIndex] = loc;
+            localStorage.setItem(_SGP_LS_KEY, JSON.stringify(saved));
+            window._sgpCurrentResult = loc;
+            _sgpRenderResults(loc); // re-render with fresh data
+            _sgpRenderSaved();
+        }).catch(() => {});
+    } catch (_) {}
+}
+
+/** Render the saved locations list. */
+function _sgpRenderSaved() {
+    const container = document.getElementById('sgpSavedList');
+    const section   = document.getElementById('sgpSavedSection');
+    if (!container) return;
+    try {
+        const saved = JSON.parse(localStorage.getItem(_SGP_LS_KEY) || '[]');
+        if (saved.length === 0) {
+            if (section) section.classList.add('hidden');
+            _sgpSyncEmptyState();
+            return;
+        }
+        if (section) section.classList.remove('hidden');
+
+        // Display newest first (reverse index)
+        container.innerHTML = saved.slice().reverse().map((loc, displayIdx) => {
+            const bortle = _sgBortleEstimate(loc.name, loc.tier);
+            const ago    = _sgpTimeAgo(loc.fetchedAt || 0);
+            // Build 7 mini dot scores
+            const dots = (loc.weatherData?.daily || []).slice(0, 7).map((day) => {
+                const start = day.date + 'T00:00', end = day.date + 'T23:59';
+                const nightHrs = (loc.weatherData?.hourly || []).filter(h => h.time >= start && h.time <= end && !h.isDay);
+                const moon  = _sgMoonPhase(new Date(day.date + 'T20:00'));
+                const score = _sgpDayScore(nightHrs, moon.illumination).score;
+                const c     = score >= 70 ? '#8b5cf6' : score >= 50 ? '#22c55e' : score >= 30 ? '#f59e0b' : '#475569';
+                return `<span style="width:6px;height:6px;border-radius:50%;background:${c};display:inline-block;flex-shrink:0;"></span>`;
+            }).join('');
+            // Best score
+            const allScores = (loc.weatherData?.daily || []).map((day) => {
+                const start = day.date + 'T00:00', end = day.date + 'T23:59';
+                const nightHrs = (loc.weatherData?.hourly || []).filter(h => h.time >= start && h.time <= end && !h.isDay);
+                const moon = _sgMoonPhase(new Date(day.date + 'T20:00'));
+                return _sgpDayScore(nightHrs, moon.illumination).score;
+            });
+            const best    = allScores.length > 0 ? Math.max(...allScores) : 0;
+            const bestQ   = _sgSeeingLabel(best);
+            return `<div class="flex items-center gap-3 px-4 py-3 border-b border-slate-800/40 last:border-0"
+                         onclick="_sgpLoadSaved(${displayIdx})"
+                         style="-webkit-tap-highlight-color:transparent;cursor:pointer;">
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-[13px] font-black text-white truncate">${loc.name}</span>
+                        ${loc.country ? `<span class="text-[10px] text-slate-500">${loc.country}</span>` : ''}
+                    </div>
+                    <div class="flex items-center gap-2 mt-1">
+                        <div class="flex items-center gap-0.5 flex-shrink-0">${dots}</div>
+                        <span class="text-[8px] text-slate-600">B${bortle.class} · ${ago}</span>
+                    </div>
+                    <div class="text-[9px] mt-0.5 font-bold" style="color:${bestQ.color}aa">Best: ${best} · ${bestQ.label}</div>
+                </div>
+                <button onclick="event.stopPropagation();_sgpDeleteSaved(${displayIdx});"
+                        class="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-full"
+                        style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.15);-webkit-tap-highlight-color:transparent;">
+                    <i class="fa-solid fa-trash text-[9px] text-red-500/70 pointer-events-none"></i>
+                </button>
+            </div>`;
+        }).join('');
+    } catch (_) {
+        if (section) section.classList.add('hidden');
+    }
+    _sgpSyncEmptyState();
 }
 
 // ── Background refresh (drawer closed) ───────────────────────────────────────
@@ -3504,7 +5388,7 @@ function openConverterCurrencyPicker(side) {
     const search = document.getElementById('cdPickerSearch');
     if (!panel) return;
 
-    if (title) title.textContent = side === 'from' ? 'Select FROM currency' : 'Select TO currency';
+    if (title) title.textContent = side === 'from' ? 'Select From Currency' : 'Select Target Currency';
 
     panel.classList.remove('hidden');
     panel.style.maxHeight  = '0px';
@@ -4084,9 +5968,9 @@ function _calcUsAqi(pm25) {
 function _getUvLabel(uvi) {
     const u = Math.round(uvi || 0);
     if (u <= 2)  return { label: 'Low',       color: '#4ade80', advice: 'Sunscreen optional'    };
-    if (u <= 5)  return { label: 'Moderate',  color: '#facc15', advice: 'SPF 30+ recommended'  };
+    if (u <= 5)  return { label: 'Moderate',  color: '#facc15', advice: 'Use sunscreen'  };
     if (u <= 7)  return { label: 'High',      color: '#fb923c', advice: 'SPF 50+ advised'       };
-    if (u <= 10) return { label: 'Very High', color: '#f87171', advice: 'Limit 10am – 4pm'      };
+    if (u <= 10) return { label: 'Very High', color: '#f87171', advice: 'Limit 10am–4pm'      };
     return              { label: 'Extreme',   color: '#e879f9', advice: 'Avoid midday sun'       };
 }
 
@@ -4098,7 +5982,7 @@ function _getAqiLabel(aqi) {
     const v = Math.round(aqi || 0);
     if (v <= 50)  return { label: 'Good',                    color: '#4ade80' };
     if (v <= 100) return { label: 'Moderate',                color: '#facc15' };
-    if (v <= 150) return { label: 'Unhealthy (Sensitive)',   color: '#fb923c' };
+    if (v <= 150) return { label: 'Unhealthy for sensitive groups',   color: '#fb923c' };
     if (v <= 200) return { label: 'Unhealthy',               color: '#f87171' };
     if (v <= 300) return { label: 'Very Unhealthy',          color: '#e879f9' };
     return              { label: 'Hazardous',                color: '#dc2626' };
@@ -4144,7 +6028,7 @@ function renderHiddenPinsDrawerContent() {
 
     if (countLabel) {
         const n = hiddenSpots.length;
-        countLabel.textContent = n === 0 ? 'All spots are visible' : `${n} spot${n !== 1 ? 's' : ''} hidden by type filter`;
+        countLabel.textContent = n === 0 ? 'All Spots Are Visible' : `${n} spot${n !== 1 ? 's' : ''} hidden by type filter`;
     }
 
     body.innerHTML = '';
@@ -4484,7 +6368,7 @@ function handleAdaptiveDirectionClick(buttonElement, event) {
     } else if (lat !== "" && lat !== "0" && lng !== "" && lng !== "0") {
         window.open(`https://maps.google.com/?q=${lat},${lng}`, '_blank');
     } else {
-        triggerCuteSpeechBubbleHUD("Map data missing in database!", buttonElement, event);
+        triggerCuteSpeechBubbleHUD("No map data", buttonElement, event);
     }
 }
 
@@ -4682,8 +6566,8 @@ function renderList() {
             emptyDiv.innerHTML = `
                 <div class="flex flex-col items-center justify-center py-16 text-center px-6">
                     <i class="fa-regular fa-star text-3xl text-slate-700 mb-4"></i>
-                    <p class="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">No starred spots</p>
-                    <p class="text-[11px] text-slate-600 font-medium">Star a spot to save it here.</p>
+                    <p class="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">No Starred Spots</p>
+                    <p class="text-[11px] text-slate-600 font-medium">Star a spot to save it here</p>
                     <button onclick="setPriorityFilterState(false)"
                             class="mt-5 px-5 py-2 bg-slate-900 border border-slate-800 rounded-xl text-[10px] font-black text-slate-400 active:bg-slate-800 transition-colors">
                         Show All
@@ -4693,7 +6577,7 @@ function renderList() {
             // Generic empty state (city filter, search, etc.)
             emptyDiv.innerHTML = `
                 <div class="text-center text-slate-600 py-12 text-xs">
-                    No entries loaded matching these selection profiles.
+                    No results found
                 </div>`;
         }
         scrollContainerFrame.appendChild(emptyDiv);
@@ -4719,7 +6603,7 @@ function renderList() {
                 if(t.trim()) hoursHTMLTokens += `<div class="flex justify-between border-b border-slate-950 last:border-0 py-0.5"><span>${t.trim()}</span></div>`;
             });
         } else {
-            hoursHTMLTokens = `<div class="text-slate-600 italic text-[10px]">Schedule unpopulated.</div>`;
+            hoursHTMLTokens = `<div class="text-slate-600 italic text-[10px]">No schedule</div>`;
         }
 
         const cardWrapper = document.createElement('div');
@@ -4757,7 +6641,7 @@ function renderList() {
                             </div>
                         </div>
                         <div class="mt-3 bg-slate-950/40 p-2.5 rounded-xl border border-slate-900/60 min-h-[90px] overflow-hidden">
-                            <p class="text-xs ${isDone ? 'text-slate-500 line-through' : 'text-slate-400'} leading-relaxed max-h-16 overflow-hidden pr-1" style="touch-action: pan-y;" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)">${spot.notes || 'No custom notes.'}</p>
+                            <p class="text-xs ${isDone ? 'text-slate-500 line-through' : 'text-slate-400'} leading-relaxed max-h-16 overflow-hidden pr-1" style="touch-action: pan-y;" ontouchstart="handleNoteTouchStartEvent(event, this.innerText)" ontouchmove="handleNoteTouchMoveEvent(event)" ontouchend="handleNoteTouchEndEvent(event)" onmousedown="handleNoteMouseDownEvent(event, this.innerText)" onmousemove="handleNoteMouseMoveEvent(event)" onmouseup="handleNoteMouseUpEvent(event)">${spot.notes || 'No custom notes'}</p>
                         </div>
                     </div>
                     <div class="flex flex-col gap-2 mt-3">
@@ -4767,7 +6651,7 @@ function renderList() {
                                 ${isDone ? '<i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions' : (!hasValidMapDestination ? '<i class="fa-solid fa-triangle-exclamation"></i>' : '<i class="fa-solid fa-map mr-1.5 text-sm"></i> Directions')}
                             </button>
                         </div>
-                        ${ticketLink.trim() !== "" && !isDone ? `<a href="${ticketLink}" target="_blank" class="w-full mt-1 bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">📄 View Ticket Details</a>` : ''}
+                        ${ticketLink.trim() !== "" && !isDone ? `<a href="${ticketLink}" target="_blank" class="w-full mt-1 bg-emerald-600 text-center text-xs font-bold py-2.5 rounded-xl text-white block">View Ticket Details</a>` : ''}
                         <div class="flex gap-2 mt-1 justify-end items-center">
                             <button onclick="handleManualInlineCardFlipExecution(event, '${uniqueCardContainerId}', 'forward')" class="px-2.5 py-1.5 rounded-lg text-[11px] font-black tracking-wide mr-auto ${isDone ? 'text-slate-600 bg-slate-950/50 border border-slate-800/30 opacity-40 pointer-events-none' : 'text-sky-400 bg-sky-500/10 border border-sky-500/20 active:bg-sky-500/20'}">
                                 <i class="fa-solid fa-circle-info mr-1"></i> Extra Info
@@ -4783,7 +6667,7 @@ function renderList() {
                         <span class="text-[8px] text-slate-600 font-mono">ID: #${spot.rowid}</span>
                     </div>
                     <div class="flex-1 overflow-y-auto subtle-scrollbar my-2 pr-0.5 space-y-3 text-[11px]">
-                        <p class="text-slate-300 leading-relaxed font-medium bg-slate-950/50 border border-slate-950 p-2.5 rounded-xl">${(spot.long_description && spot.long_description !== "N/A") ? spot.long_description : 'No background summary recorded.'}</p>
+                        <p class="text-slate-300 leading-relaxed font-medium bg-slate-950/50 border border-slate-950 p-2.5 rounded-xl">${(spot.long_description && spot.long_description !== "N/A") ? spot.long_description : 'No background summary recorded'}</p>
                         
                         <div>
                             <span class="text-[8px] font-black uppercase tracking-widest text-slate-500 block mb-0.5">Schedule</span>
@@ -4810,7 +6694,7 @@ function renderList() {
     tailEndLabelDeckNode.className = "dynamic-tailpiece-node w-full py-4 flex items-center justify-center gap-4 shrink-0 block px-4";
     tailEndLabelDeckNode.innerHTML = `
         <div class="flex-grow border-t border-slate-900 max-w-[40px]"></div>
-        <span class="text-[9px] font-bold tracking-[0.15em] uppercase text-slate-600 whitespace-nowrap">End of filtered list</span>
+        <span class="text-[9px] font-bold tracking-[0.15em] uppercase text-slate-600 whitespace-nowrap">End Of Filtered List</span>
         <div class="flex-grow border-t border-slate-900 max-w-[40px]"></div>
     `;
     scrollContainerFrame.appendChild(tailEndLabelDeckNode);
@@ -4872,7 +6756,7 @@ function updateNetworkStatusHUD() {
     } else {
         indicator.className = "w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse";
         syncText.className = "text-[9px] font-mono text-amber-400 font-black tracking-wide";
-        syncText.innerText = "OFFLINE MODE";
+        syncText.innerText = "Offline Mode";
     }
 }
 
@@ -5267,7 +7151,7 @@ async function executePurgeWithPassword() {
 
     // Loading state
     const origHTML = btn.innerHTML;
-    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-1.5"></i>Purging...';
+    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-1.5"></i>Deleting...';
     btn.disabled = true;
     err.classList.add('hidden');
 
@@ -5288,16 +7172,16 @@ async function executePurgeWithPassword() {
 
         if (outcome.result === 'success') {
             syncData(true);
-            openSettingsResultModal('success', 'Logs Purged', 'Google Sheets server records and log metrics have been fully scrubbed.');
+            openSettingsResultModal('success', 'Logs Purged', 'Server records and logs have been cleared.');
         } else if (outcome.result === 'auth_failed') {
-            openSettingsResultModal('error', 'Access Denied', 'Invalid Admin Password. The purge request was rejected.');
+            openSettingsResultModal('error', 'Access Denied', 'Incorrect admin password. Purge request rejected.');
         } else {
-            openSettingsResultModal('error', 'Server Error', outcome.error || 'Unknown response received from cloud ecosystem.');
+            openSettingsResultModal('error', 'Server Error', outcome.error || 'Unknown response received from cloud.');
         }
     } catch (err) {
         console.error('Purge failure:', err);
         closeSettingsPurgeModal();
-        openSettingsResultModal('error', 'Connection Failed', 'Communication crash. Verify your web app script setup.');
+        openSettingsResultModal('error', 'Connection Failed', 'Connection error. Check your web app script setup.');
     } finally {
         btn.innerHTML = origHTML;
         btn.disabled = false;
@@ -5498,7 +7382,7 @@ function commitProfileRename() {
         faIcon: 'fa-user-pen', iconBg: 'bg-violet-500/10', iconColor: 'text-violet-400',
         topBar: 'h-0.5 w-full bg-gradient-to-r from-violet-500 to-pink-500',
         title: 'Rename Profile',
-        body:  `Change your identity from "${oldName}" to "${newName}"?`,
+        body:  `Change your name from "${oldName}" to "${newName}"?`,
         btnLabel: 'Update Profile',
         cancelCallback: () => toggleProfileDrawer(true),
         btnClass: 'bg-gradient-to-r from-violet-600 to-pink-600',
@@ -5565,7 +7449,7 @@ function commitProfileRename() {
             toggleProfileDrawer(false);
             // Only re-fetch itineraries (spots don't change on rename)
             if (typeof loadUserItineraries === 'function') loadUserItineraries();
-            openSettingsResultModal('success', 'Profile Updated', `Identity profile updated to "${newName}". Syncing resources...`);
+            openSettingsResultModal('success', 'Profile Updated', `Profile updated to "${newName}". Syncing...`);
         }
     });
 }
@@ -5580,8 +7464,8 @@ function clearDeviceSessionAndLogout() {
         faIcon: 'fa-right-from-bracket', iconBg: 'bg-red-500/10', iconColor: 'text-red-400',
         topBar: 'h-0.5 w-full bg-gradient-to-r from-red-500 to-rose-500',
         title: 'Logout Session',
-        body:  'Your active profile context will be dropped and the local offline registry cache will be fully reset.',
-        btnLabel: 'Logout & Reset',
+        body:  'You will be logged out and your saved offline cache data will be completely reset.',
+        btnLabel: 'Log Out And Reset',
         btnClass: 'bg-gradient-to-r from-red-600 to-rose-700',
         callback: () => {
             // Preserve the registered-users list across logout so the login
@@ -6089,7 +7973,7 @@ function handleHolidayNotifierTap(event) {
     if (typeof killLiveSpeechBubbleHUDState === 'function') killLiveSpeechBubbleHUDState();
 
     // Two-line message via innerHTML (content is hardcoded / safe)
-    textNode.innerHTML = 'Public Holiday Reminder!<br>Check the calendar of the selected city.';
+    textNode.innerHTML = 'Public holiday reminder!<br>Check the calendar of the selected city.';
 
     // Position bubble above the notifier button
     const btn = document.getElementById('holidayNotifierBtn');
@@ -6362,7 +8246,7 @@ function _tasksBuildRow(spot, taskKey, action, isDone, isMuted) {
                 <button onclick="tasksToggleMute('${safeKey}')"
                         class="shrink-0 whitespace-nowrap inline-flex items-center gap-1 text-[9px] font-bold text-slate-500 border border-slate-700/50 rounded-lg px-2 py-0.5 active:bg-slate-800 transition-colors">
                     <i class="fa-solid ${isMuted ? 'fa-bell' : 'fa-bell-slash'} text-[8px]"></i>
-                    ${isMuted ? 'Unmute' : "Don't remind"}
+                    ${isMuted ? 'Unmute' : "Don't Remind"}
                 </button>
             </div>
             ${note ? `<p class="text-[10px] text-slate-500 font-medium line-clamp-1">${_esc(note)}</p>` : ''}
@@ -6397,7 +8281,7 @@ function _renderTasksList() {
 // ── Saved Spots tab ───────────────────────────────────────────────────────
 function _tasksRenderSavedTab(container) {
     const rows = Array.isArray(travelSpots) ? travelSpots : [];
-    if (!rows.length) { _tasksEmptyState(container, 'No saved spots yet.'); return; }
+    if (!rows.length) { _tasksEmptyState(container, 'No saved spots yet'); return; }
 
     const done  = _tasksGetDone();
     const muted = _tasksGetMuted();
@@ -6422,7 +8306,7 @@ function _tasksRenderSavedTab(container) {
     const visible = _tasksFilter === 'muted' ? all.filter(i => i.isMuted)
                                               : all.filter(i => !i.isMuted);
     if (!visible.length) {
-        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items.' : 'All clear — nothing pending!');
+        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items' : 'All clear. Nothing pending!');
         return;
     }
 
@@ -6440,7 +8324,7 @@ function _tasksRenderSavedTab(container) {
 // ── Itinerary tab ─────────────────────────────────────────────────────────
 function _tasksRenderItinTab(container) {
     const itins = Array.isArray(savedItineraries) ? savedItineraries : [];
-    if (!itins.length) { _tasksEmptyState(container, 'No itineraries yet.'); return; }
+    if (!itins.length) { _tasksEmptyState(container, 'No itineraries yet'); return; }
 
     const today = new Date().toISOString().slice(0, 10);
     const done  = _tasksGetDone();
@@ -6483,7 +8367,7 @@ function _tasksRenderItinTab(container) {
     const visible = _tasksFilter === 'muted' ? all.filter(i => i.isMuted)
                                               : all.filter(i => !i.isMuted);
     if (!visible.length) {
-        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items.' : 'All clear — nothing pending!');
+        _tasksEmptyState(container, _tasksFilter === 'muted' ? 'No muted items' : 'All clear. Nothing pending!');
         return;
     }
 
@@ -6631,7 +8515,7 @@ function tasksOpenTray(rowid) {
     // ── Notes ─────────────────────────────────────────────────────────────
     const notesEl = document.getElementById('tspSpotNotes');
     if (notesEl) {
-        notesEl.innerText = row.notes || 'No custom notes assigned.';
+        notesEl.innerText = row.notes || 'No custom notes assigned';
         notesEl.className = isDone
             ? 'text-xs text-slate-500 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] line-through pr-1 select-none'
             : 'text-xs text-slate-400 leading-relaxed overflow-y-auto subtle-scrollbar max-h-[220px] pr-1 select-none';
@@ -6688,7 +8572,7 @@ function tasksOpenTray(rowid) {
     // ── Back face: long description ───────────────────────────────────────
     const backDesc = document.getElementById('tspBackLongDescription');
     if (backDesc) backDesc.innerText = (row.long_description && row.long_description !== 'N/A')
-        ? row.long_description : 'Disclaimer: Deep background details unpopulated.';
+        ? row.long_description : 'Disclaimer: Detailed background information unavailable.';
 
     // ── Back face: opening hours grid ────────────────────────────────────
     const hoursGrid = document.getElementById('tspBackHoursGrid');
@@ -6855,4 +8739,172 @@ function tasksSpotPanelViewOnMap() {
             revealMapItemDetailTrayHUD(spotRef, starred);
         }
     }, 300);
+}
+
+
+// ================================================================
+//  STARGAZING HEATMAP TOGGLE  (wires index.html UI → map.js engine)
+// ================================================================
+
+let _sgHeatmapOn = false;
+
+function sgToggleHeatmap() {
+    _sgHeatmapOn = !_sgHeatmapOn;
+
+    const btn    = document.getElementById('sgHeatmapToggle');
+    const thumb  = document.getElementById('sgHeatmapThumb');
+    const radRow = document.getElementById('sgHeatmapRadiusRow');
+    const status = document.getElementById('sgHeatmapStatus');
+
+    if (_sgHeatmapOn) {
+        // Style toggle ON
+        if (btn)   { btn.style.background = 'rgba(124,58,237,0.35)'; btn.style.borderColor = 'rgba(139,92,246,0.6)'; }
+        if (thumb) { thumb.style.transform = 'translateX(18px)'; thumb.style.background = '#a78bfa'; thumb.style.boxShadow = '0 0 8px rgba(167,139,250,0.7)'; }
+        if (radRow) radRow.classList.remove('hidden');
+        if (status) { status.classList.remove('hidden'); }
+
+        const km = parseInt(document.getElementById('sgHeatmapRadiusSlider')?.value || '150', 10);
+
+        // Close the weather drawer so the map is visible
+        const drawerEl = document.getElementById('weatherDrawer');
+        if (drawerEl && drawerEl.classList.contains('open')) {
+            toggleWeatherDrawer?.();
+        }
+
+        // Activate overlay via map.js
+        if (typeof sgActivateOverlay === 'function') {
+            sgActivateOverlay(km);
+        }
+
+        // Show legend pill
+        const pill = document.getElementById('sgHeatLegendPill');
+        if (pill) pill.classList.remove('hidden');
+
+        // Auto-enable score labels (% values) by default on every activation
+        _sgLabelsOn = true;
+        const labBtn   = document.getElementById('sgLabelsBtn');
+        const labThumb = document.getElementById('sgLabelsThumb');
+        if (labBtn)   { labBtn.classList.add('bg-emerald-600');   labBtn.classList.remove('bg-slate-700'); }
+        if (labThumb) { labThumb.style.transform = 'translateX(1.25rem)'; }
+        if (typeof sgSetShowLabels === 'function') sgSetShowLabels(true);
+
+        // Hide status indicator after a moment (fetch is async in map.js)
+        setTimeout(() => { if (status) status.classList.add('hidden'); }, 4000);
+
+    } else {
+        // Style toggle OFF
+        if (btn)   { btn.style.background = '#1e1b2e'; btn.style.borderColor = 'rgba(139,92,246,0.25)'; }
+        if (thumb) { thumb.style.transform = 'translateX(0)'; thumb.style.background = '#4c1d95'; thumb.style.boxShadow = '0 0 0 1px rgba(139,92,246,0.4)'; }
+        if (radRow) radRow.classList.add('hidden');
+        if (status) status.classList.add('hidden');
+
+        // Hide legend pill + close drawer if open
+        const pill = document.getElementById('sgHeatLegendPill');
+        if (pill) pill.classList.add('hidden');
+        sgCloseHeatmapControls();
+
+        // Reset labels toggle back to OFF so it defaults ON again next activation
+        _sgLabelsOn = false;
+        const labBtn2   = document.getElementById('sgLabelsBtn');
+        const labThumb2 = document.getElementById('sgLabelsThumb');
+        if (labBtn2)   { labBtn2.classList.remove('bg-emerald-600');  labBtn2.classList.add('bg-slate-700'); }
+        if (labThumb2) { labThumb2.style.transform = 'translateX(0.125rem)'; }
+
+        if (typeof sgDeactivateOverlay === 'function') {
+            sgDeactivateOverlay();
+        }
+    }
+}
+
+function sgOnRadiusInput(val) {
+    const km    = parseInt(val, 10);
+    const label = document.getElementById('sgHeatmapRadiusLabel');
+    if (label) label.textContent = km + ' km';
+
+    if (_sgHeatmapOn && typeof sgUpdateOverlayRadius === 'function') {
+        sgUpdateOverlayRadius(km);
+    }
+}
+
+// ── Heatmap Controls Drawer ───────────────────────────────────────────────
+
+function sgOpenHeatmapControls() {
+    const backdrop = document.getElementById('sgHeatControlsBackdrop');
+    const drawer   = document.getElementById('sgHeatControlsDrawer');
+    if (!drawer) return;
+    backdrop?.classList.remove('hidden');
+    drawer.classList.remove('hidden');
+    // Animate slide-in
+    drawer.style.transition = 'transform 0.22s cubic-bezier(0.4,0,0.2,1)';
+    drawer.style.transform  = 'translateX(-100%)';
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            drawer.style.transform = 'translateX(0)';
+        });
+    });
+}
+
+function sgCloseHeatmapControls() {
+    const backdrop = document.getElementById('sgHeatControlsBackdrop');
+    const drawer   = document.getElementById('sgHeatControlsDrawer');
+    if (!drawer) return;
+    drawer.style.transition = 'transform 0.18s cubic-bezier(0.4,0,0.2,1)';
+    drawer.style.transform  = 'translateX(-100%)';
+    setTimeout(() => {
+        drawer.classList.add('hidden');
+        backdrop?.classList.add('hidden');
+        drawer.style.transform = '';
+    }, 190);
+}
+
+let _sgLayerVisible = true;   // colour blobs visible by default
+
+function sgToggleHeatmapLayerVisibility() {
+    _sgLayerVisible = !_sgLayerVisible;
+    const btn   = document.getElementById('sgLayerVisBtn');
+    const thumb = document.getElementById('sgLayerVisThumb');
+    const pill  = document.getElementById('sgHeatLegendPill');
+    if (_sgLayerVisible) {
+        // ── Layer turned ON ──────────────────────────────────────
+        if (btn)   { btn.classList.add('bg-violet-600'); btn.classList.remove('bg-slate-700'); }
+        if (thumb) { thumb.style.transform = 'translateX(1.25rem)'; }
+        if (typeof sgSetCanvasVisible === 'function') sgSetCanvasVisible(true);
+        if (pill && _sgHeatmapOn) pill.classList.remove('hidden');
+    } else {
+        // ── Layer turned OFF = turn off the whole heatmap ────────
+        // Pre-reset the layer toggle back to ON so it's ready for the next activation
+        _sgLayerVisible = true;
+        if (btn)   { btn.classList.add('bg-violet-600'); btn.classList.remove('bg-slate-700'); }
+        if (thumb) { thumb.style.transform = 'translateX(1.25rem)'; }
+        // Fully shut down: closes drawer, hides pill, deactivates overlay,
+        // resets the stargazing toggle in the weather drawer
+        sgTurnOffHeatmap();
+    }
+}
+
+let _sgLabelsOn = false;
+
+function sgToggleHeatmapScoreLabels() {
+    _sgLabelsOn = !_sgLabelsOn;
+    const btn   = document.getElementById('sgLabelsBtn');
+    const thumb = document.getElementById('sgLabelsThumb');
+    if (_sgLabelsOn) {
+        if (btn)   { btn.classList.add('bg-emerald-600'); btn.classList.remove('bg-slate-700'); }
+        if (thumb) { thumb.style.transform = 'translateX(1.25rem)'; }
+    } else {
+        if (btn)   { btn.classList.remove('bg-emerald-600'); btn.classList.add('bg-slate-700'); }
+        if (thumb) { thumb.style.transform = 'translateX(0.125rem)'; }
+    }
+    // Tell map.js to redraw with/without labels
+    if (typeof sgSetShowLabels === 'function') sgSetShowLabels(_sgLabelsOn);
+}
+
+function sgTurnOffHeatmap() {
+    sgCloseHeatmapControls();
+    // Dismiss spot detail HUD if open
+    if (typeof sgHideSpotDetail === 'function') sgHideSpotDetail();
+    // If heatmap is on, toggle it off
+    if (_sgHeatmapOn) {
+        sgToggleHeatmap();
+    }
 }

@@ -24,7 +24,7 @@ const AI_ASSIST_CONFIG = {
   geminiModel  : 'gemini-2.0-flash',
   geminiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/',
   propKey      : 'GEMINI_API_KEY',
-  modalTitle   : '✦ AI Assist — Add Travel Spot',
+  modalTitle   : '✦ AI Assist: Add Travel Spot',
   modalWidth   : 540,
   modalHeight  : 500,
 };
@@ -629,7 +629,7 @@ function _buildModalHTML() {
   <div class="header-icon">✦</div>
   <div class="header-text">
     <h2>AI Assist Smart Entry</h2>
-    <p>Paste links, notes, or text — Gemini handles the rest</p>
+    <p>Paste links, notes, or text. Gemini handles the rest.</p>
   </div>
 </div>
 
@@ -640,7 +640,7 @@ function _buildModalHTML() {
   <div class="textarea-label">Your travel data</div>
   <textarea
     id="userInput"
-    placeholder="Paste anything here — Instagram links, Google Maps URLs, video links, or just describe a place.
+    placeholder="Paste anything here: Instagram links, Google Maps URLs, video links, or just describe a place.
 
 Examples:
 • https://www.instagram.com/p/abc123
@@ -664,7 +664,7 @@ Examples:
 </button>
 
 <!-- Disclaimer -->
-<p class="disclaimer">Data entry powered by <span>Gemini AI Assistant</span></p>
+<p class="disclaimer">Powered by <span>Gemini AI</span></p>
 
 
 <script>
@@ -675,7 +675,7 @@ Examples:
 
     var input = document.getElementById('userInput').value.trim();
     if (!input) {
-      showStatus('error', '⚠', 'Please paste some travel data before submitting.');
+      showStatus('error', '⚠', 'Please paste some travel data before submitting');
       return;
     }
 
@@ -696,7 +696,7 @@ Examples:
       // Auto-close after 2.8 s on success
       setTimeout(function() { google.script.host.close(); }, 2800);
     } else {
-      var msg = (result && result.message) ? result.message : 'Something went wrong. Please try again.';
+      var msg = (result && result.message) ? result.message : 'An error occurred. Please try again.';
       showStatus('error', '✕', msg);
     }
   }

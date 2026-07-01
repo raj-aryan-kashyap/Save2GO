@@ -439,6 +439,13 @@ function initSmartSearch() {
         _ssActiveIds = new Set();
     }
     _ssChipState = null;
+    // Re-evaluate keyword filters against the current dataset so saved chips
+    // reflect any spots added since the filter was created.
+    _ssFilters.forEach(f => {
+        if (f.source === 'keyword' && f.query) {
+            f.matchedRowIds = _kwRunSearch(f.query);
+        }
+    });
     renderCustomFilterButtons();
 }
 
@@ -1117,22 +1124,22 @@ function _ssSetAiBadge(state, extra) {
             // Transient hint — shows the corrected text briefly before
             // transitioning to 'refining' once Phase 1 chips are rendered.
             dot.className    = 'w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0';
-            text.textContent = extra ? '✎ ' + extra : '✎ Corrected';
+            text.textContent = extra ? extra : 'Corrected';
             text.style.color = 'rgba(56,189,248,0.85)';
             break;
         case 'refining':
             dot.className    = 'w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0 ss-badge-pulse';
-            text.textContent = 'AI is refining…';
+            text.textContent = 'AI is refining...';
             text.style.color = 'rgba(167,139,250,0.85)';
             break;
         case 'refined':
             dot.className    = 'w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0';
-            text.textContent = '✶ AI refined';
+            text.textContent = 'AI refined';
             text.style.color = 'rgba(167,139,250,0.85)';
             break;
         case 'local':
             dot.className    = 'w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0';
-            text.textContent = '✶ Smart local filter';
+            text.textContent = 'Smart local filter';
             text.style.color = 'rgba(251,191,36,0.85)';
             break;
         case 'hidden':
@@ -1288,12 +1295,18 @@ function renderCustomFilterButtons() {
             count = Array.isArray(f.matchedRowIds) ? f.matchedRowIds.length : 0;
         }
 
-        const sourceIconHTML = f.source === 'ai'
-            ? `<i class="fa-solid fa-wand-magic-sparkles text-[8px] shrink-0 ${isActive ? 'text-violet-200' : 'text-violet-400/50'}"></i>`
-            : `<i class="fa-solid fa-sparkles text-[8px] shrink-0 ${isActive ? 'text-sky-200' : 'text-sky-400/50'}"></i>`;
+        let sourceIconHTML;
+        if (f.source === 'ai') {
+            sourceIconHTML = `<i class="fa-solid fa-wand-magic-sparkles text-[8px] shrink-0 ${isActive ? 'text-violet-200' : 'text-violet-400/50'}"></i>`;
+        } else if (f.source === 'keyword') {
+            sourceIconHTML = `<i class="fa-solid fa-magnifying-glass text-[8px] shrink-0 ${isActive ? 'text-pink-200' : 'text-pink-400/50'}"></i>`;
+        } else {
+            sourceIconHTML = `<i class="fa-solid fa-sparkles text-[8px] shrink-0 ${isActive ? 'text-sky-200' : 'text-sky-400/50'}"></i>`;
+        }
 
         const btn = document.createElement('button');
-        btn.className = `custom-filter-btn${isActive ? ' active' : ''}`;
+        const kwClass = f.source === 'keyword' ? ' custom-filter-btn-kw' : '';
+        btn.className = `custom-filter-btn${kwClass}${isActive ? ' active' : ''}`;
         btn.setAttribute('style', '-webkit-tap-highlight-color:transparent;-webkit-appearance:none;appearance:none;');
         btn.setAttribute('aria-pressed', String(isActive));
         btn.setAttribute('aria-label', `Custom filter: ${f.name} — ${count} spot${count !== 1 ? 's' : ''}`);
@@ -1379,4 +1392,168 @@ function _ssEscapeHtml(str) {
         .replace(/>/g,  '&gt;')
         .replace(/"/g,  '&quot;')
         .replace(/'/g,  '&#39;');
+}
+
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   KEYWORD SEARCH ENGINE
+   Instant fuzzy full-field scan — no AI, fully client-side.
+   Creates filter objects with source:'keyword' that slot into
+   the same _ssFilters / _ssActiveIds pipeline as AI filters.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+/** Normalise a string for comparison: lowercase, strip diacritics, collapse punctuation */
+function _kwNorm(str) {
+    return String(str || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')  // strip diacritics (é→e)
+        .replace(/[^\w\s]/g, ' ')                           // punctuation → space
+        .replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Compact Levenshtein edit distance, bails early once max is exceeded.
+ * Uses a single-row rolling array — O(min(a,b)) space.
+ */
+function _kwEditDist(a, b, max) {
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    const m = a.length, n = b.length;
+    let prev = Array.from({length: n + 1}, (_, i) => i);
+    for (let i = 1; i <= m; i++) {
+        const curr = [i];
+        for (let j = 1; j <= n; j++) {
+            curr[j] = a[i - 1] === b[j - 1]
+                ? prev[j - 1]
+                : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+        }
+        prev = curr;
+    }
+    return prev[n];
+}
+
+/**
+ * Run a keyword search across all spot fields.
+ * Multi-word queries apply AND logic: every word must hit at least one field.
+ * Fuzzy tolerance: words ≥4 chars accept 1 edit error within any field word.
+ * @param  {string}   query
+ * @returns {string[]} matched rowIds
+ */
+function _kwRunSearch(query) {
+    if (!query || !query.trim()) return [];
+    const norm  = _kwNorm(query);
+    const words = norm.split(' ').filter(w => w.length >= 2);
+    if (words.length === 0) return [];
+
+    const spots = (typeof travelSpots !== 'undefined') ? travelSpots : [];
+    return spots.filter(spot => {
+        // Concatenate every searchable field into one normalised haystack
+        const haystack = _kwNorm([
+            spot.spot_name, spot.city, spot.category,
+            spot.notes, spot.long_description, spot.opening_hours,
+            spot.status, spot.priority, spot.search_keywords,
+            spot.instagram_url, spot.ticket_url
+        ].join(' '));
+        const hwWords = haystack.split(' ').filter(w => w.length > 0);
+
+        // Every query word must match somewhere in the haystack
+        return words.every(word => {
+            // 1. Exact substring — fast path, covers most real-world searches
+            if (haystack.includes(word)) return true;
+            // 2. Fuzzy — for words ≥4 chars, allow 1 edit error on any haystack word
+            if (word.length >= 4) {
+                return hwWords.some(hw =>
+                    hw.length >= word.length - 1 &&
+                    _kwEditDist(word, hw, 1) <= 1
+                );
+            }
+            return false;
+        });
+    }).map(s => String(s.rowid));
+}
+
+/** Toggle the keyword send button between idle and loading states */
+function _kwBtnState(state) {
+    const btn  = document.getElementById('kwSearchSendBtn');
+    const icon = document.getElementById('kwSearchSendIcon');
+    if (!btn || !icon) return;
+    if (state === 'loading') {
+        btn.disabled      = true;
+        btn.style.opacity = '0.5';
+        icon.className    = 'fa-solid fa-spinner fa-spin text-pink-400 text-[11px]';
+    } else {
+        btn.disabled      = false;
+        btn.style.opacity = '';
+        icon.className    = 'fa-solid fa-magnifying-glass text-pink-400 text-[11px]';
+    }
+}
+
+/**
+ * Called when the user taps the keyword send button.
+ * Runs the fuzzy scan, creates/upserts a filter object with source:'keyword',
+ * activates it, persists to localStorage, and re-renders the list.
+ */
+function submitKeywordSearch() {
+    const input = document.getElementById('kwSearchInput');
+    if (!input) return;
+    const raw = input.value.trim();
+    if (!raw) return;
+
+    _kwBtnState('loading');
+
+    // Defer by one frame so the spinner renders before the synchronous scan
+    setTimeout(() => {
+        const matchedRowIds = _kwRunSearch(raw);
+
+        // Friendly chip label: title-case the query, max 22 chars
+        const chipLabel = raw.split(/\s+/)
+            .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join(' ')
+            .slice(0, 22);
+
+        // Upsert by normalised query so re-submitting the same term refreshes it
+        const normKey  = _kwNorm(raw);
+        const existIdx = _ssFilters.findIndex(
+            f => f.source === 'keyword' && _kwNorm(f.query || '') === normKey
+        );
+        const filterId  = existIdx >= 0 ? _ssFilters[existIdx].id : ('kw_' + Date.now());
+        const filterObj = {
+            id           : filterId,
+            name         : chipLabel,
+            tags         : [],
+            matchedRowIds,
+            query        : raw,
+            source       : 'keyword',
+            createdAt    : existIdx >= 0 ? _ssFilters[existIdx].createdAt : Date.now(),
+            updatedAt    : Date.now(),
+        };
+        if (existIdx >= 0) { _ssFilters[existIdx] = filterObj; }
+        else               { _ssFilters.push(filterObj); }
+
+        _ssActiveIds.add(filterId);
+        _ssPersist();
+
+        input.value = '';
+        _kwBtnState('idle');
+        renderCustomFilterButtons();
+
+        if (typeof renderList                    === 'function') renderList();
+        if (typeof updateHeaderBadgeHUDCounters  === 'function') updateHeaderBadgeHUDCounters();
+        if (typeof plotDynamicMarkersOnCanvasMap === 'function') plotDynamicMarkersOnCanvasMap();
+
+        // Inline zero-match notice
+        if (matchedRowIds.length === 0) {
+            _ssShowNotice(
+                `No spots matched <strong>${_ssEscapeHtml(chipLabel)}</strong>. Try a broader term.`,
+                5000
+            );
+        }
+    }, 20);
+}
+
+/** Enter-key support for the keyword search input */
+function kwHandleKeydown(event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        submitKeywordSearch();
+    }
 }

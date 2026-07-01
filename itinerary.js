@@ -592,7 +592,7 @@ function openEditItineraryModal(itinId) {
     const iconEl   = document.getElementById('itinDrawerTitleIcon');
     const labelEl  = document.getElementById('itinDrawerSubmitLabel');
     const iconBtn  = document.getElementById('itinDrawerSubmitIcon');
-    if (titleEl)  titleEl.textContent = `Rebuild your '${itin.title}'`;
+    if (titleEl)  titleEl.textContent = `Edit your '${itin.title}'`;
     if (iconEl)   iconEl.className    = 'fa-solid fa-wand-magic-sparkles';
     if (labelEl)  labelEl.textContent = 'Rebuild';
     if (iconBtn)  iconBtn.className   = 'fa-solid fa-wand-magic-sparkles mr-1.5';
@@ -830,7 +830,7 @@ function openCustomTimePicker(target) {
 
     // Update modal title
     const titleEl = document.getElementById('customTimePickerTitle');
-    if (titleEl) titleEl.textContent = target === 'start' ? 'Day Start Time' : 'Day End Time';
+    if (titleEl) titleEl.textContent = target === 'start' ? 'Day Start Time' : 'End Time';
 
     // ── Show the modal BEFORE building drums ─────────────────────────────────
     // scrollTop assignments on display:none elements are discarded by browsers.
@@ -1094,7 +1094,7 @@ function _buildDayFilterList(itin) {
         if (isEmpty) {
             btn.onclick = (e) => {
                 if (typeof triggerCuteSpeechBubbleHUD === 'function') {
-                    triggerCuteSpeechBubbleHUD('No spots scheduled for this day.', btn, e);
+                    triggerCuteSpeechBubbleHUD('No spots scheduled for this day', btn, e);
                 }
             };
         } else {
@@ -1229,7 +1229,7 @@ function openItineraryAutoSequenceWizard() {
         selector.onchange = function() { finalGeneratedSequenceRowIds[slotIndex] = this.value ? parseInt(this.value) : null; };
         
         const defaultOpt = document.createElement('option');
-        defaultOpt.value = ""; defaultOpt.innerText = "-- Select Match Candidate --";
+        defaultOpt.value = ""; defaultOpt.innerText = "Select Option";
         selector.appendChild(defaultOpt);
 
         const lowerBlueprint = categoryLabel.toLowerCase();
@@ -1831,7 +1831,7 @@ function renderItineraryMasterDashboardWorkspace() {
                     `<button onclick="retryItinerarySync()" ` +
                     `class="text-[11px] text-pink-400 font-semibold flex items-center gap-1.5 mx-auto active:opacity-70" ` +
                     `style="-webkit-tap-highlight-color:transparent;">` +
-                    `<i class="fa-solid fa-rotate-right text-[9px]"></i> Couldn't load — tap to retry` +
+                    `<i class="fa-solid fa-rotate-right text-[9px]"></i> Failed to load. Tap to retry` +
                     `</button>`;
             }
         } else {
@@ -2875,8 +2875,8 @@ function renderDetailViewTimeline() {
             const emptyDiv = document.createElement('div');
             emptyDiv.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:80px 16px;text-align:center;';
             const emptyMsg = activeDay.isSuggested
-                ? 'No activities could be placed on this suggested day — venue hours or durations may not fit.'
-                : 'No activities scheduled for this day.';
+                ? 'No activities fit this suggested day. Venue hours or durations may conflict.'
+                : 'No activities scheduled for this day';
             emptyDiv.innerHTML = `
             <div style="font-size:2.5rem;opacity:0.2;color:rgb(148 163 184);">
                 <i class="fa-solid fa-mug-hot"></i>
@@ -3714,7 +3714,7 @@ function executeRecalculateEngine() {
             // Nothing was moved — discard the snapshot; no undo state created.
             itin._preRecalcSnapshot = null;
             showRecalcResultBubble(
-                ["No pending activities found in past days."],
+                ["No pending activities found in past days"],
                 "Nothing to Reschedule",
                 "fa-circle-info"
             );
@@ -4016,16 +4016,16 @@ function executeRecalculateEngine() {
         _updateBurgerMenuUndoBtn();
         const msgs        = [];
         if (placed > 0) {
-            msgs.push(`${placed} activit${placed !== 1 ? 'ies' : 'y'} redistributed into upcoming days.`);
+            msgs.push(`${placed} activit${placed !== 1 ? 'ies' : 'y'} moved to upcoming days.`);
         }
         if (suggestedCount > 0) {
-            msgs.push(`${suggestedCount} extra day${suggestedCount !== 1 ? 's' : ''} suggested — tap the banner to extend your trip.`);
+            msgs.push(`${suggestedCount} extra day${suggestedCount !== 1 ? 's' : ''} suggested. Tap the banner to extend your trip.`);
         }
         if (totalRemain > 0) {
             msgs.push(`${totalRemain} activit${totalRemain !== 1 ? 'ies' : 'y'} couldn't fit even with suggested days.`);
         }
         if (isPastNoon) {
-            msgs.push("Morning-only spots (cafés, museums) deferred — recalculated against remaining hours.");
+            msgs.push("Morning-only spots (cafés, museums) deferred. Recalculated against remaining hours.");
         }
         if (msgs.length === 0) msgs.push("All activities already optimally placed!");
 
@@ -4043,7 +4043,7 @@ function undoRecalculate() {
     const itin = getActiveItinerary();
     if (!itin || !itin._recalcBaseSnapshot) {
         showRecalcResultBubble(
-            ["Nothing to undo — the itinerary is already in its pre-recalculation state."],
+            ["Nothing to undo. The itinerary is already in its original state."],
             "Nothing to Undo",
             "fa-circle-info"
         );
@@ -4074,7 +4074,7 @@ function undoRecalculate() {
     renderDetailViewTimeline();
     _updateBurgerMenuUndoBtn();
     showRecalcResultBubble(
-        ["Recalculation undone. Previous schedule restored."],
+        ["Recalculation undone. Old schedule restored."],
         "Undo Successful",
         "fa-arrow-rotate-left"
     );
@@ -4129,7 +4129,7 @@ function deferActivityToLastDay(dayIndex, spotIndex) {
     closeSpotContextMenu();
     renderDetailViewTimeline();
     if (typeof showFormErrorSpeechBubble === 'function') {
-        showFormErrorSpeechBubble([`Deferred to Day ${itin.days.indexOf(lastDay) + 1} — will re-sort on next Recalculate.`]);
+        showFormErrorSpeechBubble([`Deferred to Day ${itin.days.indexOf(lastDay) + 1}. Will re-sort on next recalculate.`]);
     }
 }
 

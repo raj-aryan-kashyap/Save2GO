@@ -10,7 +10,7 @@
 //  • Static assets from CDNs       → Cache-first (Leaflet, FA, Tailwind)
 // ================================================================
 
-const CACHE_VERSION  = 'save2go-v5-r8';
+const CACHE_VERSION  = 'save2go-v5-r15';
 const SHELL_CACHE    = CACHE_VERSION + '-shell';
 const CDN_CACHE      = CACHE_VERSION + '-cdn';
 
@@ -40,7 +40,9 @@ const NETWORK_ONLY_HOSTS = [
     'openweathermap.org',
     'api.open-meteo.com',                 // Open-Meteo weather forecast
     'air-quality-api.open-meteo.com',     // Open-Meteo air quality
-    'nominatim.openstreetmap.org',        // geocoding
+    'geocoding-api.open-meteo.com',       // Open-Meteo geocoding (planner search)
+    'nominatim.openstreetmap.org',        // reverse-geocoding (coords → city name)
+    '7timer.info',                        // 7Timer! ASTRO seeing/transparency calibration
     'latest.currency-api.pages.dev',      // FX rates — primary   (fawazahmed0, daily)
     'cdn.jsdelivr.net',                   // FX rates — CDN fallback (fawazahmed0, daily)
 ];
@@ -105,7 +107,8 @@ self.addEventListener('fetch', event => {
     // ── Rule 3: CDN assets (Leaflet, FontAwesome, Tailwind) → cache-first ─────
     if (url.hostname === 'cdn.tailwindcss.com'
      || url.hostname === 'unpkg.com'
-     || url.hostname === 'cdnjs.cloudflare.com') {
+     || url.hostname === 'cdnjs.cloudflare.com'
+     || url.hostname === 'djlorenz.github.io') {     // LP tile layer
         event.respondWith(
             caches.open(CDN_CACHE).then(cache =>
                 cache.match(req).then(cached => {
