@@ -6717,6 +6717,165 @@ function toggleSettingsMenu(show) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  ROUTE PLANNER — settings panel wiring
+//  All rendering logic lives in map.js (sgActivateRoute / sgClearRoute).
+//  This section owns only the settings UI state and user input parsing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _rteInputTab = 'link';  // 'link' | 'coords'
+let _rteMode     = 'car';   // 'car'  | 'foot' — default is Car
+
+/** Switch between Google Maps Link input and manual Coordinates input. */
+function rteSetInputTab(tab) {
+    _rteInputTab = tab;
+    const linkWrap   = document.getElementById('rteLinkInputWrap');
+    const coordsWrap = document.getElementById('rteCoordsInputWrap');
+    const linkBtn    = document.getElementById('rteLinkTabBtn');
+    const coordsBtn  = document.getElementById('rteCoordsTabBtn');
+    const isLink     = tab === 'link';
+
+    linkWrap?.classList.toggle('hidden', !isLink);
+    coordsWrap?.classList.toggle('hidden', isLink);
+
+    // Active tab = blue-600/80 + white text; inactive = slate-900 + slate-400
+    linkBtn?.classList.toggle('bg-blue-600/80', isLink);
+    linkBtn?.classList.toggle('text-white',      isLink);
+    linkBtn?.classList.toggle('bg-slate-900',    !isLink);
+    linkBtn?.classList.toggle('text-slate-400',  !isLink);
+    coordsBtn?.classList.toggle('bg-blue-600/80', !isLink);
+    coordsBtn?.classList.toggle('text-white',      !isLink);
+    coordsBtn?.classList.toggle('bg-slate-900',    isLink);
+    coordsBtn?.classList.toggle('text-slate-400',  isLink);
+
+    rteOnInputChange();
+}
+
+/** Toggle Car / On Foot travel mode. */
+function rteSelectMode(mode) {
+    _rteMode = mode;
+    const carBtn  = document.getElementById('rteModeCarBtn');
+    const footBtn = document.getElementById('rteModeFootBtn');
+
+    const applyActive = (el, active) => {
+        if (!el) return;
+        el.classList.toggle('bg-blue-600',      active);
+        el.classList.toggle('text-white',        active);
+        el.classList.toggle('border-blue-500/50', active);
+        el.classList.toggle('bg-slate-900',      !active);
+        el.classList.toggle('text-slate-400',    !active);
+        el.classList.toggle('border-slate-700',  !active);
+    };
+    applyActive(carBtn,  mode === 'car');
+    applyActive(footBtn, mode === 'foot');
+}
+
+/** Enable/disable the Show Route button based on whether input is present. */
+function rteOnInputChange() {
+    const showBtn = document.getElementById('rteShowBtn');
+    if (!showBtn) return;
+
+    let hasInput = false;
+    if (_rteInputTab === 'link') {
+        hasInput = (document.getElementById('rteLinkInput')?.value?.trim().length || 0) > 10;
+    } else {
+        const s = (document.getElementById('rteStartInput')?.value?.trim().length || 0);
+        const e = (document.getElementById('rteEndInput')?.value?.trim().length   || 0);
+        hasInput = s > 2 && e > 2;
+    }
+
+    showBtn.disabled = !hasInput;
+    // Enabled = bright blue; disabled = dim blue/grey
+    showBtn.classList.toggle('bg-blue-600/80',   hasInput);
+    showBtn.classList.toggle('text-white',         hasInput);
+    showBtn.classList.toggle('border-blue-500/40', hasInput);
+    showBtn.classList.toggle('bg-blue-600/30',    !hasInput);
+    showBtn.classList.toggle('text-slate-500',    !hasInput);
+    showBtn.classList.toggle('border-blue-500/20', !hasInput);
+}
+
+/** Clear all Route Planner input fields and reset status. */
+function rteClearInputs() {
+    const linkEl   = document.getElementById('rteLinkInput');
+    const startEl  = document.getElementById('rteStartInput');
+    const endEl    = document.getElementById('rteEndInput');
+    const statusEl = document.getElementById('rteStatus');
+    if (linkEl)   linkEl.value  = '';
+    if (startEl)  startEl.value = '';
+    if (endEl)    endEl.value   = '';
+    if (statusEl) { statusEl.textContent = ''; statusEl.classList.add('hidden'); }
+    rteOnInputChange();  // disables Show Route button since inputs are now empty
+}
+
+/**
+ * Called by the "Show Route" button.
+ * Parses the user's input, resolves coordinates, then delegates to
+ * sgActivateRoute() in map.js which calls OSRM and draws the polylines.
+ */
+async function rteShowRoute() {
+    const showBtn  = document.getElementById('rteShowBtn');
+    const statusEl = document.getElementById('rteStatus');
+
+    const setStatus = (msg, cls = 'text-slate-400') => {
+        if (!statusEl) return;
+        statusEl.className = `text-[9px] text-center leading-relaxed ${cls}`;
+        statusEl.textContent = msg;
+        statusEl.classList.toggle('hidden', !msg);
+    };
+
+    setStatus('Finding route…', 'text-blue-400');
+    if (showBtn) showBtn.disabled = true;
+
+    let start = null;
+    let end   = null;
+
+    try {
+        if (_rteInputTab === 'link') {
+            const raw = document.getElementById('rteLinkInput')?.value?.trim() || '';
+            if (!raw) throw new Error('Paste a Google Maps link first');
+
+            // Shortened links can't be parsed client-side
+            if (raw.includes('goo.gl') || raw.includes('maps.app')) {
+                throw new Error('Please use the full Maps link, not a short URL');
+            }
+
+            setStatus('Parsing link…', 'text-blue-400');
+            const parsed = await _rteParseGoogleMapsUrl(raw);
+            if (!parsed) {
+                throw new Error('Couldn\'t read coordinates from that link — try the Coordinates tab');
+            }
+            start = parsed.start;
+            end   = parsed.end;
+
+        } else {
+            const sv = document.getElementById('rteStartInput')?.value?.trim() || '';
+            const ev = document.getElementById('rteEndInput')?.value?.trim()   || '';
+            start = _rteParseLatLon(sv);
+            end   = _rteParseLatLon(ev);
+            if (!start) throw new Error('Invalid start — use "lat, lon" format');
+            if (!end)   throw new Error('Invalid end — use "lat, lon" format');
+        }
+
+        setStatus('Fetching routes…', 'text-blue-400');
+        const result = await sgActivateRoute({ start, end, mode: _rteMode });
+
+        if (result.ok) {
+            const modeLabel = _rteMode === 'foot' ? 'walking' : 'driving';
+            const altNote   = result.routeCount > 1
+                ? ` · ${result.routeCount - 1} alt route${result.routeCount > 2 ? 's' : ''} shown`
+                : '';
+            setStatus(`Route drawn (${modeLabel})${altNote}`, 'text-emerald-400');
+        } else {
+            throw new Error(result.reason || 'No route found');
+        }
+
+    } catch (err) {
+        setStatus(err.message || 'Routing failed', 'text-red-400');
+        if (showBtn) showBtn.disabled = false;
+        rteOnInputChange();  // re-evaluate enabled state
+    }
+}
+
 /** Open/close the profile drawer (greeting capsule → person icon tap). */
 function toggleProfileDrawer(show) {
     const drawer = document.getElementById('profileDrawer');

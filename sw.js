@@ -10,7 +10,7 @@
 //  • Static assets from CDNs       → Cache-first (Leaflet, FA, Tailwind)
 // ================================================================
 
-const CACHE_VERSION  = 'save2go-v5-r15';
+const CACHE_VERSION  = 'save2go-v5-r16';
 const SHELL_CACHE    = CACHE_VERSION + '-shell';
 const CDN_CACHE      = CACHE_VERSION + '-cdn';
 
@@ -41,7 +41,8 @@ const NETWORK_ONLY_HOSTS = [
     'api.open-meteo.com',                 // Open-Meteo weather forecast
     'air-quality-api.open-meteo.com',     // Open-Meteo air quality
     'geocoding-api.open-meteo.com',       // Open-Meteo geocoding (planner search)
-    'nominatim.openstreetmap.org',        // reverse-geocoding (coords → city name)
+    'nominatim.openstreetmap.org',        // reverse-geocoding + route place-name geocoding
+    'router.project-osrm.org',           // OSRM routing (Route Planner feature)
     '7timer.info',                        // 7Timer! ASTRO seeing/transparency calibration
     'latest.currency-api.pages.dev',      // FX rates — primary   (fawazahmed0, daily)
     'cdn.jsdelivr.net',                   // FX rates — CDN fallback (fawazahmed0, daily)

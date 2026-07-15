@@ -416,6 +416,10 @@ function initLeafletMapEngineCanvas() {
     // Width sync runs slightly after so the style button has fully rendered
     setTimeout(() => { _syncWeatherWidgetWidth(); refreshMapWeatherWidget(); }, 600);
 
+    // Restore any route that was active before the last page refresh.
+    // Uses a short delay so Leaflet panes and layers are fully initialized.
+    setTimeout(_rteRestoreFromStorage, 900);
+
     // ── Calibration canvas dismiss ────────────────────────────────────────────
     // Waits for the tile layer's load event (all current-viewport tiles ready),
     // then holds a 350 ms settle buffer so the user sees a fully-rendered map
@@ -3328,4 +3332,412 @@ function _sgKmToPixels(map, lat, lon, km) {
         );
         return Math.max(20, Math.abs(p2.y - p1.y));
     } catch (_) { return 80; }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ROUTE PLANNER — OSRM  (Open Source Routing Machine)
+//
+//  Uses the FREE public OSRM demo server: router.project-osrm.org
+//  • No API key required
+//  • Powered by OpenStreetMap data
+//  • Supports driving and foot (walking) profiles
+//  • Returns up to 3 alternative routes with full GeoJSON geometry
+//
+//  Public entry points (called from aap.js settings wiring):
+//    sgActivateRoute({ start:[lat,lon], end:[lat,lon], mode:'car'|'foot' })
+//    sgClearRoute()
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _rteLayers = [];    // L.polyline instances currently on the map
+let _rteAbort  = null;  // AbortController for the in-flight OSRM request
+
+// ── Coordinate helpers ────────────────────────────────────────────────────
+
+/**
+ * Parse a "lat, lon" string → [lat, lon] number array, or null on failure.
+ * Accepts both comma and whitespace as separator.
+ */
+/**
+ * Parse a coordinate string → [lat, lon] or null.
+ *
+ * Accepts two formats:
+ *  • Decimal:  "41.4863, 2.0351"
+ *  • DMS:      "41°29'10.7"N 2°02'06.5"E"
+ *              (degree/minute/second symbols + N/S/E/W hemisphere letter)
+ */
+function _rteParseLatLon(str) {
+    if (!str) return null;
+    const s = String(str).trim();
+
+    // ── Format A: decimal "lat, lon" ──────────────────────────────────
+    const decM = s.match(/^([-\d.]+)\s*[,\s]\s*([-\d.]+)$/);
+    if (decM) {
+        const lat = parseFloat(decM[1]);
+        const lon = parseFloat(decM[2]);
+        if (!isNaN(lat) && !isNaN(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180)
+            return [lat, lon];
+    }
+
+    // ── Format B: DMS "41°29'10.7"N 2°02'06.5"E" ─────────────────────
+    // Handles degree (°º), minute (' ′), second (" ″ or omitted), N/S/E/W
+    const dmsRx = /(\d+)\s*[°º]\s*(\d+)\s*['′']\s*(\d+(?:\.\d+)?)\s*["″]?\s*([NSEWnsew])/g;
+    const parts = [...s.matchAll(dmsRx)];
+    if (parts.length >= 2) {
+        const toDecimal = (d, m, sec, dir) => {
+            const v = +d + +m / 60 + +sec / 3600;
+            return (dir.toUpperCase() === 'S' || dir.toUpperCase() === 'W') ? -v : v;
+        };
+        let lat = null, lon = null;
+        for (const p of parts) {
+            const dir = p[4].toUpperCase();
+            const val = toDecimal(p[1], p[2], p[3], dir);
+            if (dir === 'N' || dir === 'S') lat = val;
+            else lon = val;
+        }
+        if (lat !== null && lon !== null && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180)
+            return [lat, lon];
+    }
+
+    return null;
+}
+
+/**
+ * Try to extract start/end coords from a Google Maps direction URL.
+ * Returns { start:[lat,lon], end:[lat,lon] } or null.
+ *
+ * Priority for resolving place-name waypoints:
+ *  1. Coords already in the path segment (numeric)
+ *  2. Coords encoded in Google's data blob (!1d{lon}!2d{lat} pairs)  ← new
+ *  3. Nominatim geocoding as last-resort fallback
+ *
+ * Formats handled:
+ *  A. /maps/dir/lat,lon/lat,lon/         → numeric coords in path
+ *  B. /maps/dir/Place+Name/Other/        → resolved via blob then Nominatim
+ *  C. ?saddr=lat,lon&daddr=lat,lon       → legacy query-param format
+ */
+async function _rteParseGoogleMapsUrl(url) {
+    let parsed;
+    try { parsed = new URL(url.trim()); } catch (_) { return null; }
+
+    const path   = parsed.pathname;
+    const params = parsed.searchParams;
+
+    // ── Format C: legacy ?saddr / ?daddr ──────────────────────────────
+    if (params.get('saddr') && params.get('daddr')) {
+        const s = _rteParseLatLon(params.get('saddr'));
+        const e = _rteParseLatLon(params.get('daddr'));
+        if (s && e) return { start: s, end: e };
+    }
+
+    // ── Formats A & B: /maps/dir/{A}/{B}/... ──────────────────────────
+    const dirMatch = path.match(/\/maps\/dir\/([^/]+)\/([^/]+)/);
+    if (dirMatch) {
+        const decode = raw => decodeURIComponent(raw.replace(/\+/g, ' ')).trim();
+        const a = decode(dirMatch[1]);
+        const b = decode(dirMatch[2]);
+
+        const coordA = _rteParseLatLon(a);
+        const coordB = _rteParseLatLon(b);
+
+        // Both already numeric — done immediately, no network needed
+        if (coordA && coordB) return { start: coordA, end: coordB };
+
+        // Extract encoded waypoint coords from Google's embedded data blob.
+        // Google stores !1d{lon}!2d{lat} in the data path segment for every
+        // geocoded waypoint, in the same order as the /dir/ path segments.
+        const blobCoords = [...path.matchAll(/!1d([-\d.]+)!2d([-\d.]+)/g)]
+            .map(m => [parseFloat(m[2]), parseFloat(m[1])]);  // → [lat, lon]
+
+        let blobIdx = 0;
+        const fromBlob = coord => coord || (blobCoords[blobIdx++] ?? null);
+
+        const resolvedA = fromBlob(coordA);
+        const resolvedB = fromBlob(coordB);
+
+        // Got both from blob (or original coords) — no Nominatim call needed
+        if (resolvedA && resolvedB) return { start: resolvedA, end: resolvedB };
+
+        // Last resort: Nominatim geocoding for any still-missing place name
+        const geocodePlace = async name => {
+            try {
+                const r = await fetch(
+                    `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name)}&format=json&limit=1`,
+                    { headers: { 'Accept-Language': 'en' } }
+                );
+                const j = await r.json();
+                if (!j.length) return null;
+                return [parseFloat(j[0].lat), parseFloat(j[0].lon)];
+            } catch (_) { return null; }
+        };
+
+        const [finalA, finalB] = await Promise.all([
+            resolvedA || geocodePlace(a),
+            resolvedB || geocodePlace(b),
+        ]);
+        if (finalA && finalB) return { start: finalA, end: finalB };
+    }
+
+    return null;
+}
+
+// ── Formatting helpers ────────────────────────────────────────────────────
+
+/** Format metres → "1.2 km" or "800 m". */
+function _rteFormatDistance(m) {
+    return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m';
+}
+
+/** Format seconds → "12 min" or "1 h 5 min". */
+function _rteFormatDuration(s) {
+    const h   = Math.floor(s / 3600);
+    const min = Math.round((s % 3600) / 60);
+    return h > 0 ? `${h} h ${min} min` : `${min} min`;
+}
+
+// ── OSRM fetch ────────────────────────────────────────────────────────────
+
+/**
+ * Fetch up to 3 routes from the OSRM public demo server.
+ * @param {[number,number]} startLL  [lat, lon]
+ * @param {[number,number]} endLL    [lat, lon]
+ * @param {'driving'|'foot'} profile
+ * @param {AbortSignal} signal
+ * @returns {Array<{geometry, distance, duration}>}  GeoJSON geometry + stats
+ */
+async function _rteFetchOSRM(startLL, endLL, profile, signal) {
+    // OSRM uses lon,lat order (NOT lat,lon)!
+    const coords = `${startLL[1]},${startLL[0]};${endLL[1]},${endLL[0]}`;
+    // alternatives=3 is the safe maximum the public OSRM demo server accepts.
+    // Requesting higher values (4, 5…) causes HTTP 400 Bad Request.
+    const url = `https://router.project-osrm.org/route/v1/${profile}/${coords}`
+              + `?alternatives=3&overview=full&geometries=geojson`;
+
+    const resp = await fetch(url, { signal });
+    if (!resp.ok) {
+        // Try to include the server's own error message for easier debugging
+        let detail = '';
+        try {
+            const errBody = await resp.clone().json();
+            detail = errBody.message || errBody.code || '';
+        } catch (_) {}
+        throw new Error(`OSRM error ${resp.status}${detail ? ': ' + detail : ''}`);
+    }
+
+    const data = await resp.json();
+    if (data.code !== 'Ok' || !data.routes?.length) {
+        throw new Error(data.message || 'No route found between those points');
+    }
+
+    return data.routes.map(r => ({
+        geometry: r.geometry,   // GeoJSON LineString {type, coordinates}
+        distance: r.distance,   // metres
+        duration: r.duration,   // seconds
+    }));
+}
+
+// ── Map drawing ───────────────────────────────────────────────────────────
+
+// Pink app-theme colour per travel mode (all routes use the same colour)
+const _RTE_COLORS = {
+    car:  '#ec4899',   // pink-500
+    foot: '#f472b6',   // pink-400
+};
+
+/**
+ * Draw route polylines on the Leaflet map.
+ * Uses a dedicated 'routePane' at z-350 so routes sit BELOW Leaflet's
+ * overlayPane (z-400) and markerPane (z-600) — keeping all map pins visible.
+ * All routes (best + alternatives) use identical styling.
+ */
+function _rteDraw(routes, mode) {
+    if (!leafletMapInstance) return;
+    _rteClearLayers();
+
+    // Create a dedicated pane below overlayPane (z-400) so routes never
+    // cover markers, canvas overlays, or any other map elements
+    if (!leafletMapInstance.getPane('routePane')) {
+        const pane = leafletMapInstance.createPane('routePane');
+        pane.style.zIndex      = '350';
+        pane.style.pointerEvents = 'none';
+    }
+
+    const color = _RTE_COLORS[mode] || _RTE_COLORS.car;
+
+    routes.forEach((route) => {
+        // OSRM GeoJSON coords are [lon, lat]; Leaflet wants [lat, lon]
+        const latlngs = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+
+        // Dark outline behind every route for contrast against light map tiles
+        const shadow = L.polyline(latlngs, {
+            color: '#1e1b2e', weight: 10, opacity: 0.32,
+            lineJoin: 'round', lineCap: 'round',
+            interactive: false, pane: 'routePane',
+        }).addTo(leafletMapInstance);
+        _rteLayers.push(shadow);
+
+        const line = L.polyline(latlngs, {
+            color,
+            weight:  6,
+            opacity: 0.90,
+            lineJoin:  'round',
+            lineCap:   'round',
+            interactive: false,
+            pane: 'routePane',
+        }).addTo(leafletMapInstance);
+        _rteLayers.push(line);
+    });
+
+    // Fit the viewport to the full extent of all drawn routes
+    if (_rteLayers.length) {
+        try {
+            // Every route pushes [shadow, line] — only the coloured lines carry meaningful bounds.
+            // Shadow lines are always at even indices (0, 2, 4…); coloured at odd (1, 3, 5…).
+            const colourLines = _rteLayers.filter((_, i) => i % 2 === 1);
+            const allBounds   = colourLines.map(l => l.getBounds());
+            const combined    = allBounds.reduce((acc, b) => acc.extend(b), allBounds[0]);
+            leafletMapInstance.fitBounds(combined, { padding: [56, 56] });
+        } catch (_) {}
+    }
+}
+
+/** Remove every route polyline from the map and clear the array. */
+function _rteClearLayers() {
+    if (!leafletMapInstance) return;
+    _rteLayers.forEach(l => { try { leafletMapInstance.removeLayer(l); } catch (_) {} });
+    _rteLayers = [];
+}
+
+// ── Public API ────────────────────────────────────────────────────────────
+
+/**
+ * Fetch routes from OSRM and render them on the map.
+ * Called by aap.js rteShowRoute() after parsing the user's input.
+ *
+ * @param {{ start:[lat,lon], end:[lat,lon], mode:'car'|'foot' }} opts
+ * @returns {{ ok:boolean, routeCount?:number, reason?:string }}
+ */
+async function sgActivateRoute(opts) {
+    const { start, end, mode = 'car' } = opts;
+    const profile = (mode === 'foot') ? 'foot' : 'driving';
+
+    // Cancel any previous in-flight request
+    if (_rteAbort) { _rteAbort.abort(); }
+    _rteAbort = new AbortController();
+
+    _rteClearLayers();
+    _rteSetHUD(false);
+
+    try {
+        const routes = await _rteFetchOSRM(start, end, profile, _rteAbort.signal);
+        _rteDraw(routes, mode);
+
+        const best = routes[0];
+        _rteSetHUD(true, {
+            distance: _rteFormatDistance(best.distance),
+            duration: _rteFormatDuration(best.duration),
+            altCount: routes.length - 1,
+        });
+
+        _rteToggleSettingsClearBtn(true);
+
+        // Persist the active route so a normal page refresh restores it.
+        // A hard refresh or explicit localStorage clear simply starts fresh.
+        try {
+            localStorage.setItem('save2go_rte_v1', JSON.stringify({
+                start, end, mode,
+                routes,
+                savedAt: Date.now(),
+            }));
+        } catch (_) { /* quota exceeded or private-browsing — silently skip */ }
+
+        return { ok: true, routeCount: routes.length };
+
+    } catch (err) {
+        if (err.name === 'AbortError') return { ok: false, reason: 'cancelled' };
+        console.warn('[Route] OSRM error:', err.message);
+        return { ok: false, reason: err.message };
+    }
+}
+
+/**
+ * Remove all route layers from the map and hide the route HUD.
+ * Safe to call when no route is active.
+ */
+function sgClearRoute() {
+    if (_rteAbort) { _rteAbort.abort(); _rteAbort = null; }
+    _rteClearLayers();
+    _rteSetHUD(false);
+    _rteToggleSettingsClearBtn(false);
+    // Remove the persisted route so it does not restore on next page load
+    try { localStorage.removeItem('save2go_rte_v1'); } catch (_) {}
+}
+
+// ── Route persistence ─────────────────────────────────────────────────────
+
+/**
+ * On page load, check localStorage for a previously saved route and re-draw it.
+ * The geometry is stored in full, so no network round-trip is needed.
+ * Called once from initMap() after the Leaflet instance is ready.
+ */
+function _rteRestoreFromStorage() {
+    try {
+        const raw = localStorage.getItem('save2go_rte_v1');
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (!data || !Array.isArray(data.routes) || !data.routes.length) return;
+
+        // Re-draw the geometry immediately (no network call required)
+        _rteDraw(data.routes, data.mode || 'car');
+
+        const best = data.routes[0];
+        _rteSetHUD(true, {
+            distance: _rteFormatDistance(best.distance),
+            duration: _rteFormatDuration(best.duration),
+            altCount: data.routes.length - 1,
+        });
+        _rteToggleSettingsClearBtn(true);
+        console.log('[Route] Restored from localStorage —', data.routes.length, 'route(s)');
+    } catch (err) {
+        // Corrupt or incompatible data — silently discard
+        console.warn('[Route] Could not restore saved route:', err.message);
+        try { localStorage.removeItem('save2go_rte_v1'); } catch (_) {}
+    }
+}
+
+// ── HUD helpers ───────────────────────────────────────────────────────────
+
+/** Show or hide the floating route info pill (top-left of the map). */
+function _rteSetHUD(visible, info) {
+    const hud = document.getElementById('rteInfoHUD');
+    if (!hud) return;
+    if (!visible) { hud.classList.add('hidden'); return; }
+
+    const distEl = document.getElementById('rteHudDistance');
+    const durEl  = document.getElementById('rteHudDuration');
+    const altBdg = document.getElementById('rteHudAltBadge');
+    const altCnt = document.getElementById('rteHudAltCount');
+
+    if (distEl) distEl.textContent = info.distance || '--';
+    if (durEl)  durEl.textContent  = info.duration  || '--';
+    if (altBdg && altCnt) {
+        const hasAlt = (info.altCount || 0) > 0;
+        altBdg.classList.toggle('hidden', !hasAlt);
+        if (hasAlt) altCnt.textContent = `+${info.altCount} alt`;
+    }
+    hud.classList.remove('hidden');
+}
+
+/**
+ * Toggle "Clear Route" / "Show Route" button visibility in the settings drawer.
+ * show=true  → route is active   → hide Show Route, reveal Clear Route
+ * show=false → no active route   → reveal Show Route, hide Clear Route
+ */
+function _rteToggleSettingsClearBtn(show) {
+    const clearBtn = document.getElementById('rteClearBtnSettings');
+    const showBtn  = document.getElementById('rteShowBtn');
+    if (clearBtn) clearBtn.classList.toggle('hidden', !show);
+    if (showBtn)  showBtn.classList.toggle('hidden',   show);
+    // Re-evaluate whether Show Route should be enabled (input might still be populated)
+    if (!show && typeof rteOnInputChange === 'function') rteOnInputChange();
 }
